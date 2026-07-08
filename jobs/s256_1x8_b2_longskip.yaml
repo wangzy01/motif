@@ -1,0 +1,31 @@
+# stage1a@256 正式训练 — 消融2 = B2 生成侧 long skip（A_full 对称全连）。消融指南 §4.3 优先级②。
+# LongSkipFusion gate zero-init → step0 与 baseline 逐位等价；A_full = 对称全连(~14条)。额外参数极小（仅 gate+融合线性）。
+# 与 baseline 同：1×8 / global 512 / LR 1e-4 / 400k 步 / EMA。仅多开 long_skip 开关。独立 checkpoint_dir。
+# 提交: jcc job submit jobs/s256_1x8_b2_longskip.yaml
+name: evan-mot-s256-b2-longskip
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 8
+cpuPerWorker: 48
+memGBPerWorker: 900
+maxRetries: 50
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=6 PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  RUN_ID=s256_1x8_b2longskip_20260618
+  CK=/fsx/evan/checkpoints/mot_pilot_v1/$RUN_ID
+  RES=/fsx/evan/mot_code/mot_pilot_v1/experiments/results/$RUN_ID
+  STATS=/fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json
+  mkdir -p "$CK" "$RES"
+  { echo "===== B2 long skip(A_full) 1x8 @256 $(date -u) ====="; hostname; nvidia-smi -L; df -h /fsx/evan | tail -1; } 2>&1 | tee "$RES/probe.log"
+  DOTS="trainer.checkpoint_dir=$CK trainer.resume=true dataset.stats_cache=$STATS dataset.anime_cache_dir=/local/evan/anime_img_cache model.long_skip.enabled=true model.long_skip.mode=A_full"
+  $PY -m torch.distributed.run --nproc_per_node=8 --master_port=29623 \
+      train.py --config configs/stage1a_t2i_256.yaml --max-steps 400000 \
+      $DOTS 2>&1 | tee "$RES/train.log"
+  RC=${PIPESTATUS[0]}; echo "===== B2 exited rc=$RC $(date -u) ====="; exit $RC   # 传播真实退出码 → 崩溃时 maxRetries 自动 resume

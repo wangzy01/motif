@@ -1,0 +1,52 @@
+# DRY-RUN: validate the Phase-1 anime prompt-following pipeline end-to-end on the
+# 4 CURRENTLY-RUNNING stage256 runs (b1 / ab1causal / ab2fusion / ab3lora), at small
+# scale (--limit 4 prompts) so we can confirm: (a) each ablation builds + EMA-loads
+# cleanly (unexpected==0), (b) sampling works on both the cached (ab3lora) and
+# per-step adapter (b1/ab1/ab2) paths, (c) tagger + CLIP scorers run and the
+# comparison table format is right. Single GPU, READ-ONLY w.r.t. training.
+#
+# Reads ckpts directly from /fsx (atomic-replace + open-fd semantics make this safe;
+# the full run will snapshot to /local). Touches NO training job / file.
+name: evan-mot-eval-dryrun-4runs
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 16
+memGBPerWorker: 220
+maxRetries: 0
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export HF_HOME=/local/evan/cache/huggingface
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  set +x
+  if [ -f /fsx/evan/.hf_token ]; then export HF_TOKEN=$(tr -d '[:space:]' < /fsx/evan/.hf_token); echo "[token] HF_TOKEN loaded (len=${#HF_TOKEN})"; else echo "[token] /fsx/evan/.hf_token absent -> tagger skipped"; fi
+  set -x
+  OUT=experiments/results/eval_dryrun_4runs
+  SAMP=$OUT/samples
+  RUNS="b1 ab1causal ab2fusion ab3lora"
+  mkdir -p /local/evan/cache/huggingface/open_clip $TORCH_HOME $TRITON_CACHE_DIR $SAMP
+  nvidia-smi -L || true
+  echo "===== seed open_clip cache into job HF_HOME ====="
+  cp -rn /fsx/hf_cache/open_clip/. /local/evan/cache/huggingface/open_clip/ || true
+
+  echo "===== SAMPLE (256px, cfg4.0, EMA, LIMIT 4 prompts) direct from /fsx ckpts ====="
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 40m $PY experiments/eval/sample_evalset.py \
+    --runs $RUNS --out-dir $SAMP --size 256 --steps 64 --cfg 4.0 \
+    --seed 7 --weights ema --batch-size 4 --limit 4
+
+  echo "===== SCORE: CLIP (offline /fsx cache) + company tagger (HF_TOKEN) ====="
+  TFLAG="--tagger-backend company"
+  [ -z "${HF_TOKEN:-}" ] && { TFLAG="--skip-tagger"; echo "[score] no HF_TOKEN -> CLIP-only"; }
+  set +e
+  timeout 40m $PY experiments/eval/run_prompt_following.py \
+    --samples-dir $SAMP --runs $RUNS $TFLAG --out-dir $OUT
+  echo "[score] driver rc=$?"
+  set -e
+
+  echo "===== DONE ====="
+  cat $OUT/sample_manifest.json || true
+  echo "----- comparison -----"
+  cat $OUT/comparison.md || true

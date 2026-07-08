@@ -1,0 +1,74 @@
+# REDESIGN stage256 multi-AR 2x8 diagnostic smoke（BS144/global2304）
+# 用途：复现/定位普通 smoke 在 step315 后静默卡住的问题。
+# 只用于诊断：开启 step trace、faulthandler、batch_ready_barrier；不保存 checkpoint。
+name: evan-mot-rd256-mar-2x8-smk144-diag
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 2
+gpuPerWorker: 8
+cpuPerWorker: 48
+memGBPerWorker: 900
+maxRetries: 0
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=6 PYTHONUNBUFFERED=1
+  export PYTHONPATH=/fsx/evan/mot_code/data_analysis/cluster/gcprobe:/fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN
+  export FI_EFA_USE_DEVICE_RDMA=1
+  unset MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_ ARROW_DEFAULT_MEMORY_POOL LD_PRELOAD TCMALLOC_RELEASE_RATE
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  RUN_ID=redesign_256_multiar_2x8_bs144_smoke_diag_20260708
+  ABLATION="model.text_adapter.enabled=true model.text_adapter.bidirectional=false model.text_adapter.multi_layer_fusion.enabled=true"
+  CFG=configs/stage256_redesign_multiar_v1.yaml
+  BS=144; NNODES=2; PORT=29733; LR=2.121e-4
+  YAML_SELF=/fsx/evan/mot_code/mot_pilot_v1_cleanup/jobs/redesign_256_multiar_2x8_causalmlf_smoke_diag_bs144.yaml
+  NW_DECL=$(grep -m1 '^numWorkers:' "$YAML_SELF" | awk '{print $2}')
+  if [ -n "$NW_DECL" ] && [ "$NW_DECL" != "$NNODES" ]; then
+    echo "FATAL: yaml numWorkers($NW_DECL) != script NNODES($NNODES)"; exit 21
+  fi
+
+  CK=/fsx/evan/mot_code/data_analysis/outputs/$RUN_ID/ckpt
+  RES=/fsx/evan/mot_code/data_analysis/outputs/$RUN_ID
+  DIAG=$RES/diag
+  mkdir -p "$CK" "$RES" "$RES/gcprobe" "$DIAG"
+  export GC_PROBE_DIR=$RES/gcprobe GC_PROBE_INTERVAL_S=60 GC_PROBE_HISTO_EVERY_S=1800 GC_PROBE_STALL_S=0.25 GC_PROBE_GEN2_MS=50
+
+  HOST=$(hostname); NODE_RANK=${HOST##*-}; JOBTAG=${HOST%-*}
+  if [ "$NODE_RANK" -ge "$NNODES" ]; then echo "FATAL: node_rank $NODE_RANK >= NNODES $NNODES"; exit 21; fi
+  if [ "$NODE_RANK" = "0" ]; then
+    rm -rf "$DIAG/step_trace" "$DIAG/batch_ready"
+  fi
+  RDZV=$RES/rdzv.$JOBTAG.addr
+  if [ "$NODE_RANK" = "0" ]; then
+    rm -f "$RES"/rdzv*.addr; MYIP=$(hostname -i | awk '{print $1}')
+    echo "$MYIP" > "$RDZV.tmp" && mv "$RDZV.tmp" "$RDZV"; MASTER_ADDR=$MYIP
+  else
+    sleep 5
+    for i in $(seq 1 150); do [ -s "$RDZV" ] && break; sleep 2; done
+    [ -s "$RDZV" ] || { echo "FATAL rdzv file missing"; exit 20; }
+    MASTER_ADDR=$(cat "$RDZV")
+  fi
+
+  echo "===== RD256-MULTIAR-SMOKE-DIAG 2x8 causal+MLF node=$NODE_RANK master=$MASTER_ADDR world=$((NNODES*8)) global=$((NNODES*8*BS)) lr=$LR $(date -u) ====="
+  { hostname; nvidia-smi -L; df -h /local | tail -1; } 2>&1 | tee "$RES/probe.n$NODE_RANK.log"
+
+  DOTS="trainer.checkpoint_dir=$CK trainer.resume=false trainer.save_final=false \
+        trainer.batch_size=$BS trainer.checkpoint_steps=0 trainer.log_every=5 trainer.dataline_metrics_every=10 \
+        trainer.force_os_exit_after_train=true trainer.skip_distributed_teardown=true \
+        trainer.gc_gen2_threshold=200 trainer.gc_freeze_after_steps=50 trainer.gc_refreeze_every=100 \
+        trainer.debug_step_trace=true trainer.debug_step_trace_dir=$DIAG/step_trace trainer.debug_trace_dump_interval=0 \
+        trainer.debug_faulthandler_dump_interval=60 \
+        trainer.batch_ready_barrier=true trainer.batch_ready_barrier_dir=$DIAG/batch_ready \
+        trainer.batch_ready_barrier_run_id=$JOBTAG trainer.batch_ready_barrier_timeout_s=180 \
+        dataset.multi_ar.warmup_exposure_images=0 dataset.multi_ar.warmup_steps=0 \
+        optimizer.params.lr=$LR $ABLATION"
+  timeout --preserve-status --signal=TERM --kill-after=120s 2400s \
+    $PY -m torch.distributed.run --nnodes=$NNODES --nproc_per_node=8 --node_rank=$NODE_RANK \
+        --master_addr=$MASTER_ADDR --master_port=$PORT --rdzv-id=$RUN_ID \
+        train.py --config $CFG --max-steps 360 $DOTS 2>&1 \
+    | tee "$RES/train.n$NODE_RANK.log"
+  RC=${PIPESTATUS[0]}; echo "===== RD256-MULTIAR-SMOKE-DIAG node=$NODE_RANK rc=$RC $(date -u) ====="; exit $RC

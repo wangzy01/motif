@@ -1,0 +1,44 @@
+# stage512 drain_mode 验证：512 supply(16/s)≈demand(12.8/s) 的 regime 下，uniform 把 gpic 过排空致其欠采
+# (anime +6.5% 略超)。假设 proportional(F1)/keep_present(F2) 在此 regime 能让 gpic 保持 present→收紧 mix。
+# (注：256 starved regime 下 F1 是 no-op，但 512 production≈demand regime 下 F1 应有效——本 probe 验证。)
+# 对照已有：512 uniform = anime71.5/monet20.7/gpic4.2/synth3.6。两 arm：proportional / keep_present。
+name: evan-mot-probe-mix16-512drain
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 2
+gpuPerWorker: 0
+cpuPerWorker: 40
+memGBPerWorker: 380
+maxRetries: 1
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export OMP_NUM_THREADS=4
+  mkdir -p /local/evan/cache/huggingface
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  CFG=configs/stage1a_t2i_512.yaml
+  STATS=/fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  run_arm () {
+    local DM=$1
+    local RES=/fsx/evan/mot_code/mot_pilot_v1_cleanup/experiments/results/probe_mix16_512drain/$DM
+    local CACHE=/local/evan/anime_cache_512$DM
+    mkdir -p "$RES"; rm -rf "$CACHE"; mkdir -p "$CACHE"
+    echo "===== node=$NODE_RANK 512 drain=$DM 起 8 进程 $(date -u) ====="
+    for L in 0 1 2 3 4 5 6 7; do
+      GR=$((NODE_RANK*8 + L))
+      $PY scripts/probe_realized_mix.py --config $CFG \
+          --rank $GR --world 16 --batch-size 32 --warmup 50 --count 120 --sleep 2.4 \
+          dataset.stats_cache=$STATS dataset.anime_cache_dir=$CACHE \
+          dataset.drain_mode=$DM dataset.fetch_workers_anime=1 dataset.fetch_workers=4 \
+          dataset.keep_present_timeout_s=0.5 \
+          > "$RES/rank$GR.log" 2>&1 &
+    done
+    wait
+    echo "===== node=$NODE_RANK 512 drain=$DM 结束 $(date -u) ====="
+    grep -h "probe-json" "$RES"/rank*.log 2>/dev/null || true
+  }
+  run_arm proportional
+  run_arm keep_present
+  echo "===== node=$NODE_RANK 全部结束 $(date -u) ====="

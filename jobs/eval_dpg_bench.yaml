@@ -1,0 +1,83 @@
+# DPG-Bench eval for the stage-256 MoT ablation runs.
+# Single-GPU, READ-ONLY w.r.t. training: snapshots ckpts to /local (avoids the
+# training atomic-replace race), GENERATES on DPG prompts with venv-gpu (the
+# proven generation stack), then SCORES with the Qwen3-VL judge in the ISOLATED
+# scorer venv (venv-dpg), and writes a cross-run comparison.
+#
+# Submit:  jcc job submit jobs/eval_dpg_bench.yaml
+# Logs:    jcc job log evan-mot-eval-dpg -f
+# Outputs (/fsx, small): experiments/results/dpg_bench/
+#   comparison.md / comparison.json, dpg_<run>.json, dpg_<run>_detail.jsonl, samples/
+#
+# === SCORER NOTE (read before submitting) ===========================================
+#  * SCORER = Qwen3-VL-2B-Instruct (local, /fsx/models/Qwen3-VL-2B-Instruct) used as a
+#    VQA judge over the DPG yes/no question graph. The ORIGINAL DPG scorer (mPLUG via
+#    modelscope+fairseq) is INFEASIBLE here: fairseq has no py3.12 wheel and this box
+#    has only python3.12 (no conda/py3.10). Scores are INTERNALLY-CONSISTENT ONLY and
+#    NOT directly comparable to published mPLUG DPG numbers. See experiments/eval/dpg/README.md.
+#  * TWO pythons, two steps (explicit):
+#      GENERATION -> /fsx/evan/mot_code/venv-gpu/bin/python   (training/sampling stack, proven)
+#      SCORING    -> /fsx/evan/mot_code/venv-dpg/bin/python   (isolated; transformers + Qwen3-VL)
+#    The scorer venv is BUILT SEPARATELY and never touches venv-gpu.
+#  * LIMIT: default --limit 24 for a fast first pass (24 prompts x 4 runs). To run the
+#    FULL DPG-Bench (1065 prompts), set LIMIT=0 below (raise the timeouts accordingly:
+#    full 256 gen ~ tens of min/run on an H100; scoring ~1065 imgs x ~14 Q each).
+# ====================================================================================
+name: evan-mot-eval-dpg
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 16
+memGBPerWorker: 220
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  PY_GEN=/fsx/evan/mot_code/venv-gpu/bin/python      # generation: proven training stack
+  PY_SCORE=/fsx/evan/mot_code/venv-dpg/bin/python    # scoring: isolated Qwen3-VL judge venv
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1
+  export HF_HOME=/local/evan/cache/huggingface
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  mkdir -p $HF_HOME $TORCH_HOME $TRITON_CACHE_DIR
+
+  OUT=experiments/results/dpg_bench
+  SAMP=$OUT/samples
+  mkdir -p $SAMP
+  RUNS="v1 b1 b2 b3"     # all 4 ablation runs; relative 256 pass uses just "v1 b1"
+  LIMIT=24               # first pass; set LIMIT=0 for the full 1065-prompt benchmark
+  SIZE=256               # 512 pass: SIZE=512 and CONFIG=configs/stage1a_t2i_512.yaml
+  CONFIG=configs/stage1a_t2i_256.yaml
+  STEPS=64
+  CFG=4.0
+
+  nvidia-smi || true
+
+  echo "===== verify isolated scorer venv exists (built separately, NOT venv-gpu) ====="
+  test -x "$PY_SCORE" || { echo "MISSING scorer venv $PY_SCORE — build it first (see README.md)"; exit 1; }
+  "$PY_SCORE" -c "import transformers,torch; print('scorer venv tf', transformers.__version__, 'torch', torch.__version__)"
+
+  echo "===== snapshot ckpts to /local (avoid training atomic-replace race) ====="
+  declare -A CKPT=( \
+    [v1]=/fsx/evan/checkpoints/mot_pilot_v1/s256_1x8_v1_20260618/last.pt \
+    [b1]=/fsx/evan/checkpoints/mot_pilot_v1/s256_1x8_b1adapter_20260618/last.pt \
+    [b2]=/fsx/evan/checkpoints/mot_pilot_v1/s256_1x8_b2longskip_20260618/last.pt \
+    [b3]=/fsx/evan/checkpoints/mot_pilot_v1/s256_1x8_b3nonoise_20260618/last.pt )
+  for r in $RUNS; do
+    ls -la "${CKPT[$r]}"
+    cp "${CKPT[$r]}" /local/eval_${r}.pt
+  done
+
+  echo "===== GENERATE on DPG prompts (venv-gpu, EMA, from /local snapshots) ====="
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 180m $PY_GEN experiments/eval/dpg/generate_dpg.py \
+    --runs $RUNS --snapshot-dir /local \
+    --out-dir $SAMP --config $CONFIG --size $SIZE --steps $STEPS --cfg $CFG \
+    --seed 7 --weights ema --batch-size 8 --limit $LIMIT
+
+  echo "===== SCORE with Qwen3-VL judge (isolated venv-dpg) ====="
+  # Qwen3-VL loads fully from the local /fsx/models path -> offline is fine.
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 240m $PY_SCORE experiments/eval/dpg/run_dpg.py \
+    --samples-dir $SAMP --runs $RUNS --out-dir $OUT --limit 0
+
+  echo "===== DONE ====="
+  ls -la $OUT
+  cat $OUT/comparison.md || true

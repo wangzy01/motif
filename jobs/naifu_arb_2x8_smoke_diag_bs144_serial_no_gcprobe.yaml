@@ -1,0 +1,75 @@
+# Isolated cleanup_crop NAI-like ARB stage256 2x8 diagnostic smoke.
+# Uses fine-grained PIL/Parquet native locks and omits gcprobe from PYTHONPATH,
+# while keeping faulthandler step dumps and batch-ready barrier.
+name: evan-mot-crop-naifu-arb-2x8-smk144-nogc
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 2
+gpuPerWorker: 8
+cpuPerWorker: 48
+memGBPerWorker: 900
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1 PYTHONUNBUFFERED=1
+  export MALLOC_ARENA_MAX=2
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN
+  export FI_EFA_USE_DEVICE_RDMA=1
+  unset MALLOC_TRIM_THRESHOLD_ ARROW_DEFAULT_MEMORY_POOL LD_PRELOAD TCMALLOC_RELEASE_RATE
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  RUN_ID=stage256_naifu_arb_2x8_bs144_smoke_nogc_20260708
+  ABLATION="model.text_adapter.enabled=true model.text_adapter.bidirectional=false model.text_adapter.multi_layer_fusion.enabled=true"
+  CFG=configs/stage256_redesign_naifu_arb_v1.yaml
+  BS=144; NNODES=2; PORT=29747; LR=2.121e-4
+  YAML_SELF=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop/jobs/naifu_arb_2x8_smoke_diag_bs144_serial_no_gcprobe.yaml
+  NW_DECL=$(grep -m1 '^numWorkers:' "$YAML_SELF" | awk '{print $2}')
+  if [ -n "$NW_DECL" ] && [ "$NW_DECL" != "$NNODES" ]; then
+    echo "FATAL: yaml numWorkers($NW_DECL) != script NNODES($NNODES)"; exit 21
+  fi
+
+  RES=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/$RUN_ID
+  CK=$RES/ckpt
+  DIAG=$RES/diag
+  mkdir -p "$CK" "$RES" "$DIAG"
+
+  HOST=$(hostname); NODE_RANK=${HOST##*-}; JOBTAG=${HOST%-*}
+  if [ "$NODE_RANK" -ge "$NNODES" ]; then echo "FATAL: node_rank $NODE_RANK >= NNODES $NNODES"; exit 21; fi
+  if [ "$NODE_RANK" = "0" ]; then
+    rm -rf "$DIAG/step_trace" "$DIAG/batch_ready"
+  fi
+  RDZV=$RES/rdzv.$JOBTAG.addr
+  if [ "$NODE_RANK" = "0" ]; then
+    rm -f "$RES"/rdzv*.addr; MYIP=$(hostname -i | awk '{print $1}')
+    echo "$MYIP" > "$RDZV.tmp" && mv "$RDZV.tmp" "$RDZV"; MASTER_ADDR=$MYIP
+  else
+    sleep 5
+    for i in $(seq 1 150); do [ -s "$RDZV" ] && break; sleep 2; done
+    [ -s "$RDZV" ] || { echo "FATAL rdzv file missing"; exit 20; }
+    MASTER_ADDR=$(cat "$RDZV")
+  fi
+
+  echo "===== STAGE256-NAIFU-ARB-SMOKE-NOGC 2x8 node=$NODE_RANK master=$MASTER_ADDR world=$((NNODES*8)) global=$((NNODES*8*BS)) lr=$LR $(date -u) ====="
+  { echo "RUN_ID=$RUN_ID cfg=$CFG"; hostname; nvidia-smi -L; df -h /local | tail -1; } 2>&1 | tee "$RES/probe.n$NODE_RANK.log"
+
+  DOTS="trainer.checkpoint_dir=$CK trainer.resume=false trainer.save_final=false \
+        trainer.batch_size=$BS trainer.checkpoint_steps=0 trainer.log_every=5 trainer.dataline_metrics_every=10 \
+        trainer.force_os_exit_after_train=true trainer.skip_distributed_teardown=true \
+        trainer.gc_gen2_threshold=200 trainer.gc_freeze_after_steps=50 trainer.gc_refreeze_every=100 \
+        trainer.debug_step_trace=true trainer.debug_step_trace_dir=$DIAG/step_trace trainer.debug_trace_dump_interval=0 \
+        trainer.debug_faulthandler_dump_interval=60 \
+        trainer.batch_ready_barrier=true trainer.batch_ready_barrier_dir=$DIAG/batch_ready \
+        trainer.batch_ready_barrier_run_id=$JOBTAG trainer.batch_ready_barrier_timeout_s=900 \
+        dataset.fetch_workers=1 dataset.fetch_workers_anime=1 dataset.producer_native_io_serial=false \
+        dataset.multi_ar.warmup_exposure_images=0 dataset.multi_ar.warmup_steps=0 dataset.multi_ar.bucket_wait_timeout_s=900 \
+        optimizer.params.lr=$LR $ABLATION"
+  timeout --preserve-status --signal=TERM --kill-after=120s 2400s \
+    $PY -m torch.distributed.run --nnodes=$NNODES --nproc_per_node=8 --node_rank=$NODE_RANK \
+        --master_addr=$MASTER_ADDR --master_port=$PORT --rdzv-id=$RUN_ID \
+        train.py --config $CFG --max-steps 120 $DOTS 2>&1 \
+    | tee "$RES/train.n$NODE_RANK.log"
+  RC=${PIPESTATUS[0]}; echo "===== STAGE256-NAIFU-ARB-SMOKE-NOGC node=$NODE_RANK rc=$RC $(date -u) ====="; exit $RC

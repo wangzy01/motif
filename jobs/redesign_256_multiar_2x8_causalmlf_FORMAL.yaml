@@ -1,0 +1,90 @@
+# REDESIGN stage256 multi-AR 正式训练 2x8（准备模板，未验证前不要提交）
+# 目标：相对 rd256 正式 run，仅把 512a 已验证的 multi-AR + 保头 anchor 方案下放到 stage256。
+# 推荐口径：2x8 但保持 rd256 global=2304（BS=144/GPU），lr/exposure/step 数与原 6x8 rd256 一致。
+# 提交前门禁：
+#   1) jobs/redesign_256_multiar_2x8_causalmlf_smoke_bs144.yaml 通过；
+#   2) metrics 中 img_tokens/peak_mem/loss/dw/re-resize/mix 均正常；
+#   3) Evan 拍板 global=2304 与 warmup_exposure_images=12.75M。
+name: evan-mot-rd256-mar-2x8-causalmlf
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 2
+gpuPerWorker: 8
+cpuPerWorker: 48
+memGBPerWorker: 900
+maxRetries: 50
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  trap 'jobs -pr | xargs -r kill; wait || true' EXIT TERM INT
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=6 PYTHONUNBUFFERED=1
+  export PYTHONPATH=/fsx/evan/mot_code/data_analysis/cluster/gcprobe:/fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN
+  export FI_EFA_USE_DEVICE_RDMA=1
+  unset MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_ ARROW_DEFAULT_MEMORY_POOL LD_PRELOAD TCMALLOC_RELEASE_RATE
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  RUN_ID=redesign_256_multiar_causalmlf_global2304_20260708
+  ABLATION="model.text_adapter.enabled=true model.text_adapter.bidirectional=false model.text_adapter.multi_layer_fusion.enabled=true"
+  CFG=configs/stage256_redesign_multiar_v1.yaml
+  BS=144; NNODES=2; PORT=29732; LR=2.121e-4; EXPOSURE=384000000
+
+  YAML_SELF=/fsx/evan/mot_code/mot_pilot_v1_cleanup/jobs/redesign_256_multiar_2x8_causalmlf_FORMAL.yaml
+  NW_DECL=$(grep -m1 '^numWorkers:' "$YAML_SELF" | awk '{print $2}')
+  if [ -n "$NW_DECL" ] && [ "$NW_DECL" != "$NNODES" ]; then
+    echo "FATAL: yaml numWorkers($NW_DECL) != script NNODES($NNODES)"; exit 21
+  fi
+
+  CK=/fsx/evan/checkpoints/mot_pilot_v1/$RUN_ID
+  RES=/fsx/evan/mot_code/data_analysis/outputs/$RUN_ID
+  mkdir -p "$CK" "$RES" "$RES/gcprobe"
+  export GC_PROBE_DIR=$RES/gcprobe GC_PROBE_INTERVAL_S=60 GC_PROBE_HISTO_EVERY_S=1800 GC_PROBE_STALL_S=0.25 GC_PROBE_GEN2_MS=50
+
+  HOST=$(hostname); NODE_RANK=${HOST##*-}; JOBTAG=${HOST%-*}; STAMP=$(date -u +%m%d_%H%M%S)
+  if [ "$NODE_RANK" -ge "$NNODES" ]; then echo "FATAL: node_rank $NODE_RANK >= NNODES $NNODES"; exit 21; fi
+  RDZV=$CK/rdzv.$JOBTAG.addr
+  if [ "$NODE_RANK" = "0" ]; then
+    rm -f "$CK"/rdzv*.addr; MYIP=$(hostname -i | awk '{print $1}')
+    echo "$MYIP" > "$RDZV.tmp" && mv "$RDZV.tmp" "$RDZV"; MASTER_ADDR=$MYIP
+  else
+    sleep 5
+    for i in $(seq 1 150); do [ -s "$RDZV" ] && break; sleep 2; done
+    [ -s "$RDZV" ] || { echo "FATAL rdzv file missing"; exit 20; }
+    MASTER_ADDR=$(cat "$RDZV")
+  fi
+
+  echo "===== RD256-MULTIAR-FORMAL 2x8 causal+MLF node=$NODE_RANK master=$MASTER_ADDR world=$((NNODES*8)) global=$((NNODES*8*BS)) lr=$LR exposure=$EXPOSURE $(date -u) ====="
+  { echo "RUN_ID=$RUN_ID cfg=$CFG"; hostname; nvidia-smi -L; df -h /local | tail -1;
+    echo "anime cache entries (<=60s):"; timeout 60 ls -f /local/evan/anime_img_cache | wc -l || echo "count-timeout"; } 2>&1 | tee "$RES/probe.n$NODE_RANK.$STAMP.log"
+
+  (while true; do
+     use=$(df --output=pcent /local | tail -1 | tr -dc '0-9')
+     if [ "${use:-0}" -ge 85 ]; then
+       ts=$(date +%s); mv /local/evan/anime_img_cache /local/evan/anime_img_cache.old.$ts 2>/dev/null || true
+       mkdir -p /local/evan/anime_img_cache
+       nice -n 19 rm -rf /local/evan/anime_img_cache.old.$ts &
+       echo "$(date -u) rotated anime cache at ${use}%"
+     else
+       echo "$(date -u) /local ${use}% ok"
+     fi
+     sleep 3600
+   done) > "$RES/cachejanitor.n$NODE_RANK.$STAMP.log" 2>&1 &
+  (while true; do date -u
+     [ -r /sys/fs/cgroup/memory.current ] && echo "mem.current: $(cat /sys/fs/cgroup/memory.current)"
+     [ -r /sys/fs/cgroup/memory.pressure ] && cat /sys/fs/cgroup/memory.pressure
+     [ -r /sys/fs/cgroup/memory.stat ] && grep -E '^(anon|file|slab_unreclaimable|pgscan|pgsteal) ' /sys/fs/cgroup/memory.stat | tr '\n' ' ' && echo
+     df --output=avail /local | tail -1
+     sleep 120; done) > "$RES/nodemon.n$NODE_RANK.$STAMP.log" 2>&1 &
+
+  DOTS="trainer.checkpoint_dir=$CK trainer.resume=true trainer.batch_size=$BS \
+        trainer.max_exposure_images=$EXPOSURE \
+        trainer.checkpoint_steps=3000 trainer.checkpoint_keep_every=60000 \
+        trainer.force_os_exit_after_train=true trainer.skip_distributed_teardown=true \
+        trainer.gc_gen2_threshold=200 trainer.gc_freeze_after_steps=50 trainer.gc_refreeze_every=10000 \
+        optimizer.params.lr=$LR $ABLATION"
+  $PY -m torch.distributed.run --nnodes=$NNODES --nproc_per_node=8 --node_rank=$NODE_RANK \
+      --master_addr=$MASTER_ADDR --master_port=$PORT --rdzv-id=$RUN_ID \
+      train.py --config $CFG $DOTS 2>&1 | tee "$RES/train.n$NODE_RANK.$STAMP.log"
+  RC=${PIPESTATUS[0]}; echo "===== RD256-MULTIAR-FORMAL node=$NODE_RANK rc=$RC $(date -u) ====="; exit $RC

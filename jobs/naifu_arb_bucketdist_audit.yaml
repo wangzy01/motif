@@ -1,0 +1,116 @@
+name: evan-mot-cleanup-crop-naifu-arb-bucketdist
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 96
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  OUT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/naifu_arb_bucketdist_20260708
+  mkdir -p "$OUT"
+  $PY - <<'PY' | tee "$OUT/bucketdist.json"
+  import json
+  from collections import Counter
+  from omegaconf import OmegaConf
+  from training.dataline.complete_dataset import (
+      CompleteV1Dataset, iter_anime_shard, iter_real_synth_shard, iter_textatlas_shard,
+  )
+
+  CFG_PATH = "configs/stage256_redesign_naifu_arb_v1.yaml"
+  cfg = OmegaConf.load(CFG_PATH)
+  kwargs = OmegaConf.to_container(cfg.dataset, resolve=True)
+  kwargs.update({
+      "rank": 0,
+      "world_size": 1,
+      "max_shards": 2,
+      "max_rows_per_shard": 512,
+      "anime_nrows": 4000,
+      "buffer_size": 512,
+      "queue_size": 128,
+  })
+  ds = CompleteV1Dataset(**kwargs)
+  ds._multi_ar_active = True
+  buckets = ds._mar_buckets
+  square_idx = ds._mar_square_idx
+  max_per_domain = 512
+  counts = {d: Counter() for d in ds.domains}
+  seen = {d: 0 for d in ds.domains}
+
+  for d in ds.domains:
+      for shard in ds.shards.get(d, []):
+          if seen[d] >= max_per_domain:
+              break
+          v_anchor = ds._v_anchor_for(d)
+          force_square = d in ds._mar_square_only
+          if d == "anime":
+              iterator = iter_anime_shard(
+                  shard, ds.cfg, ds.stage, ds.image_size, ds.anime_cache_dir,
+                  max_rows=128, rng=None, nrows=ds.anime_nrows, skip_image=False,
+                  fetch_workers=1, bucketer=ds._mar_bucketer, v_anchor=v_anchor)
+          elif d == "textatlas":
+              iterator = iter_textatlas_shard(
+                  shard, ds.cfg, ds.stage, ds.image_size, ds.cfg.textatlas_source_root,
+                  local_root=ds.textatlas_local_root, max_rows=128, skip_image=False, rng=None,
+                  bucketer=ds._mar_bucketer, v_anchor=v_anchor,
+                  force_square=force_square, square_idx=square_idx)
+          else:
+              iterator = iter_real_synth_shard(
+                  d, shard, ds.cfg, ds.stats, ds.stage, ds.image_size,
+                  max_rows=128, skip_image=False, fetch_workers=1, rng=None,
+                  bucketer=ds._mar_bucketer, v_anchor=v_anchor,
+                  force_square=force_square, square_idx=square_idx)
+          for rec in iterator:
+              b = int(rec["bucket"])
+              counts[d][b] += 1
+              seen[d] += 1
+              if seen[d] >= max_per_domain:
+                  break
+
+  mix = {d: float(w) for d, w in ds.cfg.domain_mix[ds.stage].items() if float(w) > 0 and d in ds.domains}
+  n = len(buckets)
+  native = {}
+  for d in ds.domains:
+      total = sum(counts[d].values())
+      row = [0.0] * n
+      if total:
+          for b, c in counts[d].items():
+              row[b] = c / total
+      native[d] = row
+  pB = [0.0] * n
+  for d, w in mix.items():
+      row = native.get(d)
+      if not row:
+          continue
+      for i, p in enumerate(row):
+          pB[i] += w * p
+  s = sum(pB)
+  if s > 0:
+      pB = [x / s for x in pB]
+  supported = [i for i, p in enumerate(pB) if p > 0]
+  out = {
+      "status": "PASS",
+      "config": CFG_PATH,
+      "bucket_count": n,
+      "square_index": square_idx,
+      "square_bucket": buckets[square_idx],
+      "sampled_per_domain": seen,
+      "supported_bucket_count": len(supported),
+      "unsupported_bucket_count": n - len(supported),
+      "bucket_probs": [round(x, 8) for x in pB],
+      "native_bucket_dist": {d: [round(x, 8) for x in native[d]] for d in ds.domains},
+      "top_buckets": [
+          {"idx": i, "hw": buckets[i], "prob": round(pB[i], 8)}
+          for i in sorted(range(n), key=lambda j: pB[j], reverse=True)[:20]
+      ],
+      "nonzero_buckets": [
+          {"idx": i, "hw": buckets[i], "prob": round(pB[i], 8)}
+          for i in supported
+      ],
+  }
+  print(json.dumps(out, ensure_ascii=False, indent=2))
+  PY

@@ -1,0 +1,33 @@
+# Replace generated MONET/synthetic sample thumbnails with full-res tar jpgs.
+# 提交: jcc job submit jobs/replace_training_sample_previews_fullres.yaml
+# 看日志: jcc job log evan-mot-fullres-samples-20260618 -f
+name: evan-mot-fullres-samples-20260618
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 32
+memGBPerWorker: 256
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  OUT=/s3-pixai-test-uw2/evan/dive/complete_v1_training_samples_seed20260617
+
+  echo "===== STACK PROBE ====="; date -u; hostname; nproc; free -g | head -2
+  $PY -c "import pyarrow,PIL; print('pyarrow', pyarrow.__version__)"
+
+  echo "===== REPLACE SAMPLE PREVIEWS WITH FULL-RES TAR JPG ====="
+  timeout 10h $PY scripts/replace_sample_previews_fullres.py \
+    --out-root "$OUT" \
+    --stages 1024,512,256 \
+    --workers 16 \
+    --timeout-sec 900 \
+    --prefer-url-real \
+    --url-timeout-sec 45 \
+    --url-lookup-workers 8 \
+    --batch-size 100 \
+    --progress-every 10
+
+  echo "===== DONE ====="; date -u

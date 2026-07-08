@@ -1,0 +1,56 @@
+name: evan-mot-crop-bdist-combine
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 4
+memGBPerWorker: 16
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  OUT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/naifu_arb_bucketdist_20260708
+  /fsx/evan/mot_code/venv-gpu/bin/python - <<'PY' | tee "$OUT/combined_bucketdist.json"
+  import json
+  from pathlib import Path
+  from omegaconf import OmegaConf
+
+  out = Path("/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/naifu_arb_bucketdist_20260708")
+  cfg = OmegaConf.load("/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop/configs/stage256_redesign_naifu_arb_v1.yaml")
+  domains = ["anime", "monet_real", "gpic", "synthetic", "textatlas"]
+  rows = {}
+  meta = {}
+  for d in domains:
+      txt = (out / f"domain_{d}.json").read_text()
+      js = json.loads(txt[txt.find("{"):])
+      if js["status"] != "PASS":
+          raise SystemExit(f"{d} status={js['status']}")
+      rows[d] = js["native_bucket_dist"]
+      meta[d] = {"sampled": js["sampled"], "extreme_clamped": js["extreme_clamped"], "nonzero": len(js["nonzero_buckets"])}
+  n = len(next(iter(rows.values())))
+  mix = {d: float(cfg.dataset.multi_ar.get("dummy", 0.0)) for d in []}
+  mix = {d: float(w) for d, w in OmegaConf.load(cfg.dataset.sampling_config).domain_mix[str(cfg.dataset.stage)].items()
+         if float(w) > 0 and d in rows}
+  pB = [0.0] * n
+  for d, w in mix.items():
+      for i, p in enumerate(rows[d]):
+          pB[i] += w * p
+  s = sum(pB)
+  pB = [x / s for x in pB]
+  combined = {
+      "status": "PASS",
+      "bucket_count": n,
+      "domain_meta": meta,
+      "mix": mix,
+      "bucket_probs": [round(x, 8) for x in pB],
+      "native_bucket_dist": {d: [round(x, 8) for x in rows[d]] for d in domains},
+      "supported_bucket_count": sum(1 for x in pB if x > 0),
+      "top_bucket_indices": sorted(range(n), key=lambda i: pB[i], reverse=True)[:20],
+  }
+  (out / "bucketdist_snippet.yaml").write_text(
+      "    bucket_probs: " + json.dumps(combined["bucket_probs"]) + "\n"
+      "    native_bucket_dist:\n" +
+      "".join(f"      {d}: " + json.dumps(combined["native_bucket_dist"][d]) + "\n" for d in domains)
+  )
+  print(json.dumps(combined, ensure_ascii=False, indent=2))
+  PY

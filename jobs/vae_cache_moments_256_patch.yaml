@@ -1,0 +1,43 @@
+# 定向补编 stage 256 VAE moments 缓存的失败 key（anime ~1.73M + monet 713，均 fetch_empty=R2限流）。
+# 复用主缓存脚本的 patch 模式：--only-uids 取自 failed_keys.parquet，--run-tag patch 给 part/簿记换名
+# （防覆盖主跑文件，mountpoint-s3 不能覆盖）；低并发（fetch-workers 8 = 8卡×8=64 聚合，主跑是 512）避 Cloudflare 限流 + 高重试。
+# 提交: jcc job submit jobs/vae_cache_moments_256_patch.yaml
+# 看日志: jcc job log evan-mot-vae-cache-256-patch -p all -n 200
+# 产出（新增，不覆盖）: stage=256/latents,index 加 *__patch*.{safetensors,parquet}；run_stats/failed 加 *__patch.*；summary_postpatch.json/qc_postpatch.json
+name: evan-mot-vae-cache-256-patch
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 8
+cpuPerWorker: 80
+memGBPerWorker: 800
+maxRetries: 8
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=4
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton
+  mkdir -p /local/evan/vae_cache_scratch /local/evan/anime_img_cache_patch
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  OUT=/s3/evan/mot_latents/complete_v1_flux2_moments
+  CFG=/fsx/evan/mot_code/data_analysis/configs/t5_sampling_complete_v1.json
+  FAILED=$OUT/stage=256/failed_keys.parquet
+
+  echo "===== STACK PROBE ====="; date -u; hostname; nvidia-smi
+  $PY -c "import torch,diffusers; print('torch',torch.__version__,'diffusers',diffusers.__version__,'ndev',torch.cuda.device_count())"
+  $PY -c "import pyarrow.parquet as pq; t=pq.ParquetFile('$FAILED').read(columns=['uid']); print('failed_keys uids:', t.num_rows)"
+
+  echo "===== PATCH re-encode stage 256 failed keys (8 ranks, low concurrency) ====="
+  PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1 $PY -m torch.distributed.run --nproc_per_node=8 --master_port=29652 \
+    scripts/vae_cache_flux2_moments.py --stage 256 --config "$CFG" --out-root "$OUT" \
+    --scratch /local/evan/vae_cache_scratch --vae-path /fsx/models/FLUX.2-klein-4B/vae \
+    --anime-cache /local/evan/anime_img_cache_patch \
+    --only-uids "$FAILED" --only-domains anime,monet_real --run-tag patch \
+    --batch-size 64 --chunk-gib 3.0 --fetch-workers 16 --tar-workers 4 \
+    --fetch-retries 6 --fetch-timeout 30
+
+  echo "===== QC stage 256 post-patch (rank0 single proc, --out-suffix _postpatch) ====="
+  PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1 $PY scripts/vae_cache_qc.py --stage 256 --out-root "$OUT" --config "$CFG" \
+    --out-suffix _postpatch || echo "QC non-fatal failure (补编数据已落盘，可手动重跑 QC)"
+  echo "===== PATCH DONE ====="; date -u

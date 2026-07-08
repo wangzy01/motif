@@ -1,0 +1,98 @@
+# DPG-Bench eval (ORIGINAL mPLUG scorer) for the stage-256/512 MoT ablation runs.
+# Single-GPU, READ-ONLY w.r.t. training: snapshots ckpts to /local (avoids the
+# training atomic-replace race), GENERATES on DPG prompts with venv-gpu (the
+# proven generation stack) USING THE 2x2 GRID (--grid 2 -> pic_num=4), then
+# SCORES with the ORIGINAL mPLUG VQA model in the SEPARATE conda env
+# (/fsx/evan/miniconda3/envs/dpg-mplug), and writes a cross-run comparison.
+#
+# Submit:  jcc job submit jobs/eval_dpg_bench_mplug.yaml
+# Logs:    jcc job log evan-mot-eval-dpg-mplug -f
+# Outputs (/fsx, small): experiments/results/dpg_bench_mplug/
+#   comparison.md / comparison.json, dpg_<run>.json, dpg_<run>_detail.jsonl, samples/
+#
+# === SCORER NOTE (read before submitting) ===========================================
+#  * SCORER = the ORIGINAL DPG mPLUG VQA model
+#    (damo/mplug_visual-question-answering_coco_large_en via modelscope+fairseq), the
+#    same one used to produce published DPG-Bench leaderboard numbers. Scores from this
+#    job ARE leaderboard-comparable, *provided* generation used the 2x2 grid (--grid 2,
+#    pic_num=4). See experiments/eval/dpg/README.md ("mPLUG comparability path").
+#  * THREE pythons / clean separation:
+#      GENERATION -> /fsx/evan/mot_code/venv-gpu/bin/python            (training/sampling stack, proven)
+#      SCORING    -> /fsx/evan/miniconda3/envs/dpg-mplug/bin/python    (conda; py3.10 + fairseq + modelscope + mPLUG)
+#    The conda env is BUILT SEPARATELY and never touches venv-gpu or venv-dpg.
+#  * COMPARABILITY needs BOTH: this mPLUG scorer AND the 2x2 grid (GRID=2 below ->
+#    generate_dpg.py --grid 2; score_dpg_mplug.py --pic-num 4). A single-image run
+#    (GRID=1 / pic_num=1) is the original protocol with pic_num=1 (still mPLUG, but the
+#    leaderboard standard tiles 4).
+#  * The mPLUG model is read from MODELSCOPE_CACHE=/fsx/evan/modelscope_cache (cached on
+#    /fsx so the node reads it offline; set OFFLINE below). It is downloaded once on the
+#    login node; the job does not re-download.
+#  * LIMIT: default --limit 24 for a fast first pass. Set LIMIT=0 for the FULL 1065
+#    prompts (raise timeouts: grid generation is 4x the single-image cost; mPLUG scoring
+#    is ~1065 imgs x 4 crops x ~14 Q each).
+# ====================================================================================
+name: evan-mot-eval-dpg-mplug
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 16
+memGBPerWorker: 220
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  PY_GEN=/fsx/evan/mot_code/venv-gpu/bin/python                  # generation: proven training stack
+  PY_SCORE=/fsx/evan/miniconda3/envs/dpg-mplug/bin/python        # scoring: ORIGINAL mPLUG (conda py3.10)
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1
+  export HF_HOME=/local/evan/cache/huggingface
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export MODELSCOPE_CACHE=/fsx/evan/modelscope_cache            # mPLUG model lives here (on /fsx)
+  mkdir -p $HF_HOME $TORCH_HOME $TRITON_CACHE_DIR
+
+  OUT=experiments/results/dpg_bench_mplug
+  SAMP=$OUT/samples
+  mkdir -p $SAMP
+  RUNS="v1 b1 b2 b3"     # all 4 ablation runs; relative pass uses just "v1 b1"
+  LIMIT=24               # first pass; set LIMIT=0 for the full 1065-prompt benchmark
+  SIZE=256               # 512 pass: SIZE=512 and CONFIG=configs/stage1a_t2i_512.yaml
+  CONFIG=configs/stage1a_t2i_256.yaml
+  STEPS=64
+  CFG=4.0
+  GRID=2                 # 2 -> 2x2 grid (pic_num=4), the leaderboard-comparable layout
+  PICNUM=4               # mPLUG crops of the grid; must match GRID (4 for GRID=2, 1 for GRID=1)
+
+  nvidia-smi || true
+
+  echo "===== verify the conda mPLUG scorer env exists (built separately, NOT venv-gpu/venv-dpg) ====="
+  test -x "$PY_SCORE" || { echo "MISSING conda scorer env $PY_SCORE — build it first (see README.md)"; exit 1; }
+  "$PY_SCORE" -c "import torch, fairseq, modelscope, librosa, decord, cv2; print('mplug env torch', torch.__version__, 'fairseq', fairseq.__version__, 'modelscope', modelscope.__version__)"
+  test -d "$MODELSCOPE_CACHE/damo/mplug_visual-question-answering_coco_large_en" || { echo "MISSING mPLUG model cache under $MODELSCOPE_CACHE — download it first (see README.md)"; exit 1; }
+
+  echo "===== snapshot ckpts to /local (avoid training atomic-replace race) ====="
+  declare -A CKPT=( \
+    [v1]=/fsx/evan/checkpoints/mot_pilot_v1/s256_1x8_v1_20260618/last.pt \
+    [b1]=/fsx/evan/checkpoints/mot_pilot_v1/s256_1x8_b1adapter_20260618/last.pt \
+    [b2]=/fsx/evan/checkpoints/mot_pilot_v1/s256_1x8_b2longskip_20260618/last.pt \
+    [b3]=/fsx/evan/checkpoints/mot_pilot_v1/s256_1x8_b3nonoise_20260618/last.pt )
+  for r in $RUNS; do
+    ls -la "${CKPT[$r]}"
+    cp "${CKPT[$r]}" /local/eval_${r}.pt
+  done
+
+  echo "===== GENERATE on DPG prompts as a 2x2 grid (venv-gpu, EMA, from /local snapshots) ====="
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 300m $PY_GEN experiments/eval/dpg/generate_dpg.py \
+    --runs $RUNS --snapshot-dir /local \
+    --out-dir $SAMP --config $CONFIG --size $SIZE --steps $STEPS --cfg $CFG \
+    --seed 7 --weights ema --batch-size 8 --limit $LIMIT --grid $GRID
+
+  echo "===== SCORE with the ORIGINAL mPLUG VQA model (conda dpg-mplug env, pic_num=$PICNUM) ====="
+  # mPLUG model loads fully from $MODELSCOPE_CACHE on /fsx -> offline is fine.
+  # NOTE: --resolution = the per-TILE size (= $SIZE), since the grid PNG is 2*SIZE.
+  MODELSCOPE_CACHE=$MODELSCOPE_CACHE HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 360m $PY_SCORE \
+    experiments/eval/dpg/run_dpg.py \
+    --backend mplug --pic-num $PICNUM --modelscope-cache $MODELSCOPE_CACHE \
+    --samples-dir $SAMP --runs $RUNS --out-dir $OUT --device gpu --limit 0
+
+  echo "===== DONE ====="
+  ls -la $OUT
+  cat $OUT/comparison.md || true

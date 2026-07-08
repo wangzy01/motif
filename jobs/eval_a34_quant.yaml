@@ -1,0 +1,36 @@
+# A3+A4: fixed-sigma MSE 4-way (sigma-confound-free go/no-go) + local aesthetic quick-screen.
+# Single-GPU, read-only over the 4 running ckpts + already-produced eval images. EMA weights.
+# Out: experiments/results/eval_doc_quant/{fixedsigma_*.json, aesthetic.json, QUANT_TABLE.md}
+name: evan-mot-s256-quant
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 16
+memGBPerWorker: 260
+maxRetries: 1
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  CKR=/fsx/evan/checkpoints/mot_pilot_v1
+  OUT=experiments/results/eval_doc_quant; mkdir -p $OUT
+  CFG=configs/stage1a_t2i_256.yaml
+  echo "===== node ====="; hostname; nvidia-smi -L
+  FS="$PY experiments/exp_scripts/fixed_sigma_eval.py --config $CFG --resolution 256 --weights ema --eval-shard /s3/evan/anime_core_ditv04_ct_soft/data/00000000.parquet"
+  echo "===== A3 fixed-sigma MSE 4-way $(date -u) ====="
+  $FS --ckpt $CKR/s256_1x8_v1_20260618/last.pt        --shift-label v1 --out $OUT/fixedsigma_v1.json
+  $FS --ckpt $CKR/s256_1x8_b1adapter_20260618/last.pt --shift-label b1 --out $OUT/fixedsigma_b1.json \
+      --overrides model.text_adapter.enabled=true model.text_adapter.bidirectional=true
+  $FS --ckpt $CKR/s256_1x8_b2longskip_20260618/last.pt --shift-label b2 --out $OUT/fixedsigma_b2.json \
+      --overrides model.long_skip.enabled=true model.long_skip.mode=A_full
+  $FS --ckpt $CKR/s256_1x8_b3nonoise_20260618/last.pt --shift-label b3 --out $OUT/fixedsigma_b3.json \
+      --overrides model.noise_condition=false
+  echo "===== A4 aesthetic quick-screen $(date -u) ====="
+  $PY experiments/exp_scripts/aesthetic_score_runs.py --images-root experiments/results/eval_doc_4runs --out $OUT/aesthetic.json
+  echo "===== aggregate -> QUANT_TABLE.md $(date -u) ====="
+  $PY experiments/exp_scripts/aggregate_quant.py --dir $OUT --out $OUT/QUANT_TABLE.md
+  echo "===== quant done $(date -u) ====="

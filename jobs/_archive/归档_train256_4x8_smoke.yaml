@@ -1,0 +1,139 @@
+# 4x8(=32 GPU / 4 nodes) stage256 formal training smoke test.
+# Purpose: test multi-node torchrun + FSDP2 + complete_v1@256 only; NOT a formal run.
+# Submit: jcc job submit jobs/train256_4x8_smoke.yaml
+# Logs:   jcc job log <job-name> -p all -n 800
+name: evan-mot-train256-4x8-smoke
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 4
+gpuPerWorker: 8
+cpuPerWorker: 32
+memGBPerWorker: 600
+maxRetries: 0
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=INFO
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  HOST=$(hostname)
+  NODE_RANK=${HOST##*-}
+  JOB_BASE=${HOST%-${NODE_RANK}}
+  MASTER_ADDR=${JOB_BASE}-0.jobs.default.svc.cluster.local
+  MASTER_PORT=29567
+  NNODES=4
+  NPROC_PER_NODE=8
+  MAX_STEPS=6
+  MAX_WALL=15m
+  STATS=/fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json
+  RES=/fsx/evan/mot_code/mot_pilot_v1/experiments/results/${JOB_BASE}
+  CK=/local/evan/mot_4x8_smoke_ckpt
+  mkdir -p "$RES" "$CK"
+
+  {
+    echo "===== 4x8 STAGE256 SMOKE PROBE ====="
+    date -u
+    echo "HOST=$HOST"
+    echo "JOB_BASE=$JOB_BASE"
+    echo "NODE_RANK=$NODE_RANK"
+    echo "MASTER_ADDR=$MASTER_ADDR"
+    echo "MASTER_PORT=$MASTER_PORT"
+    echo "NNODES=$NNODES NPROC_PER_NODE=$NPROC_PER_NODE WORLD_SIZE=$((NNODES*NPROC_PER_NODE))"
+    echo "MAX_STEPS=$MAX_STEPS MAX_WALL=$MAX_WALL"
+    echo "RES=$RES"
+    echo "CK=$CK"
+    nvidia-smi -L
+    $PY -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), 'ndev', torch.cuda.device_count())"
+  } 2>&1 | tee "$RES/probe_worker${NODE_RANK}.log"
+
+  for i in $(seq 1 120); do
+    if getent hosts "$MASTER_ADDR"; then
+      break
+    fi
+    echo "waiting for MASTER_ADDR dns: $MASTER_ADDR ($i/120)"
+    sleep 2
+  done
+  if ! getent hosts "$MASTER_ADDR"; then
+    echo "failed to resolve MASTER_ADDR=$MASTER_ADDR"
+    exit 20
+  fi
+
+  DOTS="dataset.stats_cache=$STATS dataset.anime_cache_dir=/local/evan/anime_img_cache trainer.resume=false trainer.save_final=false trainer.checkpoint_steps=0 trainer.checkpoint_dir=$CK trainer.log_every=1"
+  timeout --signal=TERM --kill-after=5m "$MAX_WALL" \
+    $PY -m torch.distributed.run \
+      --nnodes=$NNODES \
+      --nproc_per_node=$NPROC_PER_NODE \
+      --node_rank=$NODE_RANK \
+      --master_addr=$MASTER_ADDR \
+      --master_port=$MASTER_PORT \
+      train.py --config configs/stage1a_t2i_256.yaml --max-steps $MAX_STEPS \
+      $DOTS 2>&1 | tee "$RES/train_worker${NODE_RANK}.log"
+  TRAIN_RC=${PIPESTATUS[0]}
+  if [ "$TRAIN_RC" -eq 124 ]; then
+    echo "torchrun hit timeout=$MAX_WALL; postcheck will decide whether completed metrics are acceptable"
+  fi
+
+  POST_RC=0
+  if [ "$NODE_RANK" = "0" ]; then
+    cp -f "$CK/metrics.jsonl" "$RES/metrics.jsonl" 2>/dev/null || true
+    METRICS="$CK/metrics.jsonl" SUMMARY="$RES/postcheck.json" EXPECT_STEPS="$MAX_STEPS" $PY - <<'PY'
+  import json
+  import math
+  import os
+  import statistics
+  import sys
+
+  path = os.environ["METRICS"]
+  out = os.environ["SUMMARY"]
+  expect_steps = int(os.environ["EXPECT_STEPS"])
+  rows = []
+  bad = []
+  with open(path, "r", encoding="utf-8") as f:
+      for lineno, line in enumerate(f, 1):
+          rec = json.loads(line)
+          for key, value in rec.items():
+              if isinstance(value, (int, float)) and not math.isfinite(float(value)):
+                  bad.append(f"line {lineno}: {key}={value}")
+          rows.append(rec)
+  steps = [int(r["step"]) for r in rows]
+  losses = [float(r["loss"]) for r in rows]
+  iters = [float(r["iter_s"]) for r in rows]
+  summary = {
+      "rows": len(rows),
+      "first_step": steps[0] if steps else None,
+      "last_step": steps[-1] if steps else None,
+      "loss_min": min(losses) if losses else None,
+      "loss_max": max(losses) if losses else None,
+      "loss_mean": statistics.mean(losses) if losses else None,
+      "iter_s_median": statistics.median(iters) if iters else None,
+      "bad_numeric": bad,
+  }
+  with open(out, "w", encoding="utf-8") as f:
+      json.dump(summary, f, indent=2, sort_keys=True)
+      f.write("\n")
+  print("SMOKE_POSTCHECK_JSON", json.dumps(summary, sort_keys=True), flush=True)
+  errors = []
+  if bad:
+      errors.append(f"non-finite metrics: {bad[:3]}")
+  if not steps or steps[-1] != expect_steps:
+      errors.append(f"last_step={steps[-1] if steps else None} != expected {expect_steps}")
+  if errors:
+      print("SMOKE_POSTCHECK_FAILED " + "; ".join(errors), file=sys.stderr)
+      raise SystemExit(2)
+  PY
+    POST_RC=$?
+  fi
+
+  if [ "$TRAIN_RC" -eq 124 ] && [ "$POST_RC" -eq 0 ]; then
+    echo "timeout happened after expected metrics were written; treating smoke as success"
+    TRAIN_RC=0
+  fi
+
+  if [ "$TRAIN_RC" -ne 0 ]; then
+    exit "$TRAIN_RC"
+  fi
+  exit "$POST_RC"

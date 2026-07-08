@@ -1,0 +1,140 @@
+# stage256 REDESIGN + NAI-like ARB retrain config（isolated cleanup_crop, 2026-07-08）
+# 目标：相对 rd256，采用更接近 naifu 的 item-level adaptive bucket assignment + per-bucket queue。
+# 这是隔离实验配置，只在 /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop 中使用。
+
+model_cls: networks.model_mot.MoTT2IModel
+target_device: cuda
+
+model:
+  pretrained_path: /fsx/models/Qwen3-VL-2B-Instruct
+  tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct
+  patch_size: 1
+  time_gap: 2048
+  timestep_multiplier: 1.0
+  text_max_length: 384
+  cfg_dropout_prob: 0.1
+  text_rich_cfg_dropout_prob: 0.0
+  prompt_template:
+    enabled: true
+  gradient_checkpointing: true
+  sandwich_norm: true
+  noise_condition: true
+  long_skip:
+    enabled: false
+    mode: A_full
+  text_adapter:
+    enabled: false
+    num_layers: 2
+    multi_layer_fusion:
+      enabled: false
+      num_layers: 12
+  und_lora:
+    enabled: false
+    num_layers: 8
+    rank: 32
+    alpha: 32
+    lr_scale: 0.3
+    target_modules: [q, k, v, o]
+  abs_sincos:
+    enabled: false
+
+vae:
+  name: flux2
+  pretrained_path: /fsx/models/FLUX.2-klein-4B/vae
+  dtype: bfloat16
+
+dataset:
+  store_cls: training.dataline.complete_dataset.CompleteV1Dataset
+  sampling_config: /fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json
+  stage: "256"
+  image_size: 256
+  buffer_size: 512
+  queue_size: 128
+  min_fill: 64
+  first_fill_policy: all_min
+  first_fill_timeout_s: 120
+  fetch_workers: 8
+  producer_native_io_serial: false
+  drain_mode: proportional
+  textatlas_local_root: /local/evan/textatlas5m
+  anime_nrows: 20000
+  anime_cache_dir: /local/evan/anime_img_cache
+  stats_cache: /fsx/evan/mot_code/data_analysis/outputs/monet_global_stats_rich_v1.json
+  tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct
+  use_latent_cache: false
+
+  crop_v_anchor:
+    anime: 0.15
+
+  multi_ar:
+    enabled: true
+    assignment_mode: item_queue
+    bucket_mode: adaptive
+    target_area: 65536
+    divisor: 16
+    adaptive_no_upscale: true
+    adaptive_min_area_ratio: 0.75
+    adaptive_max_aspect: 4.0
+    bucket_buffer_size: 256
+    bucket_min_fill: 1
+    bucket_wait_timeout_s: 120
+    warmup_exposure_images: 0
+    warmup_steps: 0
+    square_only_domains: [synthetic, textatlas]
+    bucket_probs: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.00210938, 0.00101172, 0.0, 0.0, 0.0, 0.0, 0.00369141, 0.00571484, 0.0, 0.01423828, 0.0, 0.02056641, 0.0, 0.01050391, 0.0, 0.13894141, 0.0, 0.09164063, 0.0, 0.0, 0.01107422, 0.0, 0.037625, 0.0, 0.0, 0.0, 0.0, 0.02246094, 0.0, 0.0, 0.13439453, 0.01802734, 0.0, 0.00158203, 0.0, 0.0, 0.03913281, 0.0, 0.01138672, 0.0, 0.0, 0.10449219, 0.0, 0.21475391, 0.0, 0.00887891, 0.0, 0.02821875, 0.0, 0.03973438, 0.0, 0.01138672, 0.0, 0.01582031, 0.00158203, 0.0, 0.0, 0.00312109, 0.00685547, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.00105469, 0.0, 0.0, 0.0, 0.0, 0.0]
+    native_bucket_dist:
+      anime: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0078125, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0078125, 0.0078125, 0.0, 0.03515625, 0.0, 0.05859375, 0.0, 0.0234375, 0.0, 0.234375, 0.0, 0.16015625, 0.0, 0.0, 0.03515625, 0.0, 0.07421875, 0.0, 0.0, 0.0, 0.0, 0.03515625, 0.0, 0.0, 0.046875, 0.01171875, 0.0, 0.0, 0.0, 0.0, 0.02734375, 0.0, 0.01171875, 0.0, 0.0, 0.0390625, 0.0, 0.0625, 0.0, 0.0078125, 0.0, 0.0234375, 0.0, 0.03515625, 0.0, 0.01171875, 0.0, 0.0234375, 0.0, 0.0, 0.0, 0.0078125, 0.0078125, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.00390625, 0.0, 0.0, 0.0, 0.0, 0.0]
+      monet_real: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.00390625, 0.00390625, 0.0, 0.01171875, 0.0, 0.01171875, 0.0, 0.0078125, 0.0, 0.109375, 0.0, 0.08203125, 0.0, 0.0, 0.00390625, 0.0, 0.0234375, 0.0, 0.0, 0.0, 0.0, 0.01953125, 0.0, 0.0, 0.09765625, 0.01171875, 0.0, 0.00390625, 0.0, 0.0, 0.0234375, 0.0, 0.0078125, 0.0, 0.0, 0.14453125, 0.0, 0.28125, 0.0, 0.01171875, 0.0, 0.0390625, 0.0, 0.0546875, 0.0, 0.0078125, 0.0, 0.0234375, 0.00390625, 0.0, 0.0, 0.0, 0.01171875, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      gpic: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.00390625, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0078125, 0.0, 0.0, 0.0, 0.0, 0.0, 0.00390625, 0.0, 0.12109375, 0.0, 0.05859375, 0.0, 0.0, 0.0, 0.0, 0.03125, 0.0, 0.0, 0.0, 0.0, 0.01953125, 0.0, 0.0, 0.0625, 0.0390625, 0.0, 0.0, 0.0, 0.0, 0.0859375, 0.0, 0.01953125, 0.0, 0.0, 0.13671875, 0.0, 0.32421875, 0.0, 0.0078125, 0.0, 0.0234375, 0.0, 0.03125, 0.0, 0.01953125, 0.0, 0.0, 0.0, 0.0, 0.0, 0.00390625, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      synthetic: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      textatlas: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+sigma_sampling:
+  dist: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  shift: 1.0
+
+optimizer:
+  name: torch.optim.AdamW
+  params:
+    lr: 1.73e-4
+    weight_decay: 0.0
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+scheduler:
+  num_warmup_steps: 1000
+  decay: constant
+
+trainer:
+  seed: 42
+  amp_dtype: bfloat16
+  batch_size: 48
+  max_steps: 250000
+  max_exposure_images: 384000000
+  gradient_clip_val: 1.0
+  log_every: 10
+  dataline_metrics_every: 50
+  checkpoint_steps: 3000
+  checkpoint_keep_every: 50000
+  checkpoint_keep_max: 4
+  checkpoint_keep_format: weights_ema
+  checkpoint_dir: /fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage256_redesign_naifu_arb_v1
+  resume: true
+  skip_distributed_teardown: false
+  force_os_exit_after_train: false
+  debug_step_trace: false
+  debug_step_trace_dir: null
+  debug_trace_dump_interval: 0
+  batch_ready_barrier: false
+  batch_ready_barrier_dir: null
+  batch_ready_barrier_run_id: null
+  batch_ready_barrier_timeout_s: 300
+  ema:
+    enabled: true
+    decay: 0.9999
+  use_wandb: false
+  wandb_project: mot-pilot-v1
+  wandb_entity: null
+  wandb_mode: offline

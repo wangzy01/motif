@@ -1,0 +1,17 @@
+# TextAtlas manifest 的 per-subset 汇总（elig_512/1024、caption 覆盖与长度分位）。
+# 纯 CPU、流式有界内存、只读 manifest；上 JCC（坑点#28）。GPU 只为蹭大节点。
+name: evan-mot-textatlas-summary
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 8
+memGBPerWorker: 64
+maxRetries: 1
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  echo "===== textatlas summary start $(date -u) ====="
+  $PY scripts/summarize_textatlas_manifest.py
+  echo "===== textatlas summary done rc=$? $(date -u) ====="

@@ -1,0 +1,29 @@
+# TextAtlas5M sidecar-manifest 全量构建（一次性、纯 CPU、单机）。
+# 读 /s3/evan/textatlas5m 600 shards 的图头(w/h,header-only 不解码) + /fsx i1 caption(5.4M uid)
+# → 每源 shard 输出 sidecar parquet 到 /fsx/evan/textatlas_manifest_v1/<Subset>/<shard>.parquet。
+# 上 JCC（坑点#28：caption 全量入内存=OOM 风险，绝不在本机跑）。GPU 只为蹭大节点 CPU/RAM。
+# 内存：caption dict ~18-20GB，Pool COW 下每 worker 读触发 refcount 写→页拷贝，procs=24 最坏 ~480GB<600GB。
+# 幂等：脚本 skip-exists，挂了可重提续跑；逐 25 shard 打进度，单 shard 错只记不中断、末尾汇总。
+name: evan-mot-textatlas-build
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 48
+memGBPerWorker: 600
+maxRetries: 1
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export TMPDIR=/local/evan/tmp; mkdir -p /local/evan/tmp
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  echo "===== textatlas build start $(date -u) host=$(hostname) ====="
+  $PY scripts/build_textatlas_manifest.py --procs 24 2>&1
+  RC=$?
+  echo "===== textatlas build exited rc=$RC $(date -u) ====="
+  echo "----- per-subset output shard counts -----"
+  for s in CleanTextSynth CoverBook LongWordsSubset-A LongWordsSubset-M PPT2Details PPT2Structured Paper2Text StyledTextSynth TextScenesHQ TextVisionBlend; do
+    n=$(ls /fsx/evan/textatlas_manifest_v1/$s/*.parquet 2>/dev/null | wc -l)
+    echo "  $s: $n"
+  done
+  exit $RC

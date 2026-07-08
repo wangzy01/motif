@@ -1,0 +1,74 @@
+# stage512a REDESIGN 启动模板 —— 256→512a 阶段切换（继承 256 权重+optimizer，重置 step，换分辨率 re-warmup）。
+# 提交前必改下面【★操作者必填】：RUN_ID / INIT_FROM(256 final ckpt) / NNODES / ARCH_OVERRIDE(须与 256 run 的 arch 臂一致)。
+# 衔接机制 = trainer.init_from（train.py + checkpoint.py:init_from_checkpoint，gated）：
+#   - 触发条件 = NOT(本地 last.pt 存在 AND resume)：①首次启动(本地无 last.pt，常态) 或 ②resume=false(显式弃进度从 256 重来)。
+#     resume=true 时本地 last.pt 优先 resume → retry 不丢进度。故 init_from 可常驻命令，无需首启后删（本模板 resume 恒 true）。
+#   - 首启动作：从 INIT_FROM 载 model+optimizer 动量(+EMA)，step 重置 0，512a scheduler 从头 500 步 re-warmup。
+#   - 指纹护栏：INIT_FROM 的 arch 必须与本 run 的 model.* 一致，否则 checkpoint.py 硬报错（不会静默退化）。B1 臂须显式开 text_adapter。
+# ★步数与 lr 都随【实际 global_batch = BS×NNODES×8】缩放，不是写死值：
+#   - 步数：config 的 max_exposure_images=128M → max_steps=ceil(128M/global_batch) 自适应（无需 --max-steps）。
+#   - lr：本模板按设计 §6 sqrt 规则自动派生 lr=1e-4×sqrt(global_batch/512)（覆盖 config 里为 global1536 标定的 1.73e-4）。
+#   - 参考（仅示例，非默认）：NNODES=12→global1536→max_steps≈83k、lr≈1.73e-4；NNODES=2→global256→max_steps≈500k、lr≈7.07e-5。
+#     实跑步数/lr 以启动 log 回显为准，勿用 config 里的 83000/1.73e-4 估时长。
+# 说明：cd 到 cleanup（含 init_from 代码 + redesign dataline）；256 ckpt 是纯 state（与代码版本无关，只校 arch 指纹）。
+name: evan-redesign-512a-launch
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 2            # ★按可用节点改；须与下面 NNODES 一致。步数+lr 都随 global_batch=BS×numWorkers×8 自动缩放
+gpuPerWorker: 8
+cpuPerWorker: 48
+memGBPerWorker: 900
+maxRetries: 50
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=6 PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN
+  export FI_EFA_USE_DEVICE_RDMA=1
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  # ===== ★操作者必填 =====
+  RUN_ID=s512a_redesign_v1_REPLACEME
+  INIT_FROM="/fsx/evan/checkpoints/mot_pilot_v1/REPLACE_256_REDESIGN_RUN_ID/last.pt"   # 256 正式 run 的 final ckpt（其 checkpoint_dir/last.pt）
+  # ★须与 256 run 的 arch 臂【完全一致】（init_from 指纹硬校验，不符即报错不静默）。当前 redesign 256 正式训练臂 = causal adapter + MLF，
+  # 上前务必核对 256 job 的真实 override；若 256 是 baseline 则置空 ""。
+  ARCH_OVERRIDE="model.text_adapter.enabled=true model.text_adapter.bidirectional=false model.text_adapter.multi_layer_fusion.enabled=true"
+  NNODES=2; PORT=29744
+  # =======================
+
+  # 守卫：占位符未替换 / INIT_FROM 非文件 → 立即 fail-fast（省一轮多机拉起）
+  case "$RUN_ID" in *REPLACEME*) echo "FATAL: RUN_ID 占位符未替换"; exit 22;; esac
+  case "$INIT_FROM" in *REPLACE*|*'<'*|*'>'*) echo "FATAL: INIT_FROM 占位符未替换: $INIT_FROM"; exit 22;; esac
+  [ -f "$INIT_FROM" ] || { echo "FATAL: INIT_FROM 非文件: $INIT_FROM"; exit 22; }
+
+  CFG=configs/stage512a_redesign_v1.yaml
+  BS=16                                  # 512px 每卡 micro-batch（见 config）；global = BS × NNODES×8
+  GBS=$((BS * NNODES * 8))               # 实际 global batch
+  LR=$(awk "BEGIN{printf \"%.6e\", 1e-4*sqrt($GBS/512.0)}")   # 设计 §6：lr=1e-4×sqrt(global/512)，随节点数缩放
+  CK=/fsx/evan/checkpoints/mot_pilot_v1/$RUN_ID
+  RES=/fsx/evan/mot_code/mot_pilot_v1_cleanup/experiments/results/$RUN_ID
+  RDZV=$CK/rdzv.addr
+  mkdir -p "$CK" "$RES"
+
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  if [ "$NODE_RANK" = "0" ]; then
+    rm -f "$RDZV"; MYIP=$(hostname -i | awk '{print $1}')
+    echo "$MYIP" > "$RDZV.tmp" && mv "$RDZV.tmp" "$RDZV"; MASTER_ADDR=$MYIP
+  else
+    sleep 5
+    for i in $(seq 1 150); do [ -s "$RDZV" ] && break; sleep 2; done
+    [ -s "$RDZV" ] || { echo "FATAL rdzv file missing"; exit 20; }
+    MASTER_ADDR=$(cat "$RDZV")
+  fi
+  echo "node=$NODE_RANK master=$MASTER_ADDR world=$((NNODES*8)) global_batch=$GBS lr=$LR init_from=$INIT_FROM $(date -u)"
+  { echo "===== $RUN_ID 512a redesign launch global_batch=$GBS lr=$LR $(date -u) ====="; hostname; nvidia-smi -L; } 2>&1 | tee "$RES/probe.n$NODE_RANK.log"
+
+  # init_from 常驻：首启从 256 ckpt 初始化(step0+re-warmup)，retry 自动走 resume（本地 last.pt 优先）。
+  # max_steps 由 config 的 max_exposure_images 自适应派生 → 不传 --max-steps；lr 按实际 global_batch sqrt 派生覆盖 config 标定值。
+  DOTS="trainer.checkpoint_dir=$CK trainer.resume=true trainer.batch_size=$BS trainer.init_from=$INIT_FROM optimizer.params.lr=$LR dataset.anime_cache_dir=/local/evan/anime_img_cache $ARCH_OVERRIDE"
+  $PY -m torch.distributed.run --nnodes=$NNODES --nproc_per_node=8 --node_rank=$NODE_RANK \
+      --master_addr=$MASTER_ADDR --master_port=$PORT \
+      train.py --config $CFG $DOTS 2>&1 | tee "$RES/train.n$NODE_RANK.log"
+  RC=${PIPESTATUS[0]}; echo "===== $RUN_ID node=$NODE_RANK exited rc=$RC $(date -u) ====="; exit $RC

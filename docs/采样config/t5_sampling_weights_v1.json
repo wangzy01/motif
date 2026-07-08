@@ -1,0 +1,80 @@
+{
+  "_doc": "MoT real-pool (MONET-real + GPIC) sampling-weight config v1. Pairs with doc/mot/采样权重spec_v1_20260616.md. Caption=pointer, weights NOT baked into manifest; the loader implements band-first sampling + these factors. anime/TextAtlas domain entries are placeholders until their manifests exist.",
+  "created_at_utc": "2026-06-16",
+  "manifest": "/s3-pixai-test-uw2/evan/mot_filtering_v1/t5_manifest/rich_v1",
+  "synthetic_manifest": "/s3-pixai-test-uw2/evan/mot_filtering_v1/t5_manifest/synthetic_v1",
+
+  "tier_bounds_tok": {"T1": [1, 24], "T2": [25, 64], "T3": [65, 128], "T4": [129, 1000000]},
+
+  "band_mix_real": {"T1": 0.18, "T2": 0.27, "T3": 0.15, "T4": 0.40},
+
+  "source_alpha": 0.5,
+  "_source_alpha_note": "source_factor(i) ∝ N_source(i)^(-alpha). CONFIRMED 0.5 (Evan 2026-06-16). dry-run stage256 of-total: laion+coyo 46.6%, da4k 0.7%, eff_clusters 14481. alpha=1 is PATHOLOGICAL: da4k micro-source (11,688 imgs) blows up to 14%; cap range [0.3,0.7] if revisited.",
+  "cluster_beta": 0.5,
+  "_cluster_beta_note": "cluster_factor(i) ∝ cluster_size(cid)^(-beta). 0=natural, 0.5=~1/sqrt(gentle), 1=per-cluster uniform. cluster_id==-1 (synthetic) -> factor 1.",
+  "aes_weighting": false,
+  "_aes_note": "Evan: no aes reweighting (bottom already cut at selection).",
+
+  "monet_real_gpic_ratio": {"256": [0.80, 0.20], "512": [1.0, 0.0], "1024": [1.0, 0.0]},
+  "_monet_real_gpic_ratio_complete_v1_note": "This 80:20 is the 母池(60M)/daily config. The ACTIVE complete_v1 line (daily+anime) uses 11:7 at 256 (daily static pool 11M:7M; Evan 2026-06-17, replaces 80:20) -- see configs/t5_sampling_complete_v1.json.",
+  "_gpic_512_note": "GPIC off at 512/1024 by default (v3 doc: GPIC 退场, 256 asset). Its ge512&high-aes eligibility is still computed, so a small 512 transition/ablation subset can be enabled, e.g. 512 -> [0.97, 0.03].",
+
+  "resolution_routing": {
+    "_note": "Eligibility masks only. GPIC@512 eligibility is computed but DISABLED by default via monet_real_gpic_ratio.512=[1,0]; do NOT sample GPIC@512 unless that ratio is changed.",
+    "256":  {"gpic": "all", "monet_real": "all"},
+    "512":  {"gpic": "res_bucket==ge512 AND aes>=AES_GPIC512", "monet_real": "res_bucket==ge512"},
+    "1024": {"gpic": "none", "monet_real": "min(width,height)>=1024"}
+  },
+  "aes_gpic512_percentile": 75,
+  "_aes_gpic512_note": "GPIC must clear this aes percentile (laion_improved, ~5.57 at p75) to enter the 512 transition subset. Tunable.",
+
+  "band_to_captioner_priority": {
+    "_note": "MONET: pick first captioner whose tok_* falls in the drawn band. Priority is a SOFT preference: if none of the listed captioners lands in the band, FALL BACK to any captioner with tok_* in the band (has_tX guarantees one exists). GPIC always uses its single i1 caption; synthetic uses its generation prompt.",
+    "fallback": "any_captioner_with_tok_in_band",
+    "T4": ["gemini", "sharegpt4v", "internvl"],
+    "T3": ["internvl", "sharegpt4v", "gemini"],
+    "T2": ["florence", "original"],
+    "T1": ["original"],
+    "megalith_T2": ["florence_first_sentence"],
+    "gpic_clean_tag_preference": true,
+    "internvl_drop_trailing_incomplete_sentence": true
+  },
+
+  "caption_truncate_tok": [224, 256],
+  "caption_dropout": 0.10,
+  "caption_dropout_text_rich": "reduce_or_off_or_tag_poster_domain",
+
+  "loader_rules": {
+    "_note": "Boundary rules settled after 2 independent audits (Evan 2026-06-16). Applied at load time; manifests NOT rebuilt. All counts verified on the published parquet (job evan-mot-t5-verify-audit2).",
+    "holdout_policy": "global_exclude: loader MUST filter holdout==1 in EVERY pool. rich_v1 already 0 (excluded at selection); synthetic_v1 (shipped pre-decision) still carries 6565 holdout rows -> filter at load. Builder script now adds & holdout==0 so future rebuilds are clean.",
+    "band_eligibility": "A row is eligible for band b ONLY if some captioner has tok IN band b AND tok>0. Do NOT trust has_tX/cap_* alone: verified 13 MONET rows have has_t4==1 but NO positive T4 token (gemini overflowed) -> they must be excluded from T4.",
+    "tok_le_0_unavailable": "Treat tok_*<=0 as that captioner unavailable. Shipped rich_v1 is legacy int16 with 18 negatives (17 tok_gemini + 1 tok_original); 13 of them are a row's only T4 captioner -> those rows have no usable T4. Scripts now int32+clip so future rebuilds have none.",
+    "band_captioner_fallback": "priority is soft; if no priority captioner is in-band, fall back to any captioner with tok>0 in band (see band_to_captioner_priority.fallback).",
+    "gpic_512_1024_zero": "GPIC weight = 0 at 512 and 1024 (monet_real_gpic_ratio.512/1024 = [1,0]). Authoritative; do NOT enable GPIC@512 from resolution_routing eligibility alone.",
+    "aes_missing_null_or_nan": "Treat aes null OR NaN as missing (5,468 in MONET real). Not used here (aes weighting off); if used elsewhere, median-fill or exclude.",
+    "global_stats": "Compute N_source and cluster_size ONCE over the full 60M real pool; never recompute per-shard / per-band / per-stage subset.",
+    "domain_mix_normalize": "domain_mix is an approximate placeholder (256 sums to 0.98; anime/TextAtlas pending) -> loader MUST renormalize before use.",
+    "image_source_tar_not_thumbnail": "VERIFIED. Images = full-res JPEG from the .tar webdataset config, NOT the parquet 'thumbnail' (<=384px preview, would ruin 512/1024 stages). MONET/synth: src_shard .parquet->.tar, member {src_key}.jpg. GPIC: {src_root}/images/train/{src_shard}/{src_key}.{ext} -- ext is MIXED (~88% .jpg + ~12% .png), do NOT hardcode .jpg; authoritative path is the s3key column in parquets/gpic_train_{src_shard}.parquet (read alongside the GPIC caption). Confirmed .tar image size == manifest width/height; da4k/synthetic have no url but full-res IS in .tar."
+  },
+
+  "domain_mix": {
+    "_note": "Upper-layer cross-domain mixer. real slots (monet_real/gpic) use this spec; anime/textatlas are PLACEHOLDERS (manifests not ready); synthetic uses synthetic_v1. NOTE: rows are approximate and may not sum to 1 (256 = 0.98) -> loader MUST renormalize.",
+    "256":  {"anime": 0.20, "monet_real": 0.56, "gpic": 0.14, "synthetic": 0.05, "textatlas": 0.03},
+    "512":  {"anime": 0.55, "monet_real": 0.37, "gpic": 0.0, "synthetic": 0.05, "textatlas": 0.03},
+    "1024": {"anime": 0.70, "monet_real": 0.12, "gpic": 0.0, "synthetic": 0.18, "textatlas": 0.0}
+  },
+
+  "knob_status": {
+    "band_mix_real": "fixed (v3)",
+    "source_alpha": "set 0.5 (Evan confirmed 2026-06-16)",
+    "cluster_beta": "set 0.5 (Evan: gentle)",
+    "aes_weighting": "set off (Evan)",
+    "monet_real_gpic_ratio": "256=80:20 fixed (v3); 512/1024 GPIC=0 (Evan confirmed 2026-06-16, GPIC off at 512)",
+    "aes_gpic512_percentile": "default p75 (only used if GPIC@512 re-enabled)",
+    "domain_mix": "pending anime/textatlas manifests",
+    "caption_dropout": "fixed (v3, 0.10)",
+    "caption_truncate_tok": "fixed (v3, 224-256)",
+    "holdout_policy": "global_exclude (Evan confirmed 2026-06-16)",
+    "band_captioner_fallback": "any-tok-in-band (Evan confirmed 2026-06-16)"
+  }
+}

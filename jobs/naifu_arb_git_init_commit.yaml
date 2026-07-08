@@ -1,0 +1,36 @@
+name: evan-mot-cleanup-crop-git-baseline
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 8
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  echo "[git-baseline] cwd=$(pwd)"
+  echo "[git-baseline] checking for unexpected large files"
+  find . -path ./.git -prune -o -type f -size +100M -print
+  LARGE_COUNT=$(find . -path ./.git -prune -o -type f -size +100M -print | wc -l)
+  if [ "$LARGE_COUNT" -ne 0 ]; then
+    echo "FATAL: refusing first commit with files >100M"
+    exit 31
+  fi
+  if [ ! -d .git ]; then
+    git init -b main
+  fi
+  git config user.name "Codex JCC"
+  git config user.email "codex-jcc@local"
+  git add -A
+  git status --short
+  git diff --cached --stat
+  git commit -m "Initial cleanup_crop NAI-like ARB baseline" || {
+    rc=$?
+    if git diff --cached --quiet && git diff --quiet; then
+      echo "[git-baseline] no changes to commit"
+      exit 0
+    fi
+    exit "$rc"
+  }
+  echo "[git-baseline] HEAD=$(git rev-parse --short HEAD)"
+  git status --short

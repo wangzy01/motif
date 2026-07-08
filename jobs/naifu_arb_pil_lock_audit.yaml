@@ -1,0 +1,83 @@
+name: evan-mot-cleanup-crop-naifu-arb-pil-lock-audit
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 8
+memGBPerWorker: 32
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  export MALLOC_ARENA_MAX=2 PYTHONUNBUFFERED=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  $PY - <<'PY'
+  import concurrent.futures as cf
+  import hashlib
+  import io
+  import json
+  import os
+
+  import numpy as np
+  from PIL import Image
+
+  from training.dataline.image_fetch import decode_rgb, resize_crop_uint8
+  from training.dataline.multi_ar import resize_crop_to_bucket, resize_u8_to_bucket
+  from training.dataline.native_safety import PARQUET_NATIVE_LOCK, configure_pyarrow_single_thread
+  from training.dataline.pil_safety import PIL_NATIVE_LOCK
+  import training.dataline.complete_dataset  # noqa: F401
+
+  configure_pyarrow_single_thread()
+  try:
+      import pyarrow as pa
+      arrow_counts = {"cpu": pa.cpu_count(), "io": pa.io_thread_count()}
+  except Exception:
+      arrow_counts = {"cpu": None, "io": None}
+
+  rng = np.random.default_rng(123)
+  arr = rng.integers(0, 255, size=(768, 512, 3), dtype=np.uint8)
+  src = Image.fromarray(arr, "RGB")
+  raw_jpeg = io.BytesIO()
+  raw_png = io.BytesIO()
+  src.save(raw_jpeg, format="JPEG", quality=92)
+  src.save(raw_png, format="PNG")
+  payloads = [raw_jpeg.getvalue(), raw_png.getvalue()]
+
+  def digest(x):
+      return hashlib.sha256(np.ascontiguousarray(x).tobytes()).hexdigest()
+
+  def one(i):
+      raw = payloads[i % len(payloads)]
+      anchor = 0.15 if i % 3 == 0 else 0.5
+      img = decode_rgb(raw)
+      assert img is not None and img.mode == "RGB"
+      sq = resize_crop_uint8(img, 256, anchor)
+      assert sq.shape == (256, 256, 3) and sq.dtype == np.uint8
+      ar = resize_crop_to_bucket(img, 304, 208, anchor)
+      assert ar.shape == (304, 208, 3) and ar.dtype == np.uint8
+      rr = resize_u8_to_bucket(sq, 208, 304, anchor)
+      assert rr.shape == (208, 304, 3) and rr.dtype == np.uint8
+      return digest(sq), digest(ar), digest(rr)
+
+  serial = [one(i) for i in range(12)]
+  with cf.ThreadPoolExecutor(max_workers=8) as ex:
+      parallel = list(ex.map(one, range(96)))
+  assert len(parallel) == 96
+  assert serial[0] == one(0)
+  print(json.dumps({
+      "status": "PASS",
+      "pid": os.getpid(),
+      "lock_type": type(PIL_NATIVE_LOCK).__name__,
+      "parquet_lock_type": type(PARQUET_NATIVE_LOCK).__name__,
+      "pyarrow_threads": arrow_counts,
+      "serial_cases": len(serial),
+      "parallel_cases": len(parallel),
+      "first_digest": serial[0],
+      "env": {
+          "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
+          "ARROW_NUM_THREADS": os.environ.get("ARROW_NUM_THREADS"),
+          "MALLOC_ARENA_MAX": os.environ.get("MALLOC_ARENA_MAX"),
+      },
+  }, indent=2, ensure_ascii=False))
+  PY

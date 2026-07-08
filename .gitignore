@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# 训练/调试产物（可再生，别入库；大 ckpt 走 /local 或 S3）
+outputs/
+*.pt
+*.ckpt
+*.safetensors
+*.log
+metrics.jsonl
+wandb/
+
+# 本地缓存（/local 的 anime 图缓存 / stats / HF 等不在本目录，留此防误加）
+*.tmp
+*.tmp.*
+.DS_Store

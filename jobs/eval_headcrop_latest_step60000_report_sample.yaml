@@ -1,0 +1,11 @@
+name: evan-hc-latest60-report-sample
+image: harbor.jh1.mewtant.io/hub/library/python:3.11
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 1
+memGBPerWorker: 4
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  python experiments/eval/aggregate_headcrop_latest_sample.py

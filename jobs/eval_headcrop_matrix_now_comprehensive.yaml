@@ -1,0 +1,71 @@
+# Submit immediately with the latest available stage512a last.pt:
+#   /fsx/evan/bin/jcc job submit jobs/eval_headcrop_matrix_now_comprehensive.yaml
+#
+# Outputs:
+#   /fsx/evan/mot_code/data_analysis/outputs/headcrop_matrix_now_comprehensive/<label>/<WxH>/...
+name: evan-mot-eval-headcrop-matrix-now-comprehensive
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 16
+memGBPerWorker: 220
+maxRetries: 0
+command: |
+  set -euo pipefail
+  set -x
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export HF_HOME=/local/evan/cache/huggingface TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  mkdir -p "$HF_HOME" "$TORCH_HOME" "$TRITON_CACHE_DIR"
+  set +x
+  if [ -f /fsx/evan/.hf_token ]; then export HF_TOKEN=$(tr -d '[:space:]' < /fsx/evan/.hf_token); echo "[token] len=${#HF_TOKEN}"; else echo "[token] MISSING"; fi
+  set -x
+
+  export RD512A_LATEST_SOURCE_CKPT=/fsx/evan/checkpoints/mot_pilot_v1/redesign_512a_multiar_anchor_global1536_20260705/last.pt
+  export RD512A_LATEST_MIN_STEP=18001
+
+  GATES=/fsx/evan/checkpoints/mot_pilot_v1/redesign_512a_gates
+  test -s "$GATES/gate_g1.pt"
+  test -s "$RD512A_LATEST_SOURCE_CKPT"
+  $PY -m py_compile experiments/eval/sample_headcrop_matrix.py
+  $PY -m py_compile experiments/eval/aggregate_headcrop_scores.py
+  $PY -m py_compile experiments/eval/plan_headcrop_subagent_batches.py
+
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/headcrop_matrix_now_comprehensive
+  SNAPDIR=$BASE/ckpts
+  mkdir -p "$SNAPDIR"
+  SNAP=$SNAPDIR/rd512a_latest_eval_snapshot.pt
+  cp --reflink=auto "$RD512A_LATEST_SOURCE_CKPT" "$SNAP.tmp"
+  mv -f "$SNAP.tmp" "$SNAP"
+  export RD512A_LATEST_CKPT="$SNAP"
+  ls -lh "$RD512A_LATEST_SOURCE_CKPT" "$RD512A_LATEST_CKPT"
+
+  TAG13=/fsx/evan/mot_code/data_analysis/configs/anime_evalset_tag13_headcrop.jsonl
+  NL13=/fsx/evan/mot_code/data_analysis/configs/anime_evalset_nl13_headcrop.jsonl
+  NLPLAIN=experiments/eval/prompts/anime_evalset_nl13_plain_headcrop.jsonl
+  REAL12=experiments/eval/prompts/real_headcrop_12.jsonl
+
+  RUNS="rd256_final rd512a_g1 rd512a_latest"
+  COMMON="--runs $RUNS --steps 64 --cfg 4.0 --seeds 7 1007 --weights ema --batch-size 4 --out-dir $BASE"
+
+  # Square baseline for prompt-style comparison.
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 120m $PY experiments/eval/sample_headcrop_matrix.py $COMMON --evalset "$TAG13"    --label anime_tag13_square       --width 512 --height 512
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 120m $PY experiments/eval/sample_headcrop_matrix.py $COMMON --evalset "$NLPLAIN" --label anime_nl_plain13_square  --width 512 --height 512
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 120m $PY experiments/eval/sample_headcrop_matrix.py $COMMON --evalset "$NL13"     --label anime_nl_emph13_square   --width 512 --height 512
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 120m $PY experiments/eval/sample_headcrop_matrix.py $COMMON --evalset "$REAL12"   --label real12_square            --width 512 --height 512
+
+  # Full multi-AR coverage: tag, NL plain, NL emphasis, and real.
+  for WH in 416x624 624x416 384x688 688x384; do
+    W=${WH%x*}
+    H=${WH#*x}
+    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 120m $PY experiments/eval/sample_headcrop_matrix.py $COMMON --evalset "$TAG13"    --label anime_tag13_ar       --width "$W" --height "$H"
+    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 120m $PY experiments/eval/sample_headcrop_matrix.py $COMMON --evalset "$NLPLAIN" --label anime_nl_plain13_ar  --width "$W" --height "$H"
+    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 120m $PY experiments/eval/sample_headcrop_matrix.py $COMMON --evalset "$NL13"     --label anime_nl_emph13_ar   --width "$W" --height "$H"
+    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 120m $PY experiments/eval/sample_headcrop_matrix.py $COMMON --evalset "$REAL12"   --label real12_ar            --width "$W" --height "$H"
+  done
+
+  find "$BASE" -name '*.png' | sort > "$BASE/all_images.txt"
+  find "$BASE" -name 'sample_manifest.json' | sort > "$BASE/all_manifests.txt"
+  $PY experiments/eval/plan_headcrop_subagent_batches.py --manifests $(cat "$BASE/all_manifests.txt") --out-dir "$BASE/subagent_batches" --batch-size 18
+  echo "DONE $(wc -l < "$BASE/all_images.txt") images"

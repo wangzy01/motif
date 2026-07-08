@@ -1,0 +1,87 @@
+name: evan-mot-cleanup-crop-naifu-arb-config-audit
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 8
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  OUT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/naifu_arb_config_audit_20260708
+  mkdir -p "$OUT"
+  $PY -m py_compile train.py training/dataline/multi_ar.py training/dataline/complete_dataset.py training/dataline/manifest_index.py training/dataline/native_safety.py training/config_schema.py
+  $PY -m training.config_schema configs/stage256_redesign_naifu_arb_v1.yaml | tee "$OUT/schema.txt"
+  $PY - <<'PY' | tee "$OUT/audit.txt"
+  import json, math
+  from pathlib import Path
+  from omegaconf import OmegaConf
+  from training.dataline.multi_ar import build_adaptive_buckets, square_index
+
+  root = Path("/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop")
+  cfg = OmegaConf.load(root / "configs/stage256_redesign_naifu_arb_v1.yaml")
+  assert str(root).endswith("mot_pilot_v1_cleanup_crop")
+  assert cfg.dataset.multi_ar.enabled is True
+  assert cfg.dataset.multi_ar.assignment_mode == "item_queue"
+  assert cfg.dataset.multi_ar.bucket_mode == "adaptive"
+  assert cfg.dataset.multi_ar.target_area == 65536
+  assert cfg.dataset.multi_ar.divisor == 16
+  assert cfg.dataset.multi_ar.adaptive_max_aspect == 4.0
+  assert list(cfg.dataset.multi_ar.square_only_domains) == ["synthetic", "textatlas"]
+  assert "native_bucket_dist" in cfg.dataset.multi_ar
+  assert "bucket_probs" in cfg.dataset.multi_ar
+  assert cfg.dataset.image_size == 256
+  assert cfg.dataset.use_latent_cache is False
+  assert cfg.dataset.crop_v_anchor.anime == 0.15
+  assert cfg.dataset.producer_native_io_serial is False
+  assert str(cfg.trainer.checkpoint_dir).startswith("/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/")
+  buckets = build_adaptive_buckets(
+      int(cfg.dataset.multi_ar.target_area),
+      int(cfg.dataset.multi_ar.divisor),
+      float(cfg.dataset.multi_ar.adaptive_min_area_ratio),
+      float(cfg.dataset.multi_ar.adaptive_max_aspect),
+  )
+  sq = square_index(buckets)
+  tokens = [(h // 16) * (w // 16) for h, w in buckets]
+  areas = [h * w for h, w in buckets]
+  aspects = [w / h for h, w in buckets]
+  assert buckets[sq] == (256, 256), buckets[sq]
+  assert len(buckets) > 7, len(buckets)
+  assert min(areas) >= int(65536 * 0.75), min(areas)
+  assert max(areas) <= 65536, max(areas)
+  assert min(aspects) >= 0.25 - 1e-9 and max(aspects) <= 4.0 + 1e-9
+  assert max(tokens) <= 256 and min(tokens) >= 192
+  probs = [float(x) for x in cfg.dataset.multi_ar.bucket_probs]
+  assert len(probs) == len(buckets), (len(probs), len(buckets))
+  assert abs(sum(probs) - 1.0) < 1e-5, sum(probs)
+  rows = {str(k): [float(x) for x in v] for k, v in cfg.dataset.multi_ar.native_bucket_dist.items()}
+  assert set(rows) == {"anime", "monet_real", "gpic", "synthetic", "textatlas"}, sorted(rows)
+  for d, row in rows.items():
+      assert len(row) == len(buckets), (d, len(row), len(buckets))
+      assert all(x >= 0 for x in row), d
+      assert abs(sum(row) - 1.0) < 1e-6, (d, sum(row))
+  for d in ("synthetic", "textatlas"):
+      assert rows[d][sq] == 1.0 and sum(x for i, x in enumerate(rows[d]) if i != sq) == 0.0, d
+  gbs = 2 * 8 * 144
+  max_steps = math.ceil(int(cfg.trainer.max_exposure_images) / gbs)
+  print(json.dumps({
+      "status": "PASS",
+      "config": "configs/stage256_redesign_naifu_arb_v1.yaml",
+      "bucket_count": len(buckets),
+      "square_index": sq,
+      "first_buckets": buckets[:8],
+      "last_buckets": buckets[-8:],
+      "latent_tokens_min": min(tokens),
+      "latent_tokens_max": max(tokens),
+      "area_min": min(areas),
+      "area_max": max(areas),
+      "aspect_min": min(aspects),
+      "aspect_max": max(aspects),
+      "bucket_probs_sum": sum(probs),
+      "bucket_probs_nonzero": sum(1 for p in probs if p > 0),
+      "global_batch_bs144_2x8": gbs,
+      "max_steps_at_global2304": max_steps,
+  }, ensure_ascii=False, indent=2))
+  PY

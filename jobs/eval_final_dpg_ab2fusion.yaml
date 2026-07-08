@@ -1,0 +1,49 @@
+# Stage256 FINAL eval - DPG-Bench for ONE run, strided ~267 prompts (every 4th of 1065), seed 7.
+# grid1 -> Qwen3-VL judge (venv-dpg, primary); grid2 -> ORIGINAL mPLUG judge (conda dpg-mplug,
+# leaderboard-comparable, best-effort). Read-only w.r.t. training.
+name: evan-mot-evalf-dpg-ab2fusion
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 16
+memGBPerWorker: 220
+maxRetries: 0
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  PYG=/fsx/evan/mot_code/venv-gpu/bin/python
+  PYD=/fsx/evan/mot_code/venv-dpg/bin/python
+  PYM=/fsx/evan/miniconda3/envs/dpg-mplug/bin/python
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export HF_HOME=/local/evan/cache/huggingface TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  mkdir -p $HF_HOME $TORCH_HOME $TRITON_CACHE_DIR
+  M=ab2fusion
+  OUT=experiments/results/eval_final_4model/dpg
+  SUBSET=$OUT/dpg_subset.jsonl
+  Q=$OUT/samples_qwen
+  G=$OUT/samples_mplug
+  mkdir -p $Q $G $OUT/qwen $OUT/mplug
+  nvidia-smi -L || true
+  if [ ! -s $SUBSET ]; then awk 'NR%4==1' experiments/eval/dpg/dpg_prompts.jsonl > $SUBSET; fi
+  echo "[subset] $(wc -l < $SUBSET) DPG prompts"
+  echo "===== [$M] GEN grid1 (single img, Qwen) ====="
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 90m $PYG experiments/eval/dpg/generate_dpg.py \
+    --runs $M --prompts $SUBSET --out-dir $Q --size 256 --steps 64 --cfg 4.0 --seed 7 --weights ema --batch-size 8 --grid 1
+  echo "===== [$M] GEN grid2 (2x2, mPLUG) ====="
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 120m $PYG experiments/eval/dpg/generate_dpg.py \
+    --runs $M --prompts $SUBSET --out-dir $G --size 256 --steps 64 --cfg 4.0 --seed 7 --weights ema --batch-size 8 --grid 2
+  echo "===== [$M] JUDGE Qwen3-VL (primary) ====="
+  set +e
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 150m $PYD experiments/eval/dpg/run_dpg.py \
+    --samples-dir $Q --data $SUBSET --runs $M --backend qwen3vl --out-dir $OUT/qwen
+  echo "[dpg-qwen-$M] rc=$?"
+  echo "===== [$M] JUDGE mPLUG (best-effort, leaderboard-comparable) ====="
+  export MODELSCOPE_CACHE=/fsx/evan/modelscope_cache
+  timeout 200m $PYM experiments/eval/dpg/score_dpg_mplug.py \
+    --image-dir $G/$M --data $SUBSET --pic-num 4 --resolution 256 \
+    --modelscope-cache /fsx/evan/modelscope_cache \
+    --out $OUT/mplug/dpg_$M.json --detail $OUT/mplug/dpg_${M}_detail.jsonl
+  echo "[dpg-mplug-$M] rc=$?"
+  set -e
+  echo "===== [$M] DPG DONE ====="
+  head -40 $OUT/qwen/dpg_$M.json 2>/dev/null || true

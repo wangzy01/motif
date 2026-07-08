@@ -1,0 +1,45 @@
+name: evan-hc-combo-probe
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 1
+memGBPerWorker: 4
+maxRetries: 0
+command: |
+  set -euo pipefail
+  ROOT=/fsx/evan/mot_code/data_analysis/outputs
+  MAIN="$ROOT/headcrop_matrix_now_comprehensive"
+  SHARDS="$ROOT/headcrop_matrix_now_shards"
+  OUT="$MAIN/combined_progress_probe_latest.txt"
+  TMP="$OUT.tmp"
+  {
+    date -u
+    echo "[main]"
+    echo "png_count=$(find "$MAIN" -name '*.png' | wc -l)"
+    echo "manifest_count=$(find "$MAIN" -name 'sample_manifest.json' | wc -l)"
+    echo "all_images_lines=$([ -f "$MAIN/all_images.txt" ] && wc -l < "$MAIN/all_images.txt" || echo 0)"
+    echo "all_manifests_lines=$([ -f "$MAIN/all_manifests.txt" ] && wc -l < "$MAIN/all_manifests.txt" || echo 0)"
+    echo "batch_plan=$([ -f "$MAIN/subagent_batches/subagent_batch_plan.json" ] && echo yes || echo no)"
+    echo "[shards]"
+    if [ -d "$SHARDS" ]; then
+      echo "png_count=$(find "$SHARDS" -name '*.png' | wc -l)"
+      echo "manifest_count=$(find "$SHARDS" -name 'sample_manifest.json' | wc -l)"
+      for d in "$SHARDS"/*; do
+        [ -d "$d" ] || continue
+        echo "[shard $(basename "$d")]"
+        echo "png_count=$(find "$d" -name '*.png' | wc -l)"
+        echo "manifest_count=$(find "$d" -name 'sample_manifest.json' | wc -l)"
+        echo "all_images_lines=$([ -f "$d/all_images.txt" ] && wc -l < "$d/all_images.txt" || echo 0)"
+        echo "all_manifests_lines=$([ -f "$d/all_manifests.txt" ] && wc -l < "$d/all_manifests.txt" || echo 0)"
+        echo "batch_plan=$([ -f "$d/subagent_batches/subagent_batch_plan.json" ] && echo yes || echo no)"
+      done
+    else
+      echo "png_count=0"
+      echo "manifest_count=0"
+    fi
+    echo "[jobs_hint]"
+    echo "expected_total_unique_images=1530"
+    echo "expected_total_unique_manifests=20"
+  } > "$TMP"
+  mv -f "$TMP" "$OUT"
+  cat "$OUT"

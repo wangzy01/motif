@@ -1,0 +1,37 @@
+# 离线 FLUX.2 VAE moments 缓存 —— stage 1024 全量（8×H100 单节点）
+# 提交: jcc job submit jobs/vae_cache_moments_256.yaml
+# 看日志: jcc job log evan-mot-vae-cache-1024 -p all -n 400
+# 产出: /s3/evan/mot_latents/complete_v1_flux2_moments/stage=1024/{latents,index,failed,run_stats,summary.json,qc.json}
+# 范围: anime/MONET-real/synth(GPIC 无≥1024数据,不参与) ∩ elig_1024==1 ∩ holdout==0  (~16.0M, moments bf16 ~30.6 TiB)
+name: evan-mot-vae-cache-1024
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 8
+cpuPerWorker: 80
+memGBPerWorker: 800
+maxRetries: 2
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=4
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton
+  mkdir -p /local/evan/vae_cache_scratch /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  OUT=/s3/evan/mot_latents/complete_v1_flux2_moments
+  CFG=/fsx/evan/mot_code/data_analysis/configs/t5_sampling_complete_v1.json
+
+  echo "===== STACK PROBE ====="; date -u; hostname; nvidia-smi
+  $PY -c "import torch,diffusers; print('torch',torch.__version__,'diffusers',diffusers.__version__,'ndev',torch.cuda.device_count())"
+
+  echo "===== CACHE stage 1024 (8 ranks) ====="
+  PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1 $PY -m torch.distributed.run --nproc_per_node=8 --master_port=29653 \
+    scripts/vae_cache_flux2_moments.py --stage 1024 --config "$CFG" --out-root "$OUT" \
+    --scratch /local/evan/vae_cache_scratch --vae-path /fsx/models/FLUX.2-klein-4B/vae \
+    --anime-cache /local/evan/anime_img_cache \
+    --batch-size 16 --chunk-gib 3.0 --fetch-workers 64 --tar-workers 12
+
+  echo "===== QC stage 1024 (rank0 single proc) ====="
+  PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1 $PY scripts/vae_cache_qc.py --stage 1024 --out-root "$OUT" --config "$CFG" || echo "QC non-fatal failure (缓存数据已落盘，可手动重跑 QC)"
+  echo "===== DONE ====="; date -u

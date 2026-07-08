@@ -1,0 +1,80 @@
+# CPU-only JCC audit for stage256 multi-AR config/job invariants.
+name: evan-mot-rd256-mar-config-audit
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 8
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  OUT=/fsx/evan/mot_code/data_analysis/outputs/redesign_256_multiar_config_audit_20260708
+  mkdir -p "$OUT"
+  $PY -m py_compile training/dataline/multi_ar.py training/dataline/complete_dataset.py training/checkpoint.py training/config_schema.py
+  $PY -m training.config_schema configs/stage256_redesign_multiar_v1.yaml | tee "$OUT/schema.txt"
+  $PY - <<'PY' | tee "/fsx/evan/mot_code/data_analysis/outputs/redesign_256_multiar_config_audit_20260708/audit.txt"
+  import json, math, re
+  from pathlib import Path
+  from omegaconf import OmegaConf
+  from training.dataline.multi_ar import build_buckets, square_index
+
+  root = Path("/fsx/evan/mot_code/mot_pilot_v1_cleanup")
+  cfg = OmegaConf.load(root / "configs/stage256_redesign_multiar_v1.yaml")
+  buckets = build_buckets(
+      int(cfg.dataset.multi_ar.target_area),
+      int(cfg.dataset.multi_ar.divisor),
+      list(cfg.dataset.multi_ar.ar_list),
+  )
+  expected = [(336, 192), (320, 208), (288, 224), (256, 256), (224, 288), (208, 320), (192, 336)]
+  assert buckets == expected, (buckets, expected)
+  sq = square_index(buckets)
+  assert sq == 3, sq
+  tokens = [(h // 16) * (w // 16) for h, w in buckets]
+  assert max(tokens) <= 260 and min(tokens) >= 252, tokens
+  assert cfg.dataset.image_size == 256
+  assert cfg.dataset.multi_ar.enabled is True
+  assert cfg.dataset.multi_ar.target_area == 65536
+  assert [round(float(x), 4) for x in cfg.dataset.multi_ar.bucket_probs] == [0.0248, 0.128, 0.1354, 0.3541, 0.164, 0.1364, 0.0572]
+  assert cfg.dataset.crop_v_anchor.anime == 0.15
+  assert cfg.dataset.use_latent_cache is False
+  assert cfg.dataset.drain_mode == "proportional"
+  assert list(cfg.dataset.multi_ar.square_only_domains) == ["synthetic", "textatlas"]
+  assert set(cfg.dataset.multi_ar.native_bucket_dist.keys()) == {"anime", "monet_real", "gpic", "synthetic", "textatlas"}
+  for d, row in cfg.dataset.multi_ar.native_bucket_dist.items():
+      vals = [float(x) for x in row]
+      assert len(vals) == len(buckets), (d, vals)
+      assert all(v >= 0 for v in vals), (d, vals)
+      assert sum(vals) > 0, (d, vals)
+  gbs = 2 * 8 * 144
+  warmup_steps = math.ceil(int(cfg.dataset.multi_ar.warmup_exposure_images) / gbs)
+  max_steps = math.ceil(int(cfg.trainer.max_exposure_images) / gbs)
+  assert warmup_steps == 5534, warmup_steps
+  assert max_steps == 166667, max_steps
+  for rel in ["jobs/redesign_256_multiar_2x8_causalmlf_smoke_bs144.yaml",
+              "jobs/redesign_256_multiar_2x8_causalmlf_FORMAL.yaml"]:
+      txt = (root / rel).read_text()
+      assert "configs/stage256_redesign_multiar_v1.yaml" in txt, rel
+      assert "LR=2.121e-4" in txt, rel
+      assert "model.text_adapter.enabled=true" in txt, rel
+      assert "model.text_adapter.bidirectional=false" in txt, rel
+      assert "model.text_adapter.multi_layer_fusion.enabled=true" in txt, rel
+      assert re.search(r"BS=144;\s*NNODES=2", txt), rel
+  formal = (root / "jobs/redesign_256_multiar_2x8_causalmlf_FORMAL.yaml").read_text()
+  assert "EXPOSURE=384000000" in formal
+  assert "trainer.checkpoint_steps=3000" in formal
+  assert "trainer.checkpoint_keep_every=60000" in formal
+  smoke = (root / "jobs/redesign_256_multiar_2x8_causalmlf_smoke_bs144.yaml").read_text()
+  assert "trainer.save_final=false" in smoke
+  assert "trainer.checkpoint_steps=0" in smoke
+  assert "--max-steps 320" in smoke
+  print(json.dumps({
+      "status": "PASS",
+      "buckets_h_w": buckets,
+      "latent_tokens": tokens,
+      "global_batch": gbs,
+      "warmup_steps_at_global2304": warmup_steps,
+      "max_steps_at_global2304": max_steps,
+  }, ensure_ascii=False, indent=2))
+  PY

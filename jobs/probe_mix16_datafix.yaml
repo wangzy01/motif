@@ -1,0 +1,37 @@
+# Phase-1 数据修复验证：16-rank(2×8) 生产真实 mix 探针，跑【cleanup】树(含 force_row_level 分片 +
+# decode 并行 + gpic 去 stat)。0 GPU。每节点起 8 个 probe 进程(rank=node*8+local, world=16, bs96,
+# sleep2.5)，各写 rank$GR.log(含 [probe-json] 行)；事后用 scripts/aggregate_probe_mix.py 聚合。
+# 对照基线：审计 §1.1 修复前(gpic 聚合 -7.2pp、per-rank gpic 6.9–28.9%/monet 29.9–58.1%)。
+name: evan-mot-probe-mix16-datafix
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 2
+gpuPerWorker: 0
+cpuPerWorker: 40
+memGBPerWorker: 380
+maxRetries: 1
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export OMP_NUM_THREADS=4
+  mkdir -p /local/evan/cache/huggingface /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  CFG=configs/stage1a_t2i_256_v2.yaml
+  STATS=/fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json
+  RES=/fsx/evan/mot_code/mot_pilot_v1_cleanup/experiments/results/probe_mix16_datafix
+  mkdir -p "$RES"
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  echo "node=$NODE_RANK 起 8 进程 $(date -u)"
+  for L in 0 1 2 3 4 5 6 7; do
+    GR=$((NODE_RANK*8 + L))
+    $PY scripts/probe_realized_mix.py --config $CFG \
+        --rank $GR --world 16 --batch-size 96 --warmup 60 --count 150 --sleep 2.5 \
+        dataset.stats_cache=$STATS dataset.anime_cache_dir=/local/evan/anime_img_cache \
+        > "$RES/rank$GR.log" 2>&1 &
+  done
+  wait
+  echo "===== node=$NODE_RANK 全部 8 进程结束 $(date -u) ====="
+  grep -L "probe-json" "$RES"/rank*.log 2>/dev/null | sed 's/^/  未完成: /' || true
+  # 本节点的 8 个 rank 各打一行 json 摘要(聚合在全 job Succeeded 后跑 aggregate_probe_mix.py)
+  grep -h "probe-json" "$RES"/rank*.log 2>/dev/null || true

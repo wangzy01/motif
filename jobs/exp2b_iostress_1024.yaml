@@ -1,0 +1,33 @@
+# EXP2b — 补 1024 档 IO 压测（exp2 主 job 因 config 名 bug 漏跑 1024：1024 是 stage2_1024.yaml
+# 不是 stage1a_t2i_1024.yaml）。2×H100，io_stress 不分片（model unsharded ~45GB@1024bs8，可放下）。
+# 提交: jcc job submit jobs/exp2b_iostress_1024.yaml
+name: evan-mot-exp2b-iostress-1024
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 2
+cpuPerWorker: 48
+memGBPerWorker: 500
+maxRetries: 0
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=8 PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  STATS=/fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json
+  RES=/fsx/evan/mot_code/mot_pilot_v1/experiments/results/exp2_iostress
+  mkdir -p $RES
+  date -u; hostname; nvidia-smi
+  io() { # buf q nrows port tag measure
+    timeout 40m $PY -m torch.distributed.run --nproc_per_node=2 --master_port=$4 \
+      experiments/exp_scripts/io_stress.py --config configs/stage2_1024.yaml \
+      --stage 1024 --image-size 1024 --batch-size 8 --buffer-size $1 --queue-size $2 --anime-nrows $3 \
+      --warmup 8 --measure $6 --stats-cache $STATS 2>&1 | tee $RES/sweep_1024_$5.log
+  }
+  io 128 64 8000 29661 small 50 || true
+  io 768 384 40000 29662 large 50 || true
+  io 384 192 16000 29663 sustained 150 || true
+  grep -h "IO_STRESS_JSON" $RES/sweep_1024_*.log >> $RES/all_results_1024.jsonl || true
+  echo "##### DONE #####"; date -u

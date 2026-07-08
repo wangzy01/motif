@@ -1,0 +1,171 @@
+# stage512a —— 数据+训练阶段 REDESIGN 配方（2026-06-29）【设计权威: docs/数据+训练阶段_重设计方案_v1_20260629.md §3/§6/§7】
+# ───────────────────────────────────────────────────────────────────────────
+# ⚠️ REDESIGN 新方案的 stage512a config, 给【未来重设计训练】用; 绝不喂给在跑的 v1/B1/B3/消融。
+# 基于 stage256_redesign_v1.yaml 克隆, 改动（256→512a = 换分辨率阶段）:
+#   1) stage="512a" / image_size=512 / model.text_max_length=512（512 阶段 image 主导, 升 token 截断打到~0）。
+#      ★ dataline elig 用 elig_{image_size}=elig_512（Phase2a gated code）; caption 路由 512a=40/30/20/10
+#        （rich_nl40/nl30/nl_short20/tag_medium10, has_nl 行；2026-06-30 早减 tag: tag 25→10, 让渡 长句+5/中等+10。权威=JSON）。
+#   2) domain_mix 512a=anime0.37/monet0.40/gpic0.13/synth0.05/text0.05（保守抬 anime + text/synth 不回现512的10%）。
+#      —— 由共享 JSON t5_sampling_redesign_v1.json 的 512a 块提供（无需改 JSON）。
+#   3) 曝光量 256M（REDESIGN 512a 预算; 2026-07-05 Evan 拍板 128M→256M）: max_steps = 256M / global_batch。global 1536 -> 166,667 步。
+#   4) noise-shift=1.0（512 不 shift, 对齐 i1 实测, §6 锁定）。
+#   5) 换分辨率 re-warmup: num_warmup_steps=500（256→512a latent token 数变, 加几百步保险; §6）。
+#   6) multi-AR（§7）: 512a 起加, 但 dataset.multi_ar.enabled 默认 false（Phase2b 分桶 sampler 落地+验证后再开）。
+#   7) batch_size 默认按 512px 调小（job yaml 按 world 覆盖）; checkpoint_dir 独立。
+# 模型/sigma/优化器机制沿用 v2 谱系; lr 1.73e-4=1e-4×sqrt(1536/512)。
+
+model_cls: networks.model_mot.MoTT2IModel
+target_device: cuda
+
+model:
+  pretrained_path: /fsx/models/Qwen3-VL-2B-Instruct
+  tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct
+  patch_size: 1
+  time_gap: 2048
+  timestep_multiplier: 1.0
+  text_max_length: 512            # 512 阶段升 512（dense-NL 全保真, 截断~0）; dataline budget 由 JSON per-stage=512 提供
+  cfg_dropout_prob: 0.1
+  text_rich_cfg_dropout_prob: 0.0
+  prompt_template:
+    enabled: true
+  gradient_checkpointing: true
+
+  sandwich_norm: true
+  noise_condition: true
+  long_skip:
+    enabled: false
+    mode: A_full
+  text_adapter:
+    enabled: false
+    num_layers: 2
+    multi_layer_fusion:
+      enabled: false
+      num_layers: 12
+  und_lora:
+    enabled: false
+    num_layers: 8
+    rank: 32
+    alpha: 32
+    lr_scale: 0.3
+    target_modules: [q, k, v, o]
+  abs_sincos:
+    enabled: false
+
+vae:
+  name: flux2
+  pretrained_path: /fsx/models/FLUX.2-klein-4B/vae
+  dtype: bfloat16
+
+dataset:
+  store_cls: training.dataline.complete_dataset.CompleteV1Dataset
+  sampling_config: /fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json  # ★共享 REDESIGN JSON; 512a 块提供 domain_mix/caption 路由/per-stage token
+  stage: "512a"                      # ★ dataline elig 用 elig_{image_size}=elig_512（Phase2a）
+  image_size: 512
+  buffer_size: 512                   # 512 阶段放大(原 256): multi-AR 把每域样本再拆 7 桶→256 易现小域桶空洞(advisor)；512px u8≈0.8-1MB×512×5域≈2.5GB RAM, GPU 节点充裕
+  queue_size: 128
+  min_fill: 64
+  first_fill_policy: all_min
+  first_fill_timeout_s: 180          # 512 取图/decode 更重, 放宽首批超时
+  fetch_workers: 8
+  drain_mode: proportional           # ★对齐 live 最佳实践(uniform 是已知 domain_mix 回归源, F1/F2 修复)；multi-AR 分桶下尤其要 proportional 以保各域 mix(每域只淘本批被抽中数, 不被快域 renorm-away)
+  # ---- TextAtlas 第5域: 512a text=0.05 ----
+  textatlas_local_root: /local/evan/textatlas5m
+  anime_nrows: 20000
+  anime_cache_dir: /local/evan/anime_img_cache
+  stats_cache: /fsx/evan/mot_code/data_analysis/outputs/monet_global_stats_rich_v1.json  # ★REDESIGN 专用(rich_v1); 绝不指回 daily
+  tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct
+  use_latent_cache: false
+  # ---- 裁剪竖直锚点（Path B, 缺头修复 2026-07-05 拍板）----
+  # 根因: 中心裁方图 × anime 66% portrait（顶损≥15% 占 37%）→ stage256 生成缺头。anime 竖直裁 anchor=0.15
+  #   （贴顶保头, 非 0.5 居中）→ portrait 图裁掉的绝大部分落在底部、保住头部。其余域缺省 0.5=旧居中(逐字节不变)。
+  #   透传到 方图 center-crop / multi-AR 桶裁 / re-resize 兜底 的竖直裁剪(Path B+C 组合的所有裁剪点)。
+  crop_v_anchor:
+    anime: 0.15
+  # ---- multi-AR（§7, Phase2b）----
+  multi_ar:
+    enabled: true                    # ★缺头修复 2026-07-05 Evan 拍板启用 Path C(multi-AR 分桶): portrait 多进竖桶=零裁剪、剩余裁剪走 crop_v_anchor 保头; false=纯方图 512（Phase2a 已验）
+    target_area: 262144              # 等面积 ~512²; 每桶 H*W≈此值
+    divisor: 16                      # 每边整除 16（FLUX.2 VAE f16 → latent 边整数, 模型可整 patch）
+    ar_list: [1.3333, 1.5, 1.7778]   # w/h>1 = 4:3/3:2/16:9 → 自动 +1:1 +各自倒数 = 7 桶（Evan 2026-06-30 拍板）
+    # warmup 曝光化（gated, 2026-07-05）：>0 时 loader 按 曝光/global_batch 派生 warmup_steps → 固定曝光量、
+    #   不随实际 global_batch 浮动错位。12,748,800 = 1536×8300（≈128M 曝光×10%）→ @global1536 恰好 =8300 步(与旧值等价);
+    #   若删本行/设0 则回退用下面的 warmup_steps=8300(固定步数, 旧行为)。
+    warmup_exposure_images: 12748800
+    warmup_steps: 8300               # 回退值(warmup_exposure_images=0 时用): 前 ~10% 全局步 square-only(512×512), 之后开桶（§7: 512a max_steps 83000×0.10; 不稳可延 20%）
+    # ★data-matched 先验 = Σ domain_mix[512a]·P(bucket|domain)（bucketdist 实测）, 桶序=build_buckets 排序(W/H 升): 9:16,2:3,3:4,1:1,4:3,3:2,16:9。
+    # ⚠️ 配了下面 native_bucket_dist 后本行仅作参考/回退——调度先验改用派生 P(B)=Σ mix·P_native(square_only one-hot 后)（与本行偏差>0.02 启动时 warn, 派生值为准=保 mix 恒等式精确）。
+    bucket_probs: [0.032, 0.16, 0.142, 0.314, 0.142, 0.144, 0.066]
+    # 护栏2(square_only, 2026-07-05 拍板启用)：synthetic 100%方 / textatlas 91%方, 中心裁进非方桶=破坏性顶损(裁角色/截文字, 实测 re-resize 率 0.70)。
+    #   有 native_bucket_dist(本 config 已配)→ 这两域 native 分布被 one-hot(square) 覆写吸收进 MODE-A 同一套数学（非方 B_t P(d|B)=0 → re-resize≈0, 全局 mix 精确不变）;
+    #   无 native 表时回退 MODE-B alpha=Σmix(S)/P(square)=0.10/0.314=0.318 补偿(可行性 __init__ 硬断言)。二者互斥不叠加。warmup 期全方图→正常参与。
+    square_only_domains: [synthetic, textatlas]
+    # ★Tier2 native-affinity 域采样（MODE-A, 2026-07-05 Evan 拍板, launch 前必备）：
+    #   动机: anime 结构性 ~30-40% re-resize 根源=「每域要在每种桶供出 mix 份额」而各域 native 桶分布≠调度分布。
+    #   语义(complete_dataset._build_native_affinity): 域采样 P(d|B_t)=mix_d·P_native(B_t|d)/P(B_t), 调度 P(B)=Σ_d mix_d·P_native(B|d)
+    #     → 恒等式 Σ_B P(B)·P(d|B)=mix_d【精确】(单测覆盖); 被抽中域大概率有 B_t-native 供给 → 结构性 re-resize 大降。
+    #   数据来源: data_analysis/outputs/redesign_phase2b_bucketdist.json 实测 P_bucket_given_domain（elig_512 口径=512a 训练池;
+    #     anime n=7.9M / monet n=971k / gpic n=132k(条件分布代表性够) / synth n=1.7M / text n=64k）。
+    #   桶序【必须】=build_buckets 排序(W/H 升): 9:16(688x384), 2:3(624x416), 3:4(592x448), 1:1(512x512), 4:3(448x592), 3:2(416x624), 16:9(384x688)。
+    #   synthetic/textatlas 行会被 square_only one-hot 覆写(此处保留实测原值作记录)。删除本块 → 回退 MODE-B(alpha)。
+    native_bucket_dist:
+      anime:      [0.0773, 0.3226, 0.2203, 0.1296, 0.0738, 0.0852, 0.0912]
+      monet_real: [0.0097, 0.1011, 0.1022, 0.2194, 0.2073, 0.28,   0.0804]
+      gpic:       [0.0,    0.0,    0.1334, 0.6344, 0.2322, 0.0,    0.0]
+      synthetic:  [0.0,    0.0,    0.0,    1.0,    0.0,    0.0,    0.0]
+      textatlas:  [0.0,    0.0066, 0.0418, 0.9097, 0.0299, 0.002,  0.01]
+    # ★Tier1 可观测性: metrics.jsonl 每 dataline_metrics_every 步出 buf_reresize_<domain>（per-domain re-resize【累计】率,
+    #   口径对齐 mix_* 累计比; multi_ar 关闭时无此键）。阈值(2026-07-05): anime>10% 或 任一域>20% ⇒ 查 native_bucket_dist/
+    #   bucket_probs/square_only_domains 配置与供给(buffer 饿死也会推高); synthetic/textatlas 配 square_only 后应≈0。
+    # 桶: build_buckets(target_area,divisor,ar_list)→7 桶(HunyuanImage-3.0 ResolutionGroup 式); 见 training/dataline/multi_ar.py
+
+sigma_sampling:
+  dist: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  shift: 1.0                         # 512 不 shift（§6 锁定, 对齐 i1 实测）
+
+optimizer:
+  name: torch.optim.AdamW
+  params:
+    lr: 1.73e-4                      # 1e-4 × sqrt(1536/512)
+    weight_decay: 0.0
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+scheduler:
+  num_warmup_steps: 500              # 换分辨率 re-warmup（256→512a; §6 几百步保险）
+  decay: constant
+
+trainer:
+  seed: 42
+  amp_dtype: bfloat16
+  batch_size: 16                     # 每卡 micro-batch（512px≈256px 的 4× token, 调小防 OOM）; job yaml 按 world 覆盖
+  max_steps: 166667                  # REDESIGN 512a 曝光量 256M(2026-07-05 Evan: 128M→256M) → global 1536 × 166,667 ≈ 256M。仅作参考——实际由下面 max_exposure_images 派生
+  max_exposure_images: 256000000     # 衔接：曝光量 256M(2026-07-05 Evan 拍板, 原 128M) → max_steps=ceil(256M/实际global_batch)，步数随卡数自适应（见 train.py）。如要固定步数,删本行用上面 max_steps
+  # global_batch_size: 1536          # 选填：不设则按 batch_size×world_size 现算（推荐留空, 自适应）
+  gradient_clip_val: 1.0
+  log_every: 10
+  dataline_metrics_every: 50
+  checkpoint_steps: 3000
+  checkpoint_keep_every: 25000
+  checkpoint_keep_max: 4
+  checkpoint_keep_format: weights_ema
+  checkpoint_dir: /fsx/evan/checkpoints/mot_pilot_v1/stage512a_redesign_v1  # REDESIGN 独立 dir; job yaml 按 RUN_ID 覆盖
+  resume: true
+  # 阶段切换（256→512a）：首次启动时用 --overrides trainer.init_from=<256 final last.pt> 从 256 权重(+optimizer 动量)初始化，
+  # step 重置为 0、本阶段 scheduler 从头 re-warmup（见 num_warmup_steps:500）。gated：不设则行为不变；resume 优先（本地有 last.pt 即续训不重置）。
+  # init_from: /fsx/evan/checkpoints/mot_pilot_v1/stage256_redesign_v1/last.pt
+  # init_load_optimizer: true        # 默认继承 Adam 动量（设计 §6）；如要 fresh optimizer 设 false
+  # ⚠️ B1 臂（text_adapter）须同时 --overrides model.text_adapter.enabled=true [bidirectional=...]，否则 ckpt 指纹/参数名校验会硬报错（不会静默退化）。
+  skip_distributed_teardown: false
+  force_os_exit_after_train: false
+  debug_step_trace: false
+  debug_step_trace_dir: null
+  debug_trace_dump_interval: 0
+  batch_ready_barrier: false
+  batch_ready_barrier_dir: null
+  batch_ready_barrier_run_id: null
+  batch_ready_barrier_timeout_s: 300
+  ema:
+    enabled: true
+    decay: 0.9999

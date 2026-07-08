@@ -1,0 +1,42 @@
+# Phase-1 数据修复 GPU 端到端 smoke：1 GPU、mb96(=生产单卡负载)、60 步，跑【cleanup】树。
+# 验证：(1) 新代码端到端不崩(decode 进池 + force_row_level 分片 + data-wait 计时)；
+#      (2) metrics.jsonl 出现 data_wait_s/data_wait_frac + mix_*/buf_*/prod_*/anime_fetch_*；
+#      (3) data_wait_frac 量级(timer 工作正常)。done rc=0。
+# 注：多 rank 分片 + 16 路争抢下的真实供数能力由 0-GPU probe_mix16_datafix(buffer_fill)验证；
+#    此处只占 1 GPU(ab1/2/3+b1adapter 已占 ~56，56+1=57 ≤ 64 预算)，不挤生产。
+name: evan-mot-smk-p1-datafix
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 24
+memGBPerWorker: 200
+maxRetries: 1
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=6 PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN FI_EFA_USE_DEVICE_RDMA=1
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  RUN_ID=smk_p1_datafix
+  CK=/local/evan/mot_smoke/$RUN_ID
+  RES=/fsx/evan/mot_code/mot_pilot_v1_cleanup/experiments/results/$RUN_ID
+  STATS=/fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json
+  mkdir -p "$CK" "$RES"
+  DOTS="trainer.checkpoint_dir=$CK trainer.resume=false trainer.save_final=false trainer.batch_size=96 \
+        trainer.dataline_metrics_every=10 trainer.force_os_exit_after_train=true trainer.skip_distributed_teardown=true \
+        dataset.stats_cache=$STATS dataset.anime_cache_dir=/local/evan/anime_img_cache dataset.first_fill_timeout_s=120"
+
+  $PY -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=1 \
+      train.py --config configs/stage1a_t2i_256_v2.yaml --max-steps 60 $DOTS 2>&1 | tee "$RES/smoke.log"
+  RC=${PIPESTATUS[0]}
+  echo "===== P1-SMOKE rc=$RC; metrics.jsonl 新 key 抽样(含 data_wait): ====="
+  grep -oE '"(mix_[a-z_]+|buf_[a-z_]+|prod_[a-z_]+|anime_fetch_ok_rate|data_wait_s|data_wait_frac)":[0-9.]+' "$CK/metrics.jsonl" 2>/dev/null | sort -u | head -60 || echo "(无 metrics.jsonl)"
+  echo "===== data_wait_frac 末 10 步(看是否 data-bound) ====="
+  grep -oE '"step":[0-9]+,.*"data_wait_frac":[0-9.]+' "$CK/metrics.jsonl" 2>/dev/null | tail -10 | grep -oE '"(step|iter_s|data_wait_s|data_wait_frac)":[0-9.]+' | paste - - - - || true
+  echo "===== 最后一行 metrics.jsonl ====="
+  tail -1 "$CK/metrics.jsonl" 2>/dev/null || true
+  echo "===== P1-SMOKE exited rc=$RC $(date -u) ====="; exit $RC

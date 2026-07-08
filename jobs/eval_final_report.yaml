@@ -1,0 +1,17 @@
+# Stage256 FINAL eval - assemble MD report + charts + sample grids from eval_final_4model/ artifacts.
+# CPU only (matplotlib Agg + PIL + json; no model load). Read-only over results.
+name: evan-mot-evalf-report
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 8
+memGBPerWorker: 96
+maxRetries: 0
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup MPLBACKEND=Agg
+  $PY experiments/exp_scripts/build_final_report.py
+  echo "===== report MD head ====="
+  head -60 experiments/results/EVAL_final_4model_stage256.md || true

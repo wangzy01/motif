@@ -1,0 +1,52 @@
+# 产线 —— Ablation 2 = B1 双向 text-adapter + 多层特征融合（ELMo 式，融合 und 末 12 层，gate zero-init），2×8/v2，133k 步。从 WORKTREE 跑。
+# step0：gate zero-init → fused==h_last → 与 B1 双向 adapter 逐位等价（已由对照 C 验证：损曲线与融合关 B 重合）。
+# 唯一变量 vs B1 = 是否融合末 12 层（而非仅末层）。独立 checkpoint_dir。峰值 ~24G（融合留存末12层 hidden）。
+# ⚠️ Ab2 eval 不能走缓存采样路径（precompute_und_cache/forward_gen_cached 忽略 fusion）—— eval 时另行处理。
+# 收尾：force_os_exit_after_train + skip_distributed_teardown → done 后 rc=0 干净退出。
+name: evan-mot-prod-2x8-ab2fusion
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 2
+gpuPerWorker: 8
+cpuPerWorker: 48
+memGBPerWorker: 900
+maxRetries: 50
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_ablations
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=6 PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_ablations
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN
+  export FI_EFA_USE_DEVICE_RDMA=1
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  RUN_ID=s256v2_2x8_ab2fusion_20260623
+  ABLATION="model.text_adapter.enabled=true model.text_adapter.multi_layer_fusion.enabled=true trainer.debug_step_trace=false trainer.batch_ready_barrier=false trainer.force_os_exit_after_train=true trainer.skip_distributed_teardown=true"
+
+  CFG=configs/stage1a_t2i_256_v2.yaml
+  BS=96; NNODES=2; PORT=29687
+  CK=/fsx/evan/checkpoints/mot_pilot_v1/$RUN_ID
+  RES=/fsx/evan/mot_code/mot_pilot_v1/experiments/results/$RUN_ID
+  STATS=/fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json
+  RDZV=$CK/rdzv.addr
+  mkdir -p "$CK" "$RES"
+
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  if [ "$NODE_RANK" = "0" ]; then
+    rm -f "$RDZV"; MYIP=$(hostname -i | awk '{print $1}')
+    echo "$MYIP" > "$RDZV.tmp" && mv "$RDZV.tmp" "$RDZV"; MASTER_ADDR=$MYIP
+  else
+    sleep 5
+    for i in $(seq 1 150); do [ -s "$RDZV" ] && break; sleep 2; done
+    [ -s "$RDZV" ] || { echo "FATAL rdzv file missing"; exit 20; }
+    MASTER_ADDR=$(cat "$RDZV")
+  fi
+  echo "node=$NODE_RANK master=$MASTER_ADDR world=$((NNODES*8)) $(date -u)"
+  { echo "===== $RUN_ID 2x8 @256 v2 B1+multi_layer_fusion (worktree) $(date -u) ====="; hostname; nvidia-smi -L; } 2>&1 | tee "$RES/probe.n$NODE_RANK.log"
+
+  DOTS="trainer.checkpoint_dir=$CK trainer.resume=true trainer.batch_size=$BS dataset.stats_cache=$STATS dataset.anime_cache_dir=/local/evan/anime_img_cache $ABLATION"
+  $PY -m torch.distributed.run --nnodes=$NNODES --nproc_per_node=8 --node_rank=$NODE_RANK \
+      --master_addr=$MASTER_ADDR --master_port=$PORT \
+      train.py --config $CFG --max-steps 133000 $DOTS 2>&1 | tee "$RES/train.n$NODE_RANK.log"
+  RC=${PIPESTATUS[0]}; echo "===== $RUN_ID node=$NODE_RANK exited rc=$RC $(date -u) ====="; exit $RC

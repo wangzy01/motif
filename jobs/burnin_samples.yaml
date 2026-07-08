@@ -1,0 +1,38 @@
+# 从 2卡 burn-in 训练的 checkpoint(step~14k+, 256px) 出固定-prompt 样图网格。
+# 验证 G6 采样器在真实训练权重上的端到端(此前只在 overfit 验过) + 看模型早期是否学到结构/色彩。
+# 提交: jcc job submit jobs/burnin_samples.yaml ; 看日志: jcc job log evan-mot-burnin-samples -f
+# 产物(小, /fsx): experiments/results/burnin_samples/grid_seed*.png
+name: evan-mot-burnin-samples
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 16
+memGBPerWorker: 220
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  mkdir -p /local/evan/cache/huggingface experiments/results/burnin_samples
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  CKPT=/fsx/evan/checkpoints/mot_pilot_v1/burnin256_2h100_30h_20260618_0915/last.pt
+
+  nvidia-smi
+  # 快照 ckpt 到 /local（cp 打开源 inode 即固定一致版本，避开训练原子替换竞争）
+  echo "===== SNAPSHOT CKPT ====="
+  ls -la "$CKPT"
+  cp "$CKPT" /local/burnin_ckpt.pt
+  $PY -c "import torch; d=torch.load('/local/burnin_ckpt.pt',map_location='cpu',weights_only=False); print('ckpt step', d.get('global_step'), 'keys', list(d.keys()))"
+
+  echo "===== SAMPLE GRID (256px, 2 seeds, cfg 4.0) ====="
+  for SEED in 7 42; do
+    timeout 30m $PY experiments/exp_scripts/sample_prompt_grid.py \
+      --config configs/stage1a_t2i_256.yaml --ckpt /local/burnin_ckpt.pt \
+      --out experiments/results/burnin_samples/grid_seed${SEED}.png \
+      --size 256 --steps 40 --cfg 4.0 --seed ${SEED} \
+      --overrides dataset.stage=256
+  done
+
+  echo "===== DONE ====="
+  ls -la experiments/results/burnin_samples/

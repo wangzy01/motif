@@ -1,0 +1,40 @@
+# RE-SCORE existing DPG samples with the FIXED scorers (no regeneration).
+# Why: score_dpg.py (Qwen judge) had a non-cascading dependency-zeroing bug (a child of a
+# transitively-zeroed parent was not zeroed) -> inflated Qwen DPG numbers; and both scorers
+# scored partiprompts97 instead of skipping it like upstream. Both fixed. This re-runs ONLY the
+# scoring step over the already-generated samples to refresh the comparison tables.
+# Single-GPU, READ-ONLY w.r.t. training. Uses the two isolated scorer envs (never venv-gpu).
+# Submit: jcc job submit jobs/eval_dpg_rescore.yaml
+name: evan-mot-eval-dpg-rescore
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 16
+memGBPerWorker: 220
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  PY_QWEN=/fsx/evan/mot_code/venv-dpg/bin/python                 # Qwen3-VL judge (internally-consistent)
+  PY_MPLUG=/fsx/evan/miniconda3/envs/dpg-mplug/bin/python        # original mPLUG (leaderboard-comparable)
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1
+  export HF_HOME=/local/evan/cache/huggingface
+  export MODELSCOPE_CACHE=/fsx/evan/modelscope_cache
+  mkdir -p $HF_HOME
+  nvidia-smi || true
+
+  echo "===== RE-SCORE Qwen judge (fixed cascade) over existing dpg_bench/samples ====="
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 120m $PY_QWEN experiments/eval/dpg/run_dpg.py \
+    --backend qwen3vl --samples-dir experiments/results/dpg_bench/samples \
+    --runs v1 b1 b2 b3 --out-dir experiments/results/dpg_bench --limit 0
+
+  echo "===== RE-SCORE original mPLUG (skip partiprompts97) over existing dpg_bench_mplug/samples ====="
+  MODELSCOPE_CACHE=$MODELSCOPE_CACHE HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 180m $PY_MPLUG \
+    experiments/eval/dpg/run_dpg.py \
+    --backend mplug --pic-num 4 --modelscope-cache $MODELSCOPE_CACHE --device gpu \
+    --samples-dir experiments/results/dpg_bench_mplug/samples \
+    --runs v1 b1 b2 b3 --out-dir experiments/results/dpg_bench_mplug --limit 0
+
+  echo "===== DONE — corrected comparison tables ====="
+  echo "--- Qwen ---"; cat experiments/results/dpg_bench/comparison.md || true
+  echo "--- mPLUG ---"; cat experiments/results/dpg_bench_mplug/comparison.md || true

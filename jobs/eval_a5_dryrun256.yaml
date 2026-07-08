@@ -1,0 +1,28 @@
+# A5: read-only stage-256 sampler dry-run to measure the REALIZED domain mix (verify anime ~0.30).
+# CPU-bound (gpu:1 only for scheduling). Does NOT touch the running training. Skips image re-fetch (fast).
+# Out: experiments/results/eval_doc_quant/dryrun256_mix.json
+name: evan-mot-dryrun256
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 48
+memGBPerWorker: 700
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1
+  mkdir -p /local/evan/cache/huggingface /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  echo "===== A5 realized-mix dryrun (stage 256) $(date -u) ====="; nproc; free -g | head -2
+  timeout 90m $PY scripts/dryrun_sampler_stats.py \
+    --stages 256 --n-draws 300000 \
+    --caption-sample 8000 --caption-max-src 60 \
+    --backfetch-per-domain 0 \
+    --workers 32 \
+    --tokenizer /fsx/models/Qwen3-VL-2B-Instruct \
+    --stats-cache /fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json \
+    --anime-cache /local/evan/anime_img_cache \
+    --out experiments/results/eval_doc_quant/dryrun256_mix.json
+  echo "===== dryrun256 done $(date -u) ====="

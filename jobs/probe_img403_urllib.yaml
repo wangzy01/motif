@@ -1,0 +1,100 @@
+# Probe Cloudflare 403 behavior for the actual anime training image host.
+# 0 GPU; uses Python urllib with the same UA as the training loader.
+name: evan-mot-img403-urllib-probe
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 8
+memGBPerWorker: 64
+maxRetries: 1
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export PYTHONUNBUFFERED=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  RES=/fsx/evan/mot_code/mot_pilot_v1/experiments/results/img403_urllib_probe_$(date -u +%Y%m%d_%H%M%S)
+  mkdir -p "$RES"
+  $PY - <<'PY' 2>&1 | tee "$RES/probe.log"
+  import glob
+  import os
+  import random
+  import socket
+  import time
+  import urllib.error
+  import urllib.request
+  from collections import Counter, defaultdict
+
+  import pyarrow.parquet as pq
+
+  UA = "mot-loader/1"
+  SHARDS = "/s3-pixai-test-uw2/evan/mot_filtering_v1/t5_manifest/daily_v1/anime/anime_*.parquet"
+  N_URLS = 10
+  ROUNDS = 20
+  SLEEP_S = 0.25
+  TIMEOUT_S = 12
+  random.seed(260626)
+
+  print("[probe] host=", socket.gethostname(), "ip=", socket.gethostbyname(socket.gethostname()), flush=True)
+  print(f"[probe] UA={UA!r} n_urls={N_URLS} rounds={ROUNDS} sleep={SLEEP_S}s timeout={TIMEOUT_S}s", flush=True)
+
+  files = sorted(glob.glob(SHARDS))
+  if not files:
+      raise SystemExit(f"no manifest shards matched: {SHARDS}")
+  rows = []
+  for f in random.sample(files, min(4, len(files))):
+      pf = pq.ParquetFile(f)
+      rg = random.randrange(pf.metadata.num_row_groups)
+      tab = pf.read_row_group(rg, columns=["s3key"])
+      vals = [x for x in tab.column("s3key").to_pylist() if x and "img.metanomaly.co/r2/" in x]
+      random.shuffle(vals)
+      rows.extend(vals[: max(5, N_URLS)])
+  random.shuffle(rows)
+  urls = rows[:N_URLS]
+  if not urls:
+      raise SystemExit("no img.metanomaly.co/r2 urls sampled")
+
+  print("[probe] sampled urls:")
+  for i, u in enumerate(urls):
+      print(f"  {i:02d} {u[:96]}", flush=True)
+
+  def fetch(url):
+      req = urllib.request.Request(url, headers={"User-Agent": UA})
+      try:
+          with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
+              return str(getattr(r, "status", 200)), "", ""
+      except urllib.error.HTTPError as e:
+          server = e.headers.get("server", "")
+          cfray = e.headers.get("cf-ray", "")
+          return str(e.code), server, cfray
+      except Exception as e:
+          return type(e).__name__, "", ""
+
+  total = Counter()
+  per_url = defaultdict(Counter)
+  cf_seen = 0
+  for rnd in range(ROUNDS):
+      codes = []
+      for idx, url in enumerate(urls):
+          code, server, cfray = fetch(url)
+          total[code] += 1
+          per_url[idx][code] += 1
+          codes.append(code)
+          if code == "403" and (server or cfray):
+              cf_seen += 1
+      print(f"[round {rnd + 1:02d}] " + " ".join(codes) + " | " + dict(total).__repr__(), flush=True)
+      if rnd + 1 < ROUNDS:
+          time.sleep(SLEEP_S)
+
+  n = sum(total.values())
+  ok = total.get("200", 0)
+  bad = total.get("403", 0)
+  print("\n[summary]")
+  print(f"total={n} 200={ok} ({ok / n:.1%}) 403={bad} ({bad / n:.1%}) other={n - ok - bad} ({(n - ok - bad) / n:.1%})", flush=True)
+  print(f"403_with_cf_headers={cf_seen}", flush=True)
+  print("[per_url]")
+  for idx in range(len(urls)):
+      print(f"url{idx:02d} {dict(per_url[idx])}", flush=True)
+  PY
+  RC=${PIPESTATUS[0]}
+  echo "===== img403 urllib probe exited rc=$RC $(date -u) result_dir=$RES ====="
+  exit $RC

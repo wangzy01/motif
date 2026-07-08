@@ -1,0 +1,31 @@
+# stage1a@256 正式训练 — 消融1 = B1 文本 adapter（双向）。消融指南 §4.3 优先级①。
+# B1 臂额外 ~231M 参数(adapter 113M + 逐层 text K/V 117M ≈ 16% 生成塔)；frozen und 独立前向 no_grad + 生成臂 grad-ckpt。
+# 与 baseline 同：1×8 / global 512 / LR 1e-4 / 400k 步 / EMA。仅多开 text_adapter 开关。独立 checkpoint_dir（消融切换不可 resume 别人的 ckpt）。
+# 提交: jcc job submit jobs/s256_1x8_b1_adapter.yaml
+name: evan-mot-s256-b1-adapter
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 8
+cpuPerWorker: 48
+memGBPerWorker: 900
+maxRetries: 50
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=6 PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  RUN_ID=s256_1x8_b1adapter_20260618
+  CK=/fsx/evan/checkpoints/mot_pilot_v1/$RUN_ID
+  RES=/fsx/evan/mot_code/mot_pilot_v1/experiments/results/$RUN_ID
+  STATS=/fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json
+  mkdir -p "$CK" "$RES"
+  { echo "===== B1 adapter(双向) 1x8 @256 $(date -u) ====="; hostname; nvidia-smi -L; df -h /fsx/evan | tail -1; } 2>&1 | tee "$RES/probe.log"
+  DOTS="trainer.checkpoint_dir=$CK trainer.resume=true dataset.stats_cache=$STATS dataset.anime_cache_dir=/local/evan/anime_img_cache model.text_adapter.enabled=true model.text_adapter.bidirectional=true"
+  $PY -m torch.distributed.run --nproc_per_node=8 --master_port=29622 \
+      train.py --config configs/stage1a_t2i_256.yaml --max-steps 400000 \
+      $DOTS 2>&1 | tee "$RES/train.log"
+  RC=${PIPESTATUS[0]}; echo "===== B1 exited rc=$RC $(date -u) ====="; exit $RC   # 传播真实退出码 → 崩溃时 maxRetries 自动 resume（B1 FSDP2/DTensor bug 已于 2026-06-19 经 mode 分发器修复）

@@ -1,0 +1,57 @@
+# domain_mix 修复 probe（REVISED 2026-06-26，据对抗 review）：
+# review 用「对真实生产速率的仿真」证明 drain_mode(F1/F2) 对 realized mix 是 NO-OP——_topup 每轮先把整条
+# queue 灌进 buffer 再判 present，所以"是否 present"只取决于 producer 该 interval 是否交付≥1，与排空量无关。
+# 真正的 mix 杠杆 = 各域【生产速率平衡】(取图并发配置)，经 sampler renorm 落到配比。
+# ∴ 本 probe 改为扫真正的杠杆：固定 anime 串行(fetch_workers_anime=1，不过订阅)，扫 gpic 并发 ∈ {2,4,8}，
+#   drain_mode=uniform(默认；已证 no-op，用默认隔离生产杠杆)。看哪个 gpic 并发能让 4 域聚合 ±5% 且不饿死 monet/synth。
+# 基线对照(已有)：
+#   - datafix = anime fw8 + gpic fw8 (uniform)：anime56.9/monet0.6/gpic42.4/synth0.1 FAIL（gpic8 过订阅挂载饿死 tar）
+#   - fwcompare fw1 = 全串行：anime65.6/monet20.2/gpic7.5/synth6.8 FAIL（gpic 串行供不上）
+#   ∴ 本 probe 的 C(anime串行+gpic8) vs datafix(anime8+gpic8) 还能隔离 anime 串行对 tar 域的增益。
+# 判据：聚合 mix 全域 ±5%；per-rank σ 小；count_elapsed_s/count 接近 sleep(2.5s)=不拖速。
+# 事后：scripts/aggregate_probe_mix.py 分别对 gpic2/gpic4/gpic8 目录跑。0 GPU。
+name: evan-mot-probe-mix16-gpicsweep
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 2
+gpuPerWorker: 0
+cpuPerWorker: 40
+memGBPerWorker: 380
+maxRetries: 1
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export OMP_NUM_THREADS=4
+  mkdir -p /local/evan/cache/huggingface
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  CFG=configs/stage1a_t2i_256_v2.yaml
+  STATS=/fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  echo "node=$NODE_RANK 开始 gpic 并发扫(anime 串行固定) $(date -u)"
+
+  run_arm () {                                  # $1=arm名(=gpic并发)
+    local GFW=$1
+    local ARM=gpic$GFW
+    local RES=/fsx/evan/mot_code/mot_pilot_v1_cleanup/experiments/results/probe_mix16_drainmode/$ARM
+    local CACHE=/local/evan/anime_cache_$ARM
+    mkdir -p "$RES"; rm -rf "$CACHE"; mkdir -p "$CACHE"
+    echo "===== node=$NODE_RANK ARM=$ARM anime_fw=1 gpic_fw=$GFW drain=uniform 起 8 进程 $(date -u) ====="
+    for L in 0 1 2 3 4 5 6 7; do
+      GR=$((NODE_RANK*8 + L))
+      $PY scripts/probe_realized_mix.py --config $CFG \
+          --rank $GR --world 16 --batch-size 96 --warmup 60 --count 150 --sleep 2.5 \
+          dataset.stats_cache=$STATS dataset.anime_cache_dir=$CACHE \
+          dataset.drain_mode=uniform dataset.fetch_workers_anime=1 dataset.fetch_workers=$GFW \
+          > "$RES/rank$GR.log" 2>&1 &
+    done
+    wait
+    echo "===== node=$NODE_RANK ARM=$ARM 结束 $(date -u) ====="
+    grep -L "probe-json" "$RES"/rank*.log 2>/dev/null | sed 's/^/  未完成: /' || true
+    grep -h "probe-json" "$RES"/rank*.log 2>/dev/null || true
+  }
+
+  run_arm 2
+  run_arm 4
+  run_arm 8
+  echo "===== node=$NODE_RANK 全部 arm 结束 $(date -u) ====="

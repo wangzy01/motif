@@ -1,0 +1,79 @@
+# ================================================================================================
+# 正式 4×8 = 32卡 / 4节点  stage1a t2i @256 训练（complete_v1 全在线数据线）
+# ------------------------------------------------------------------------------------------------
+# 决策记录（Evan 2026-06-18 睡前拍板，无人值守 24h+）:
+#   1) batch/LR: 原样 config —— batch_size=64/卡 × 32卡 = global batch 2048（文档设计的4×）；LR=1e-4 不变；max_steps=400k。
+#   2) eval: 今晚不跑 noise-shift eval，节点全给正式训练。
+#   3) 运行: 持续挂跑 + resume；ckpt 每1000步原子覆盖单文件 last.pt 到 /fsx（~22GB，<Evan 给的 50GB 预算）。
+#   4) 处理边界: 保活 + 保守修复（基础设施问题自动 resume；低风险修复可改；batch/LR/步数/数据混比不擅改）。
+#   5) VAE 预缓存未就绪 → 全程在线处理（不依赖 256 latent cache）。
+# ------------------------------------------------------------------------------------------------
+# 跨节点 rendezvous：复用已验证 smoke 配方（evan-mot-train256-4x8-smoke-4tjc 实测 32-rank NCCL 成功）：
+#   hostname = <job>-<rank>（无随机后缀）→ NODE_RANK=${HOST##*-}；master = <job>-0 的 pod DNS；getent 等 DNS 起来。
+#   IB 不可用 → NCCL 自动回退 Socket/TCP（bootstrap ~84s，256px 下每步数秒级）。
+# 关键修正 vs config 默认：dataset.stats_cache 必须指到 /fsx（config 默认 /local 是每节点临时盘，新节点没有→会崩）。
+# ------------------------------------------------------------------------------------------------
+# 提交:  jcc job submit jobs/stage1a256_4x8_train.yaml
+# 看日志: jcc job log evan-mot-stage1a256-4x8 -p all -n 200
+#        或直接读 /fsx .../experiments/results/stage1a256_4x8_20260618/train_worker0.log
+# 进度:  tail /fsx/evan/checkpoints/mot_pilot_v1/stage1a256_4x8_20260618/metrics.jsonl
+# ================================================================================================
+name: evan-mot-stage1a256-4x8
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 4
+gpuPerWorker: 8
+cpuPerWorker: 48          # 空闲节点 free CPU≈62-94；48 可放下全部 5 个空闲节点
+memGBPerWorker: 900       # smoke 用 644G 够；900G 留 shuffle buffer/图缓存余量，仍 < ~1700G free
+maxRetries: 8             # 保活：节点挂/被抢占/NCCL超时 → jcc 重启 → resume=true 从 last.pt 续训
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=6 PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN      # WARN 而非 INFO：避免 400k 步日志爆量
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  HOST=$(hostname)
+  NODE_RANK=${HOST##*-}                                          # 实测 hostname=<job>-<rank>，末段=rank
+  JOB_BASE=${HOST%-${NODE_RANK}}
+  MASTER_ADDR=${JOB_BASE}-0.jobs.default.svc.cluster.local       # node-0 的 pod DNS（已验证可解析）
+  MASTER_PORT=29571
+  NNODES=4
+  NPROC_PER_NODE=8
+
+  RUN_ID=stage1a256_4x8_20260618                                # 固定（不用 date）→ retry 时同目录 → resume 生效
+  CK=/fsx/evan/checkpoints/mot_pilot_v1/$RUN_ID
+  RES=/fsx/evan/mot_code/mot_pilot_v1/experiments/results/$RUN_ID
+  STATS=/fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json
+  mkdir -p "$CK" "$RES"
+
+  {
+    echo "===== STAGE1a @256 FORMAL 4x8 TRAIN ($(date -u)) ====="
+    echo "HOST=$HOST NODE_RANK=$NODE_RANK JOB_BASE=$JOB_BASE"
+    echo "MASTER_ADDR=$MASTER_ADDR:$MASTER_PORT NNODES=$NNODES WORLD_SIZE=$((NNODES*NPROC_PER_NODE))"
+    echo "CK=$CK"
+    echo "RES=$RES"
+    nvidia-smi -L
+    $PY -c "import torch;print('torch',torch.__version__,'cuda',torch.cuda.is_available(),'ndev',torch.cuda.device_count())"
+    df -h /fsx/evan | tail -1
+  } 2>&1 | tee "$RES/probe_worker${NODE_RANK}.log"
+
+  # 等 master(node 0) 的 DNS 起来（多节点冷启动有先后；最多等 6 分钟）
+  for i in $(seq 1 180); do getent hosts "$MASTER_ADDR" && break; echo "wait master dns $MASTER_ADDR ($i/180)"; sleep 2; done
+  getent hosts "$MASTER_ADDR" || { echo "FATAL: master dns 解析失败 $MASTER_ADDR"; exit 20; }
+
+  # 覆盖项：stats_cache→/fsx（必须）；checkpoint_dir→/fsx 共享；resume=true；anime 图磁盘缓存→/local
+  # 其余（batch_size=64、lr=1e-4、max_steps=400k、ema=0.9999、checkpoint_steps=1000）全用 config 原值。
+  DOTS="trainer.checkpoint_dir=$CK trainer.resume=true dataset.stats_cache=$STATS dataset.anime_cache_dir=/local/evan/anime_img_cache"
+
+  timeout --signal=TERM --kill-after=5m 47h \
+    $PY -m torch.distributed.run \
+      --nnodes=$NNODES --nproc_per_node=$NPROC_PER_NODE --node_rank=$NODE_RANK \
+      --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT \
+      train.py --config configs/stage1a_t2i_256.yaml --max-steps 400000 \
+      $DOTS 2>&1 | tee "$RES/train_worker${NODE_RANK}.log"
+  RC=${PIPESTATUS[0]}
+  echo "===== worker $NODE_RANK exited rc=$RC at $(date -u) ====="
+  exit $RC

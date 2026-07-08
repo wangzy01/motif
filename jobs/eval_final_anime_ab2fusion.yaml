@@ -1,0 +1,48 @@
+# Stage256 FINAL eval - anime prompt-following for ONE run, 3 seed-sets (variance).
+# 150-prompt anime evalset x seeds {7,1007,2007} -> tagger company(3_1_13) + CLIP; aesthetic seed0.
+# Read-only w.r.t. training (4 runs all Stopped); reads ckpt last.pt from /fsx.
+name: evan-mot-evalf-anime-ab2fusion
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 16
+memGBPerWorker: 220
+maxRetries: 0
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  export PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export HF_HOME=/local/evan/cache/huggingface TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export TAGGER_MODEL_ID=incantor/tagger_3_1_13
+  mkdir -p /local/evan/cache/huggingface/open_clip $TORCH_HOME $TRITON_CACHE_DIR
+  cp -rn /fsx/hf_cache/open_clip/. /local/evan/cache/huggingface/open_clip/ || true
+  set +x
+  if [ -f /fsx/evan/.hf_token ]; then export HF_TOKEN=$(tr -d '[:space:]' < /fsx/evan/.hf_token); echo "[token] len=${#HF_TOKEN}"; else echo "[token] MISSING -> tagger skipped"; fi
+  set -x
+  M=ab2fusion
+  OUT=experiments/results/eval_final_4model/anime
+  mkdir -p $OUT
+  nvidia-smi -L || true
+  for i in 0 1 2; do
+    SEED=$((7 + i*1000))
+    SAMP=$OUT/samples/seed$i
+    mkdir -p $SAMP
+    echo "===== [$M] seed-set $i (base $SEED) SAMPLE ====="
+    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 timeout 90m $PY experiments/eval/sample_evalset.py \
+      --runs $M --out-dir $SAMP --size 256 --steps 64 --cfg 4.0 --seed $SEED --weights ema --batch-size 8
+    echo "===== [$M] seed-set $i SCORE (tagger company 3_1_13 + CLIP) ====="
+    set +e
+    timeout 60m $PY experiments/eval/run_prompt_following.py \
+      --samples-dir $SAMP --runs $M --tagger-backend company --out-dir $OUT/seed$i
+    echo "[score-$M-seed$i] rc=$?"
+    set -e
+  done
+  echo "===== [$M] AESTHETIC (seed0 imgs) ====="
+  set +e
+  timeout 30m $PY experiments/exp_scripts/aesthetic_score_runs.py \
+    --images-root $OUT/samples/seed0 --runs $M --out $OUT/aesthetic_$M.json
+  echo "[aes-$M] rc=$?"
+  set -e
+  echo "===== [$M] ANIME DONE ====="
+  for i in 0 1 2; do echo "--- $M seed$i ---"; cat $OUT/seed$i/comparison.md 2>/dev/null || true; done

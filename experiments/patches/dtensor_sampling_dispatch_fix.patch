@@ -1,0 +1,48 @@
+diff --git a/networks/arch_mot.py b/networks/arch_mot.py
+index 46ac5a7..6aa29e5 100644
+--- a/networks/arch_mot.py
++++ b/networks/arch_mot.py
+@@ -345,11 +345,22 @@ class MoTDecoderLayer(nn.Module):
+         从而触发 FSDP2 per-layer 的 all-gather hook（前向 + 注册反向 all-gather）。
+         mode='joint'（默认，baseline 走这条）= 调原 _forward_joint，逐字不变、数值零改动。
+         （fix: 此前 _forward_adapter_arm 直接调 forward_und_self/forward_gen_adapter，绕过 hook →
+-          参数仍是 sharded DTensor → RoPE q*cos 混 Tensor/DTensor 崩；手动 unshard 修不了可训 gen 的反向。）"""
++          参数仍是 sharded DTensor → RoPE q*cos 混 Tensor/DTensor 崩；手动 unshard 修不了可训 gen 的反向。）
++
++        采样 KV-缓存路径同款修复（und_capture / gen_cached）：precompute_und_cache /
++        forward_gen_cached 此前直接调 layer.forward_und_capture / layer.forward_gen_cached，
++        绕过 __call__ → FSDP2 下 all-gather hook 不触发 → 多卡采样时参数仍是 sharded DTensor、
++        与缓存的普通 Tensor 混算崩。改走 layer(..., mode=...) 经 __call__，与训练 joint/und_self/
++        gen_adapter 套同一模板。两个采样模式都在 @torch.no_grad() 下调用（采样无反向），仅需前向
++        all-gather hook。"""
+         if mode == "und_self":
+             return self.forward_und_self(*args, **kwargs)
+         if mode == "gen_adapter":
+             return self.forward_gen_adapter(*args, **kwargs)
++        if mode == "und_capture":
++            return self.forward_und_capture(*args, **kwargs)
++        if mode == "gen_cached":
++            return self.forward_gen_cached(*args, **kwargs)
+         return self._forward_joint(*args, **kwargs)
+ 
+     def _forward_joint(self, h_und, h_gen, position_embeddings, attn_mask):
+@@ -805,7 +816,8 @@ class MoTT2ITransformer(nn.Module):
+         gen_mask[:, :, :, s_t:] = True
+         kv_cache = []
+         for layer in self.layers:
+-            h_und, k_und, v_und = layer.forward_und_capture(h_und, (cos_und, sin_und), und_mask)
++            # 经 __call__（mode="und_capture"）→ 触发 FSDP2 前向 all-gather（多卡采样必需）
++            h_und, k_und, v_und = layer(h_und, (cos_und, sin_und), und_mask, mode="und_capture")
+             kv_cache.append((k_und, v_und))
+         return kv_cache, (cos_gen, sin_gen), gen_mask
+ 
+@@ -828,7 +840,8 @@ class MoTT2ITransformer(nn.Module):
+                 h_gen = self.long_skip_moe_gen[self.long_skip_layers[idx]](
+                     h_gen, skip_cache[len(self.layers) - 1 - idx])
+             k_und, v_und = kv_cache[idx]
+-            h_gen = layer.forward_gen_cached(h_gen, k_und, v_und, cos_gen, sin_gen, gen_mask)
++            # 经 __call__（mode="gen_cached"）→ 触发 FSDP2 前向 all-gather（多卡采样必需）
++            h_gen = layer(h_gen, k_und, v_und, cos_gen, sin_gen, gen_mask, mode="gen_cached")
+             if self.long_skip_enabled and idx in self.long_skip_sources:
+                 skip_cache[idx] = h_gen
+         return self.proj_out(self.norm_moe_gen(h_gen))

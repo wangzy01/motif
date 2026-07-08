@@ -1,0 +1,127 @@
+# stage256 —— 数据+训练阶段 REDESIGN 配方（2026-06-29）【设计权威: docs/数据+训练阶段_重设计方案_v1_20260629.md】
+# ───────────────────────────────────────────────────────────────────────────
+# ⚠️ 这是 REDESIGN 新方案的 stage256 config, 给【未来重设计训练】用; 绝不喂给在跑的 v1/B1/B3/消融。
+# 基于 stage1a_t2i_256_v2.yaml(多机就绪配方)克隆, 改动:
+#   1) dataset.sampling_config -> t5_sampling_redesign_v1.json (新 domain_mix 256=27/40.5/25.9/5.1/1.5 +
+#      MONET 源比例表 + rich_v1 60M/synthetic_v1 13.8M 池 + caption 路由 50/20/20/10 + per-stage token).
+#      ⚠️ 该新 JSON 需 Phase1 gated code 落地后才能被 dataline 加载(STAGES 派生/per-domain roots/源表/per-stage token).
+#   2) 曝光量 384M (REDESIGN 256 预算, 替 v2 的 204.8M): max_steps = 384M / global_batch.
+#      默认 global 1536 -> 250000 步; 若 global 512(canonical) -> 750000 步. (canonical=512@lr1e-4, sqrt 缩放)
+#   3) noise-shift=1.0 (256 不 shift, 沿用); token=384 (256 阶段, text 主导省算力).
+#   4) checkpoint_dir 独立 (不与 live run 撞).
+# 模型/sigma/batch 机制沿用 v2: 全局 batch 1536(job yaml 按 world 覆盖 batch_size); lr 1.73e-4=1e-4×sqrt(1536/512); warmup 1000.
+# multi-AR 256 不需要(方图); 512a 起才加. use_latent_cache=false(256 I/O 瓶颈, 在线 encode 更快).
+
+model_cls: networks.model_mot.MoTT2IModel
+target_device: cuda
+
+model:
+  pretrained_path: /fsx/models/Qwen3-VL-2B-Instruct
+  tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct
+  patch_size: 1                    # FLUX.2 latent 已 128ch/16×，不再二次 pack
+  time_gap: 2048
+  timestep_multiplier: 1.0
+  text_max_length: 384            # caption ~343 + 模板 ~41
+  cfg_dropout_prob: 0.1
+  text_rich_cfg_dropout_prob: 0.0
+  prompt_template:
+    enabled: true
+  gradient_checkpointing: true
+
+  sandwich_norm: true
+  noise_condition: true
+  long_skip:
+    enabled: false
+    mode: A_full
+  text_adapter:
+    enabled: false
+    num_layers: 2
+    multi_layer_fusion:        # Ablation 2：融合 und 末 N 层（ELMo 式）→ 喂 adapter；默认关、gate zero-init
+      enabled: false
+      num_layers: 12
+  und_lora:                    # Ablation 3：baseline joint path 上只给 und attention 顶层 LoRA；默认关
+    enabled: false
+    num_layers: 8
+    rank: 32
+    alpha: 32                  # LoRA scale = alpha/rank；默认 scale=1
+    lr_scale: 0.3
+    target_modules: [q, k, v, o]
+  abs_sincos:
+    enabled: false
+
+vae:
+  name: flux2                      # AutoencoderKLFlux2, f16c128（latent-cache 仍需加载：moments→model-space）
+  pretrained_path: /fsx/models/FLUX.2-klein-4B/vae
+  dtype: bfloat16
+
+dataset:                            # complete_v1 真实数据线（4 域：anime/MONET-real/GPIC/synth）
+  store_cls: training.dataline.complete_dataset.CompleteV1Dataset
+  sampling_config: /fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json  # ★REDESIGN 新方案 JSON(rich_v1+synthetic_v1+源表+新mix); 需 Phase1 gated code 才能加载. 绝不指回 live JSON
+  stage: "256"
+  image_size: 256
+  buffer_size: 256
+  queue_size: 128
+  min_fill: 64
+  first_fill_policy: all_min          # 正式默认：首批每个 active 域等到 min_fill；诊断 smoke 可覆盖 any_pool 避免慢源卡 rank
+  first_fill_timeout_s: 120           # 韧性：all_min 首批/补料阻塞总超时(s)。某域断供(anime R2失败/tar慢)到点不死等，带已就绪域先开跑、慢域回填。<=0 关
+  fetch_workers: 8                    # 每域 producer 并发取图线程数：修 gpic 逐文件/anime 逐URL 的单线程瓶颈（~5-6→数十 图/s，瓶颈转 decode）。1=旧串行
+  # ---- TextAtlas 第5域（2026-06-27，256 text=0.10 比例×0.9 让渡保 256 真照配比）----
+  # ⚠️ 256 是供给受限区（per-rank demand ~33-38/s > 挂载供给 ~20/s）：要稳吃 textatlas（及四域达标）
+  #    依赖【预存 /local NVMe】扩供给（设 textatlas_local_root；其它域同理可预存）。drain_mode 仍沿用
+  #    默认(uniform)——256 F1 此前 Evan 拍板暂缓（远饿区 F1 对 mix 是 no-op）；预存到位后是否切 proportional
+  #    （同 512 验证）留待 256 重跑复验时定。
+  textatlas_local_root: /local/evan/textatlas5m   # 源图 /local 预存优先；缺失自动回退 S3 源保正确性
+  anime_nrows: 20000
+  anime_cache_dir: /local/evan/anime_img_cache    # latent-cache 模式 skip_image 时不触发取图；保留兜底
+  stats_cache: /fsx/evan/mot_code/data_analysis/outputs/monet_global_stats_rich_v1.json  # ★REDESIGN 专用(rich_v1 40M, 不是 daily 11M); 缺则首跑在 rich_v1/monet 重算; 带 _n_shards 指纹防 stale. /fsx 共享盘
+  tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct
+  use_latent_cache: false           # ★在线 VAE encode（见顶部说明1：256 下 cache 反而慢 ~5×，I/O 瓶颈）。
+  # 缓存仍在 /s3/evan/mot_latents/complete_v1_flux2_moments（stage=256/uid2path.parquet）；
+  # latent_cache.py 的 get_many 已并行化（不够），若 512/1024 要用须先补 producer 侧预取。
+
+sigma_sampling:
+  dist: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  shift: 1.0                       # 256 基本不 shift（v3）
+
+optimizer:
+  name: torch.optim.AdamW
+  params:
+    lr: 1.73e-4                     # = 1e-4 × sqrt(1536/512)，global 512→1536 的 sqrt 缩放
+    weight_decay: 0.0
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+scheduler:
+  num_warmup_steps: 1000           # 300→1000（global 抬到 1536=3×512，大 batch 配重 warmup）
+  decay: constant
+
+trainer:
+  seed: 42
+  amp_dtype: bfloat16
+  batch_size: 48                   # 每卡 micro-batch 默认=4×8（global 1536/32）；job yaml 按 world 覆盖：2×8=96/6×8=32/8×8=24
+  max_steps: 250000                # REDESIGN 256 曝光量 384M → global 1536 × 250k = 384M image-views。
+                                   #   （canonical 参考 global 512 @ lr1e-4；本文件 1536 → lr sqrt 缩放至 1.73e-4。
+                                   #    若改 global 512 跑则 max_steps=750000。Phase1 落地 exposure→steps 后可改填 max_exposure_images=384000000。）
+  gradient_clip_val: 1.0
+  log_every: 10
+  dataline_metrics_every: 50        # 每 50 步把 dataline 真值（realized mix/buffer 水位/producer 吞吐/anime 取图成功率）写 metrics.jsonl；不再只靠 low-water 代理推断 mix。<=0 关
+  checkpoint_steps: 3000           # last.pt 每 3000 步覆盖（全量~23GB 可续训）；1000→3000 降 /fsx 写频与 iter 尖峰
+  checkpoint_keep_every: 50000     # 每 50k 步额外留一个步号快照 step_N.pt
+  checkpoint_keep_max: 4           # 最多留 4 个步号快照（删最旧）；last.pt 仍为最新可续训副本
+  checkpoint_keep_format: weights_ema  # 步号快照仅权重+EMA（~11GB）；改 full 则=last.pt 硬链接（22.6GB 可续训）
+  checkpoint_dir: /fsx/evan/checkpoints/mot_pilot_v1/stage256_redesign_v1  # REDESIGN 独立 dir(不撞 live)；job yaml 按 RUN_ID 覆盖
+  resume: true
+  skip_distributed_teardown: false  # 调试/短跑可在 job 覆盖 true，绕开 torchrun/NCCL 收尾 SIGSEGV；默认不改正式语义
+  force_os_exit_after_train: false  # 调试/短跑可在 metrics/日志关闭后直接 os._exit(0)，避免后台线程/C++ 析构挂住
+  debug_step_trace: false           # 诊断用：每 rank 写 step 边界 trace；默认关闭，不改变训练语义
+  debug_step_trace_dir: null        # 诊断用：null 时写到 checkpoint_dir/step_trace；job 可覆盖到 /fsx 结果目录
+  debug_trace_dump_interval: 0      # 诊断用：>0 时 faulthandler 定期 dump Python 栈到 trace 文件
+  batch_ready_barrier: false        # 诊断用：每 rank 拿到 batch 后写 marker，齐活再进 FSDP forward；默认关闭
+  batch_ready_barrier_dir: null     # 诊断用：必须是多节点共享目录；null 时优先用 debug_step_trace_dir/batch_ready
+  batch_ready_barrier_run_id: null  # 诊断用：屏障 marker 子目录；job 应传唯一 RUN_ID 并在启动前清理旧 marker
+  batch_ready_barrier_timeout_s: 300
+  ema:
+    enabled: true
+    decay: 0.9999

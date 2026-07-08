@@ -1,0 +1,89 @@
+# stage2 t2i @1024 配置【训练代码路径已 GPU 验证（见 @512）；本分辨率未单独跑；数据读取仍 stub】
+# v3 Stage2：512 → 1024（占主要），1536/2048 最后期可适当加入。
+# 1024 高清主要来自 synthetic（13.8M 全 1024px）+ MONET 短边≥1024。
+# 步数锚点：nano-T2I 1024 阶段约 50 万步量级（方案0608），绝对值开训前再核。
+
+model_cls: networks.model_mot.MoTT2IModel
+target_device: cuda
+
+model:
+  pretrained_path: /fsx/models/Qwen3-VL-2B-Instruct
+  tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct
+  patch_size: 1                    # FLUX.2 latent 已 128ch/16×，不再二次 pack
+  time_gap: 2048
+  timestep_multiplier: 1.0
+  text_max_length: 384            # caption ~343 + 模板 ~41（对标 Anima-2B/Qwen-Image 长 caption；原 296 偏保守）
+  cfg_dropout_prob: 0.1
+  text_rich_cfg_dropout_prob: 0.0
+  prompt_template:
+    enabled: true
+  gradient_checkpointing: true
+
+  sandwich_norm: true
+  noise_condition: true
+  long_skip:
+    enabled: false
+    mode: A_full
+  text_adapter:
+    enabled: false
+    num_layers: 2
+  abs_sincos:
+    enabled: false
+
+vae:
+  name: flux2                      # VAE gate 已拍板 FLUX.2（AutoencoderKLFlux2, f16c128）
+  pretrained_path: /fsx/models/FLUX.2-klein-4B/vae
+  dtype: bfloat16
+
+dataset:                            # complete_v1 真实数据线（1024：anime 0.80 / synth 0.12 / MONET 0.08，须 elig_1024）
+  store_cls: training.dataline.complete_dataset.CompleteV1Dataset
+  sampling_config: /fsx/evan/mot_code/data_analysis/configs/t5_sampling_complete_v1_textatlas.json  # 5域版(textatlas 权重1024=0待定)；4域原版给旧代码(坑点#11)
+  stage: "1024"
+  image_size: 1024
+  buffer_size: 96                   # 1024px uint8 ~3MB/张
+  queue_size: 48
+  min_fill: 24
+  anime_nrows: 20000
+  anime_cache_dir: /local/evan/anime_img_cache
+  stats_cache: /fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json  # ⚠️多机须/fsx共享盘（/local 非 node0 rank 看不到 rank0 cache→重算；对齐 256_v2）
+  tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct  # caption 真实 token 截断（F3，消除模型端硬截）
+  # ---- domain_mix 修复（2026-06-26）：1024 demand(bs8)≪supply → F1 收紧更稳（同 512 实证机理）----
+  drain_mode: proportional          # 排空∝消费（慢域保持 present → renorm 落到目标配比）
+  fetch_workers: 4                  # gpic 逐文件并发（1024 gpic elig=0、实际不抽，留作通用配置）
+  fetch_workers_anime: 1            # anime 串行（不过订阅挂载）
+  # ---- TextAtlas 第5域接入（2026-06-27）：1024 text 权重 = 0（domain_mix 待 Evan 拍；raev2 相邻、
+  #      elig_1024 文字池仅 ~920K 来自 Styled/Paper/PPT2Structured）。plumbing 就位、权重 0=本域不启用。----
+  textatlas_local_root: /local/evan/textatlas5m   # 源图 /local 预存优先；缺失回退 S3 源
+
+sigma_sampling:
+  dist: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  shift: 4.0                       # 1024 起点（v3，sweep 3.3-5；随 VAE 下采样因子再核）
+
+optimizer:
+  name: torch.optim.AdamW
+  params:
+    lr: 1.0e-4
+    weight_decay: 0.0
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+scheduler:
+  num_warmup_steps: 300
+  decay: constant
+
+trainer:
+  seed: 42
+  amp_dtype: bfloat16              # GPU bf16 autocast（参数留 fp32，无需 GradScaler）；CPU 时自动退化为 fp32
+  batch_size: 8                    # 1024 序列长（latent 64x64 -> 1024 img token），micro-batch 降
+  max_steps: 500000                # 待定：参考 nano-T2I 1024 阶段 ~50 万步量级
+  gradient_clip_val: 1.0
+  log_every: 10
+  dataline_metrics_every: 50       # 在线监控真实配比
+  checkpoint_steps: 1000
+  checkpoint_dir: /fsx/evan/checkpoints/mot_pilot_v1/stage2_1024
+  resume: true
+  ema:
+    enabled: true
+    decay: 0.9999

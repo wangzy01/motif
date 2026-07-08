@@ -1,0 +1,53 @@
+# EXP3 ARM A — 256 caption/domain 小消融：当前 complete_v1（NL-heavy 基线）。2×H100 FSDP2。
+# 分块训练（resume 续）+ 每块后采固定 prompt grid，看早期 loss + 样图 prompt-following。
+# 与 ARM B（tag-dominant @256）并行对照。提交: jcc job submit jobs/exp3A_capbaseline.yaml
+name: evan-mot-exp3a-capbaseline
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 2
+cpuPerWorker: 48
+memGBPerWorker: 500
+maxRetries: 0
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=8 PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  STATS=/fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json
+  CK=/local/evan/mot_exp/exp3A; mkdir -p $CK
+  RES=/fsx/evan/mot_code/mot_pilot_v1/experiments/results/exp3A; mkdir -p $RES/samples
+  date -u; hostname; nvidia-smi
+  DS="dataset.stats_cache=$STATS dataset.buffer_size=512 dataset.queue_size=256 dataset.min_fill=160 dataset.anime_nrows=20000 dataset.anime_cache_dir=/local/evan/anime_img_cache"
+
+  echo "##### TRIAL gate (6 steps) #####"
+  timeout 20m $PY -m torch.distributed.run --nproc_per_node=2 --master_port=29710 \
+    train.py --config configs/stage1a_t2i_256.yaml --max-steps 6 trainer.batch_size=64 \
+    trainer.log_every=1 scheduler.num_warmup_steps=3 trainer.checkpoint_steps=0 trainer.save_final=false \
+    trainer.checkpoint_dir=/local/evan/mot_exp/exp3A_trial trainer.resume=false $DS 2>&1 | tee $RES/trial.log
+  if ! grep -q "step 6/6" $RES/trial.log; then echo "TRIAL FAILED — abort"; exit 1; fi
+
+  # 分块训练 + 采样（全程 timeout 兜底；reached 的里程碑都留样）
+  FIRST=1
+  for TGT in 2500 6000 10000 15000; do
+    RES_FLAG="trainer.resume=true"; [ $FIRST -eq 1 ] && RES_FLAG="trainer.resume=false"; FIRST=0
+    echo "##### TRAIN -> step $TGT #####"
+    timeout 8h $PY -m torch.distributed.run --nproc_per_node=2 --master_port=29711 \
+      train.py --config configs/stage1a_t2i_256.yaml --max-steps $TGT trainer.batch_size=64 \
+      trainer.log_every=20 scheduler.num_warmup_steps=300 trainer.checkpoint_steps=1000 \
+      trainer.checkpoint_dir=$CK $RES_FLAG $DS 2>&1 | tee -a $RES/train.log
+      RC=$?
+    cp -f $CK/metrics.jsonl $RES/metrics.jsonl 2>/dev/null || true
+    echo "##### SAMPLE @ step $TGT #####"
+    timeout 20m $PY experiments/exp_scripts/sample_prompt_grid.py \
+      --config configs/stage1a_t2i_256.yaml --ckpt $CK/last.pt \
+      --out $RES/samples/exp3A_step${TGT}.png --size 256 --steps 40 --cfg 4.0 --seed 7 \
+      $DS 2>&1 | tail -5 || true
+    LAST=$(tail -1 $CK/metrics.jsonl 2>/dev/null | sed 's/.*"step": *\([0-9]*\).*/\1/')
+    echo "reached step=$LAST (target $TGT, rc=$RC)"
+    [ "${LAST:-0}" -lt "$TGT" ] && { echo "timeout/cap before target -> stop chunks"; break; }
+  done
+  cp -f $CK/metrics.jsonl $RES/metrics.jsonl 2>/dev/null || true
+  echo "##### DONE #####"; date -u

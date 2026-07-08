@@ -1,0 +1,25 @@
+# Eval doc: sample all 4 stage256 runs (v1/B1/B2/B3) at current ckpt, same 16 prompts, EMA weights.
+# Single-GPU, read-only. Out: experiments/results/eval_doc_4runs/index.html
+# Submit: jcc job submit jobs/eval_s256_4runs.yaml
+name: evan-mot-s256-eval4
+image: harbor.jh1.mewtant.io/public/autobuild:pytorch-cu128
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 16
+memGBPerWorker: 260
+maxRetries: 1
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  OUT=/fsx/evan/mot_code/mot_pilot_v1/experiments/results/eval_doc_4runs
+  echo "===== EVAL 4-run sample $(date -u) ====="; hostname; nvidia-smi -L; df -h /fsx/evan | tail -1
+  timeout --signal=TERM --kill-after=5m 6h \
+    $PY experiments/exp_scripts/sample_current_s256_runs_html.py \
+      --out-dir "$OUT" --size 256 --steps 64 --cfg 4.0 --batch-size 4 --seeds 7 123 --weights ema
+  echo "$OUT/index.html" | tee experiments/results/eval_doc_4runs_path.txt
+  echo "===== eval4 done $(date -u) ====="

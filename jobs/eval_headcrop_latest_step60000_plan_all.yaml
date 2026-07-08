@@ -1,0 +1,69 @@
+name: evan-hc-latest60-plan-all
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 2
+memGBPerWorker: 16
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/headcrop_latest_step60000_20260708
+  find "$BASE" -name 'sample_manifest.json' | sort > "$BASE/all_manifests.txt"
+  find "$BASE" -name '*.png' | sort > "$BASE/all_images.txt"
+  $PY experiments/eval/plan_headcrop_subagent_batches.py \
+    --manifests $(cat "$BASE/all_manifests.txt") \
+    --out-dir "$BASE/subagent_batches_all" \
+    --batch-size 18
+  $PY - <<'PY'
+  import json
+  from pathlib import Path
+  base = Path("/fsx/evan/mot_code/data_analysis/outputs/headcrop_latest_step60000_20260708")
+  all_dir = base / "subagent_batches_all"
+  out_dir = base / "subagent_batches_remaining"
+  out_dir.mkdir(parents=True, exist_ok=True)
+  scored = set()
+  for p in sorted((base / "subagent_scores_tag_ready").glob("*.jsonl")):
+      with p.open(encoding="utf-8") as f:
+          for line in f:
+              if line.strip():
+                  scored.add(json.loads(line)["image"])
+  batches = []
+  cur = []
+  for p in sorted(all_dir.glob("batch_*.json")):
+      data = json.loads(p.read_text(encoding="utf-8"))
+      for row in data["images"]:
+          if row["image"] not in scored:
+              cur.append(row)
+              if len(cur) == 18:
+                  batches.append(cur)
+                  cur = []
+  if cur:
+      batches.append(cur)
+  summary_batches = []
+  for i, rows in enumerate(batches, 1):
+      bid = f"batch_{i:03d}"
+      jp = out_dir / f"{bid}.json"
+      mp = out_dir / f"{bid}.md"
+      jp.write_text(json.dumps({"batch_id": bid, "images": rows}, indent=2, ensure_ascii=False), encoding="utf-8")
+      lines = [
+          f"# Headcrop Subagent Scoring {bid}",
+          "",
+          "Inspect every image at native resolution. Return JSONL only, one object per image.",
+          "Use these fields exactly: image, run, prompt_id, prompt_style, composition_target, size, seed, primary_label, head_cut, foot_cut, side_cut, subject_complete_0to5, composition_follow_0to5, notes.",
+          "",
+          "Labels: A_full_ok = requested full-body/group is complete; B_head_cut = relevant head/top is clipped; B_foot_cut = relevant feet/lower legs are clipped; B_side_cut = relevant body/person is clipped at left/right; C_reasonable_crop = non-full-body or portrait crop is reasonable; D_other_bad = severe non-crop failure.",
+          "Only count cuts when composition_target expects full-body, multi-person, or lower-body readability. For upper-body/non-full-body controls, use C_reasonable_crop unless the head itself is accidentally cut.",
+          "Scores: subject_complete_0to5 and composition_follow_0to5 are integers/floats from 0 to 5, where 5 means complete and well-followed, 0 means unusable.",
+          "",
+          "Images:",
+      ]
+      for row in rows:
+          lines.append("- {image} | run={run} prompt_id={prompt_id} prompt_style={prompt_style} target={composition_target} size={size} seed={seed} batch_seed={batch_seed}".format(**row))
+      mp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+      summary_batches.append({"batch_id": bid, "json": str(jp), "md": str(mp), "n": len(rows)})
+  summary = {"n_images": sum(len(b) for b in batches), "already_scored": len(scored), "batch_size": 18, "n_batches": len(batches), "batches": summary_batches}
+  (out_dir / "subagent_batch_plan.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+  print(json.dumps(summary, ensure_ascii=False))
+  PY

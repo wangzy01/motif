@@ -1,0 +1,50 @@
+# BISECT run B —— code-vs-infra 二分对照③：WORKTREE 树 + os.environ 补丁，B1 双向 adapter，融合关 @2×8/v2，100 步。
+# 目的：隔离「824 行重构本身（融合关路径）是否在 16 卡引入问题」。修补后全关路径应与 main 逐位等价 → 预期过。
+#   B 过 & A 过 → 重构本身干净，差异只在融合 → 看 C；B 挂 → 重构默认关路径仍有问题（补丁未覆盖）。
+# 全程 /local，零 /fsx 写，save_final=false，debug_step_trace/batch_ready 全关（不污染、不写 marker）。
+name: evan-mot-bisect-b-wt-foff
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 2
+gpuPerWorker: 8
+cpuPerWorker: 48
+memGBPerWorker: 900
+maxRetries: 1
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_ablations
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=6 PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_ablations
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN
+  export FI_EFA_USE_DEVICE_RDMA=1
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  RUN_ID=bisect_2x8_B_wt_fusionoff
+  ABLATION="model.text_adapter.enabled=true model.text_adapter.multi_layer_fusion.enabled=false trainer.debug_step_trace=false trainer.batch_ready_barrier=false"
+
+  CFG=configs/stage1a_t2i_256_v2.yaml
+  BS=96; NNODES=2; PORT=29683
+  CK=/local/evan/mot_smoke/$RUN_ID
+  RES=/local/evan/mot_smoke/$RUN_ID/res
+  STATS=/fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json
+  RDZV=/fsx/evan/checkpoints/mot_pilot_v1/$RUN_ID.rdzv
+  mkdir -p "$CK" "$RES"
+
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  if [ "$NODE_RANK" = "0" ]; then
+    rm -f "$RDZV"; MYIP=$(hostname -i | awk '{print $1}')
+    echo "$MYIP" > "$RDZV.tmp" && mv "$RDZV.tmp" "$RDZV"; MASTER_ADDR=$MYIP
+  else
+    sleep 5
+    for i in $(seq 1 150); do [ -s "$RDZV" ] && break; sleep 2; done
+    [ -s "$RDZV" ] || { echo "FATAL rdzv file missing"; exit 20; }
+    MASTER_ADDR=$(cat "$RDZV")
+  fi
+  echo "node=$NODE_RANK master=$MASTER_ADDR world=$((NNODES*8)) $(date -u)"
+
+  DOTS="trainer.checkpoint_dir=$CK trainer.resume=false trainer.save_final=false trainer.batch_size=$BS dataset.stats_cache=$STATS dataset.anime_cache_dir=/local/evan/anime_img_cache $ABLATION"
+  $PY -m torch.distributed.run --nnodes=$NNODES --nproc_per_node=8 --node_rank=$NODE_RANK \
+      --master_addr=$MASTER_ADDR --master_port=$PORT \
+      train.py --config $CFG --max-steps 100 $DOTS 2>&1 | tee "$RES/bisect.n$NODE_RANK.log"
+  RC=${PIPESTATUS[0]}; echo "===== BISECT-B $RUN_ID node=$NODE_RANK exited rc=$RC $(date -u) ====="; exit $RC

@@ -1,0 +1,61 @@
+# 512 mix 终验（2×8 真训练）：确认 F1 修复在真·多机 GPU 下 realized mix 达标 + 不 data-bound。
+# 从 cleanup worktree 跑（带 F1：drain=proportional + anime串行 + gpic×4 + 行打乱）。stage512 config。
+# 短跑 200 步、save_final=false、max<checkpoint_steps 故不写 ckpt（仅 rank0 写 metrics.jsonl 到 /fsx 供读）。
+# 判据：metrics.jsonl 的 mix_*（warmup 后）≈ 512 目标 anime0.65/monet0.23/gpic0.08/synth0.04（gpic/anime 不低于目标）；
+#       data_wait_frac 低（取图与 compute 并行、不拖速）。clean exit rc=0。
+name: evan-mot-val-2x8-512ta
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 2
+gpuPerWorker: 8
+cpuPerWorker: 48
+memGBPerWorker: 900
+maxRetries: 1
+command: |
+  set -uxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=6 PYTHONUNBUFFERED=1 PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN
+  export FI_EFA_USE_DEVICE_RDMA=1
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  RUN_ID=val_512ta_$(hostname | tail -c 5)
+  CFG=configs/stage1a_t2i_512.yaml
+  BS=32; NNODES=2; PORT=29702
+  CK=/fsx/evan/mot_code/mot_pilot_v1_cleanup/experiments/results/val_2x8_512ta
+  STATS=/fsx/evan/mot_code/mot_pilot_v1/experiments/stats/monet_global_stats.json
+  RDZV=$CK/rdzv.addr
+  mkdir -p "$CK"
+
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  if [ "$NODE_RANK" = "0" ]; then
+    rm -f "$RDZV"; MYIP=$(hostname -i | awk '{print $1}')
+    echo "$MYIP" > "$RDZV.tmp" && mv "$RDZV.tmp" "$RDZV"; MASTER_ADDR=$MYIP
+  else
+    sleep 5
+    # 容忍交错调度：node0 容器/镜像拉起可能比 node1 晚数分钟（上次终验 node0 晚 ~5min→刚好越过 305s 窗口而 FATAL）。
+    # 拉到 900s（450×2s）远超最坏 stagger；node0 那侧静态 TCPStore 默认也等 ~900s，双向都容忍。
+    for i in $(seq 1 450); do
+      [ -s "$RDZV" ] && break
+      [ $((i % 15)) -eq 0 ] && echo "[rdzv-wait] node=$NODE_RANK still waiting ${i}x2s for $RDZV $(date -u)"
+      sleep 2
+    done
+    [ -s "$RDZV" ] || { echo "FATAL rdzv file missing after 900s"; exit 20; }
+    MASTER_ADDR=$(cat "$RDZV")
+  fi
+  echo "node=$NODE_RANK master=$MASTER_ADDR world=$((NNODES*8)) $(date -u)"
+
+  DOTS="trainer.checkpoint_dir=$CK trainer.resume=false trainer.save_final=false trainer.batch_size=$BS \
+        trainer.dataline_metrics_every=25 trainer.force_os_exit_after_train=true trainer.skip_distributed_teardown=true \
+        dataset.stats_cache=$STATS dataset.anime_cache_dir=/local/evan/anime_img_cache"
+  $PY -m torch.distributed.run --nnodes=$NNODES --nproc_per_node=8 --node_rank=$NODE_RANK \
+      --master_addr=$MASTER_ADDR --master_port=$PORT \
+      train.py --config $CFG --max-steps 200 $DOTS 2>&1 | tee "$CK/train.n$NODE_RANK.log"
+  RC=${PIPESTATUS[0]}
+  if [ "$NODE_RANK" = "0" ]; then
+    echo "===== 512 mix 终验：metrics.jsonl 末几条 mix_*/data_wait ====="
+    grep -oE '"step":[0-9]+|"mix_[a-z_]+":[0-9.]+|"data_wait_frac":[0-9.]+|"buf_[a-z_]+":[0-9.]+' "$CK/metrics.jsonl" 2>/dev/null | tail -40 || echo "(无 metrics)"
+  fi
+  echo "===== val_512mix node=$NODE_RANK exited rc=$RC $(date -u) ====="; exit $RC

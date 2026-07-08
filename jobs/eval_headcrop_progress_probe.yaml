@@ -1,0 +1,24 @@
+name: evan-hc-probe
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 1
+memGBPerWorker: 4
+maxRetries: 0
+command: |
+  set -euo pipefail
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/headcrop_matrix_now_comprehensive
+  OUT="$BASE/progress_probe_latest.txt"
+  TMP="$OUT.tmp"
+  {
+    date -u
+    echo "png_count=$(find "$BASE" -name '*.png' | wc -l)"
+    echo "manifest_count=$(find "$BASE" -name 'sample_manifest.json' | wc -l)"
+    echo "all_images_lines=$([ -f "$BASE/all_images.txt" ] && wc -l < "$BASE/all_images.txt" || echo 0)"
+    echo "all_manifests_lines=$([ -f "$BASE/all_manifests.txt" ] && wc -l < "$BASE/all_manifests.txt" || echo 0)"
+    echo "batch_plan=$([ -f "$BASE/subagent_batches/subagent_batch_plan.json" ] && echo yes || echo no)"
+    echo "manifests:"
+    find "$BASE" -name 'sample_manifest.json' | sort
+  } > "$TMP"
+  mv -f "$TMP" "$OUT"
+  cat "$OUT"

@@ -1,0 +1,14 @@
+# mot_pilot_v1 依赖（在 /fsx/evan/mot_code/venv-gpu 上增量安装的部分）
+# 基底：torch==2.11.0+cu128（venv-gpu 自带）
+transformers==5.11.0   # 需要 >=4.57 才有 qwen3_vl
+omegaconf
+einops
+safetensors            # venv-gpu 已有 0.8.0
+diffusers==0.38.0      # FLUX.2 VAE（AutoencoderKLFlux2，需 >=0.37）；装时 --no-deps 控制副作用
+requests==2.34.2       # diffusers 运行期依赖（venv 原缺，补装；连带 charset-normalizer）
+# 数据线 dataline（complete_v1 真实数据 loader）：读 manifest/源 parquet + 解码图
+pyarrow                # venv-gpu 已有 24.0.0（读 parquet manifest / 回源 caption）
+Pillow                 # venv-gpu 已有 12.2.0（解码 jpg/png/webp + resize；anime 是 webp）
+# numpy/urllib/tarfile/threading/queue 均为 venv 自带/stdlib；anime 图走 R2 HTTP（urllib，无需 dataio）
+# 可选：accelerate（仅加速 VAE 低内存加载，不装也能跑、只是有 warning）
+# GPU 阶段再补：wandb、dataio(内部)、flash-attn
