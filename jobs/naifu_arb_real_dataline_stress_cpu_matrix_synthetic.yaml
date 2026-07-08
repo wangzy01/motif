@@ -1,0 +1,73 @@
+name: evan-mot-crop-naifu-arb-real-dl-matrix-synth
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 64
+memGBPerWorker: 384
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 MALLOC_CHECK_=3
+  unset MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_ ARROW_DEFAULT_MEMORY_POOL LD_PRELOAD TCMALLOC_RELEASE_RATE
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  RUN_TAG="$(date -u +%Y%m%dT%H%M%SZ)_${HOSTNAME:-local}_${RANDOM}"
+  ROOT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/naifu_arb_real_dataline_matrix_synthetic_$RUN_TAG
+  mkdir -p "$ROOT"
+  echo "[matrix-synthetic] ROOT=$ROOT"
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  $PY -m py_compile scripts/stress_naifu_arb_real_dataline.py training/dataline/complete_dataset.py training/dataline/image_fetch.py
+  SRC_STATS=/fsx/evan/mot_code/data_analysis/outputs/monet_global_stats_rich_v1.json
+  if [ ! -s "$SRC_STATS" ]; then
+    echo "FATAL: expected existing stats cache missing: $SRC_STATS" | tee "$ROOT/env.log"
+    exit 32
+  fi
+  FAIL=0
+  for WS in 1 2 4 8 16; do
+    OUT="$ROOT/ws${WS}"
+    mkdir -p "$OUT/cores"
+    RUN_STATS="$OUT/monet_global_stats_rich_v1.json"
+    cp "$SRC_STATS" "$RUN_STATS"
+    {
+      echo "case=synthetic ws=$WS"
+      ulimit -a
+      ulimit -c unlimited || true
+      echo "core_pattern=$(cat /proc/sys/kernel/core_pattern 2>/dev/null || true)"
+      echo "core_uses_pid=$(cat /proc/sys/kernel/core_uses_pid 2>/dev/null || true)"
+      echo "MALLOC_CHECK_=$MALLOC_CHECK_ MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-unset}"
+    } | tee "$OUT/env.log"
+    set +e
+    timeout --preserve-status --signal=TERM --kill-after=120s 900s \
+      $PY scripts/stress_naifu_arb_real_dataline.py \
+        --config configs/stage256_redesign_naifu_arb_v1.yaml \
+        --out "$OUT" \
+        --stats-cache "$RUN_STATS" \
+        --world-size "$WS" \
+        --batch-size 144 \
+        --seconds 420 \
+        --max-batches 8 \
+        --buffer-size 512 \
+        --queue-size 128 \
+        --min-fill 64 \
+        --fetch-workers 8 \
+        --fetch-workers-anime 1 \
+        --no-producer-native-io-serial \
+        --anime-nrows 20000 \
+        --bucket-wait-timeout-s 900 \
+        --only-domains synthetic \
+        --dump-every-s 60 \
+      2>&1 | tee "$OUT/stress.log"
+    RC=${PIPESTATUS[0]}
+    set -e
+    echo "$RC" > "$OUT/rc.txt"
+    find "$OUT" -maxdepth 3 -type f | sort | tee "$OUT/files.txt"
+    find . -maxdepth 2 \( -name 'core' -o -name 'core.*' \) -print 2>/dev/null | tee "$OUT/core_files.txt"
+    echo "ws=$WS rc=$RC" | tee -a "$ROOT/matrix_summary.txt"
+    if [ "$RC" -ne 0 ]; then FAIL=1; fi
+  done
+  exit "$FAIL"
