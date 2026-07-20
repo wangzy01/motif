@@ -1,0 +1,195 @@
+# CPU-only one-shot audit/preparation for resuming the failed s9n9 FORMAL run
+# from its complete step-3000 checkpoint.  The failed 1..3080 metrics are
+# preserved byte-for-byte before the active metrics stream is atomically cut
+# back to the checkpoint boundary.
+name: evan-offarb-formal-s9n9-resume-prepare
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 256
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  SOURCE_JOBTAG=evan-mot-crop-offline-exact-256-8x8-formal-s9n9
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  CK=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage256_offline_exact_v1
+  AUDIT_HOST=$(hostname)
+  AUDIT_JOBTAG=${AUDIT_HOST%-0}
+  OUT=$BASE/offline_formal_resume_prep_v1/$SOURCE_JOBTAG/$AUDIT_JOBTAG
+  test ! -e "$OUT" && test ! -L "$OUT" \
+    || { echo "FATAL: resume-prep output namespace exists: $OUT"; exit 2; }
+  mkdir -p "$(dirname "$OUT")"
+  mkdir "$OUT"
+
+  "$PY" - "$CK" "$OUT" "$SOURCE_JOBTAG" "$AUDIT_JOBTAG" <<'PYEOF'
+  import gc
+  import hashlib
+  import json
+  import os
+  import re
+  import stat
+  import sys
+  from pathlib import Path
+
+  import torch
+
+  checkpoint_root = Path(sys.argv[1])
+  output_root = Path(sys.argv[2])
+  source_jobtag = sys.argv[3]
+  audit_jobtag = sys.argv[4]
+  checkpoint = checkpoint_root / "last.pt"
+  metrics = checkpoint_root / "metrics.jsonl"
+  expected_checkpoint_bytes = 22_636_962_042
+  expected_checkpoint_step = 3_000
+  expected_failed_last_step = 3_080
+
+  def file_identity(path):
+      value = path.lstat()
+      if path.is_symlink() or not stat.S_ISREG(value.st_mode) or value.st_size <= 0:
+          raise SystemExit(f"FATAL: not a nonempty ordinary file: {path}")
+      return {
+          "device": value.st_dev,
+          "inode": value.st_ino,
+          "bytes": value.st_size,
+          "mtime_ns": value.st_mtime_ns,
+          "ctime_ns": value.st_ctime_ns,
+      }
+
+  def sha256_file(path):
+      digest = hashlib.sha256()
+      before = file_identity(path)
+      with path.open("rb", buffering=0) as handle:
+          for block in iter(lambda: handle.read(8 << 20), b""):
+              digest.update(block)
+      if file_identity(path) != before:
+          raise SystemExit(f"FATAL: file changed while hashing: {path}")
+      return digest.hexdigest(), before
+
+  def atomic_exclusive(path, raw):
+      temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+      if path.exists() or path.is_symlink() or temporary.exists() or temporary.is_symlink():
+          raise SystemExit(f"FATAL: refusing output overwrite: {path}")
+      with temporary.open("xb", buffering=0) as handle:
+          handle.write(raw)
+          handle.flush()
+          os.fsync(handle.fileno())
+      os.replace(temporary, path)
+
+  ckpt_sha, ckpt_identity = sha256_file(checkpoint)
+  if ckpt_identity["bytes"] != expected_checkpoint_bytes:
+      raise SystemExit(
+          f"FATAL: checkpoint bytes drift: {ckpt_identity['bytes']} != {expected_checkpoint_bytes}"
+      )
+  state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+  required = {"trainable_state", "optimizer", "ema", "scheduler", "global_step", "ablation_fp"}
+  if not isinstance(state, dict) or set(state) != required:
+      raise SystemExit(f"FATAL: checkpoint top-level keys drift: {sorted(state) if isinstance(state, dict) else type(state)}")
+  if type(state["global_step"]) is not int or state["global_step"] != expected_checkpoint_step:
+      raise SystemExit(f"FATAL: checkpoint global_step drift: {state.get('global_step')}")
+  if not isinstance(state["trainable_state"], dict) or not state["trainable_state"]:
+      raise SystemExit("FATAL: empty trainable_state")
+  if not isinstance(state["optimizer"], dict) or not state["optimizer"].get("state"):
+      raise SystemExit("FATAL: empty optimizer state")
+  if not isinstance(state["scheduler"], dict) or not state["scheduler"]:
+      raise SystemExit("FATAL: empty scheduler state")
+  if not isinstance(state["ema"], dict) or not state["ema"]:
+      raise SystemExit("FATAL: empty EMA state")
+  if not isinstance(state["ablation_fp"], dict) or not state["ablation_fp"]:
+      raise SystemExit("FATAL: empty ablation fingerprint")
+  checkpoint_structure = {
+      "global_step": state["global_step"],
+      "trainable_tensors": len(state["trainable_state"]),
+      "optimizer_state_entries": len(state["optimizer"]["state"]),
+      "optimizer_param_groups": len(state["optimizer"].get("param_groups", [])),
+      "ema_tensors": len(state["ema"]),
+      "scheduler_keys": sorted(state["scheduler"]),
+      "ablation_fp": state["ablation_fp"],
+  }
+  del state
+  gc.collect()
+
+  metrics_raw = metrics.read_bytes()
+  lines = metrics_raw.splitlines(keepends=True)
+  if len(lines) != expected_failed_last_step or any(not line.endswith(b"\n") for line in lines):
+      raise SystemExit(f"FATAL: failed metrics shape drift: rows={len(lines)}")
+  for expected, raw in enumerate(lines, 1):
+      value = json.loads(raw)
+      if not isinstance(value, dict) or value.get("step") != expected:
+          raise SystemExit(f"FATAL: metrics sequence drift at row={expected}: {value.get('step') if isinstance(value, dict) else type(value)}")
+  failed_metrics_sha = hashlib.sha256(metrics_raw).hexdigest()
+  backup = output_root / f"metrics.{source_jobtag}.steps1-{expected_failed_last_step}.jsonl"
+  atomic_exclusive(backup, metrics_raw)
+
+  resume_raw = b"".join(lines[:expected_checkpoint_step])
+  resume_sha = hashlib.sha256(resume_raw).hexdigest()
+  temporary_metrics = checkpoint_root / f".metrics.jsonl.resume-prep.{audit_jobtag}.tmp"
+  if temporary_metrics.exists() or temporary_metrics.is_symlink():
+      raise SystemExit(f"FATAL: stale metrics temporary: {temporary_metrics}")
+  with temporary_metrics.open("xb", buffering=0) as handle:
+      handle.write(resume_raw)
+      handle.flush()
+      os.fsync(handle.fileno())
+  if metrics.read_bytes() != metrics_raw or file_identity(checkpoint) != ckpt_identity:
+      raise SystemExit("FATAL: checkpoint or metrics changed before resume cutover")
+  os.replace(temporary_metrics, metrics)
+  directory_fd = os.open(checkpoint_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+  try:
+      os.fsync(directory_fd)
+  finally:
+      os.close(directory_fd)
+  if metrics.read_bytes() != resume_raw:
+      raise SystemExit("FATAL: active metrics cutover verification failed")
+
+  receipt = {
+      "schema_version": "offline_formal_resume_prep_v1",
+      "status": "PASS",
+      "source_jobtag": source_jobtag,
+      "audit_jobtag": audit_jobtag,
+      "checkpoint": {
+          "path": str(checkpoint.resolve(strict=True)),
+          "sha256": ckpt_sha,
+          **ckpt_identity,
+          **checkpoint_structure,
+      },
+      "failed_metrics": {
+          "rows": expected_failed_last_step,
+          "step_range": [1, expected_failed_last_step],
+          "sha256": failed_metrics_sha,
+          "backup_path": str(backup.resolve(strict=True)),
+      },
+      "resume_metrics": {
+          "rows": expected_checkpoint_step,
+          "step_range": [1, expected_checkpoint_step],
+          "sha256": resume_sha,
+          "path": str(metrics.resolve(strict=True)),
+      },
+  }
+  receipt_raw = json.dumps(
+      receipt, sort_keys=True, separators=(",", ":"), allow_nan=False
+  ).encode("utf-8")
+  receipt_path = output_root / "receipt.json"
+  atomic_exclusive(receipt_path, receipt_raw)
+  receipt_sha = hashlib.sha256(receipt_raw).hexdigest()
+  marker = (
+      f"PASS|{source_jobtag}|{audit_jobtag}|{ckpt_sha}|{failed_metrics_sha}|{resume_sha}|{receipt_sha}\n"
+  ).encode("ascii")
+  atomic_exclusive(output_root / "_SUCCESS", marker)
+  directory_fd = os.open(output_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+  try:
+      os.fsync(directory_fd)
+  finally:
+      os.close(directory_fd)
+  print(
+      "OFFLINE_FORMAL_RESUME_PREP_PASS "
+      f"source={source_jobtag} checkpoint_step={expected_checkpoint_step} "
+      f"checkpoint_sha256={ckpt_sha} failed_metrics_sha256={failed_metrics_sha} "
+      f"resume_metrics_sha256={resume_sha} receipt_sha256={receipt_sha}"
+  )
+  PYEOF

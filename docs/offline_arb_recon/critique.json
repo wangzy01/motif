@@ -1,0 +1,61 @@
+{
+ "facts": {
+  "验证方法说明": "本次为纯文本综合审查任务,基于给定的8份侦察摘要交叉比对;额外仅执行了2条轻量grep命令(仓库:/fsx/evan/mot_code/data_analysis/scripts/,非mot_pilot_v1_cleanup_crop,只读grep,未读取任何parquet/图片)用以核实一项关键交叉发现(uid前缀是否跨monet_real/synthetic共享),未新增其它验证。",
+  "checklist_verdicts": {
+   "a_稳定ID": {
+    "verdict": "矛盾(monet_real 对 synthetic)+其余已答",
+    "证据": "已用grep直接核实: /fsx/evan/mot_code/data_analysis/scripts/t5_build_rich_manifest.py:187 'uid': 'monet:' + mm['id'] (monet_real,同文件:137 gpic用'gpic:'前缀,与monet_real不同,安全); /fsx/evan/mot_code/data_analysis/scripts/t5_build_synthetic_manifest.py:128 'uid': 'monet:' + m['id'] (synthetic)。两个域的uid生成公式字面完全相同('monet:'+id),而monet_real报告断言'跨5个域(anime/monet_real/gpic/synthetic/textatlas)因带域前缀而全局唯一'——这一断言隐含'5个域=5个不同前缀'的假设,但实际只有4个不同前缀(monet:/gpic:/anime:/textatlas:),monet_real与synthetic共享同一个'monet:'命名空间。两份报告各自都只做了'域内'(monet_real内部40M行、synthetic内部13.8M行)唯一性论证(且都未做全量去重,仅footer),没有一份报告检查过这两个域之间id是否冲突。这是需要向Evan/数据团队澄清并做JCC验证的具体交叉缺口,而非纯粹的'已答'。anime(key,README声称100%唯一)、gpic(gpic:前缀,唯一)、textatlas(uid=subset:image_path,天然含subset前缀防碰撞)三域各自答案清楚、无跨域前缀冲突风险。"
+   },
+   "b_宽高含EXIF": {
+    "verdict": "未答(5域一致,非矛盾——所有报告结论方向一致但均未验证)",
+    "证据": "5份域报告(monet_real/synthetic/anime/gpic/textatlas)一致确认:全仓库(training/dataline/*.py)grep exif/EXIF/Orientation零命中,decode_rgb()/PIL读取均不做exif_transpose;每个域的manifest w/h是否与实际解码像素尺寸/方向一致,全部只有'文档一句断言'或'内部自洽但外部无法证伪'级别的证据,均在needs_jcc里列了解码抽样验证项。额外发现(非矛盾,是同一机制在monet_real/synthetic/gpic三份报告里的表述精度差异):REDESIGN分支(manifest_index.py:load_real_synth_shard,285-363行,gpic/monet_real/synthetic三域共用)在elig_*列缺失时会从w/h现算elig_256/512/1024,从而间接决定item是否入池——monet_real报告明确指出这与代码注释'其余路径不读,行为中性'的表述有出入,而synthetic/gpic报告的facts字段其实也记录了同一REDESIGN分支机制,只是摘要段未强调这一冲突点,三者对底层代码事实的记录是一致的,只是monet_real更精确地指出了'注释 vs 实际行为'的不符,不构成事实矛盾。结论:这是Phase-1单一最大悬而未决问题——桶指派若要脱离解码只信manifest元数据,其可信度目前完全没有实测支持。"
+   },
+   "c_tar压缩seek": {
+    "verdict": "部分已答",
+    "证据": "monet_real、synthetic两份报告都用head -c2+dd对magic byte做了实测(monet: cc12m/laion/coyo/megalith10m/diffusion-aesthetic-4k/commoncatalog-cc-by各1个shard; synthetic: flux-klein/flux-schnell/z-image各1个shard),一致确认为未压缩POSIX ustar(非1f8b gzip魔数)。'是否压缩'=已答(未压缩)。'可seek'=结构上理论可行(未压缩故字节可寻址,synthetic报告甚至手动dd解析了12个tar member的offset+size验证了这一点),但挂载层(mountpoint-s3 FUSE)上真实的HTTP Range GET式随机字节读的可行性/性能完全未测,两份报告都明确列入needs_jcc(标记'本机不能做I/O benchmark')。gpic/anime/textatlas不适用tar问题(N/A,已正确排除:gpic是独立文件,anime是HTTP,textatlas是parquet内联)。"
+   },
+   "d_member_offset": {
+    "verdict": "已答(分域清晰,非矛盾)",
+    "证据": "monet_real/synthetic:两报告一致确认manifest/代码里均无tar member offset/length索引,需全新建;唯一支持随机getmember的TarMemberReader类被两份报告独立确认为死代码(未被complete_dataset.py导入使用)。textatlas:报告发现parquet footer本身已含每个row_group/column-chunk的file_offset+size(已用命令验证可读),即定位所需信息已存在于文件自身,只是代码未做成持久化索引——比tar情形成本低得多。gpic:不需要offset索引,因为本来就是独立文件,manifest(src_root+src_shard+src_key)已足够定位。anime:不适用(HTTP直接GET整对象),但有趣的是anime的URL key本身编码了上游chunk文件的offset+length('{dataset}_chunk_{id}${offset}${length}',reuse_map/anime报告都验证了这一点),只是该底层chunk文件对本机不可见。四种情形答案清楚、互不矛盾,只是难度和成本差异巨大(tar需全新建且需全量header扫描;textatlas现成基础只需提取;gpic/anime不需要)。"
+   },
+   "e_cache语义": {
+    "verdict": "部分已答/部分未答",
+    "证据": "现状层面已答:仅anime域有本地磁盘缓存(/local/evan/anime_img_cache),缓存粒度=整对象(每个item一个完整文件,cache key=URL末段=manifest的key本身),魔数校验+原子替换防撕裂;monet_real/synthetic/gpic/textatlas四域均无任何本地缓存层(各报告均明确写出'无缓存')。但更深层、对fetch adapter选型更关键的问题——mountpoint-s3这层FUSE挂载本身在响应'只读一小段字节'请求时,底层是真正做HTTP Range GET,还是内部整对象拉取后再本地切片喂给调用方——没有任何报告做过实测,monet_real needs_jcc第4条与reuse_map needs_jcc第3条都明确把这一测量列为'本机不能做',标记未答。这个问题直接决定了tar range-read方案是否真的能省I/O,而不是仅仅省内存/解析开销。"
+   },
+   "f_动态域索引": {
+    "verdict": "已答",
+    "证据": "5份域报告一致确认:anime(两份manifest文件mtime均为同一时刻的一次性快照)、monet_real(rich_v1由独立脚本批跑生成,训练只glob只读)、synthetic(静态离线已物化数据集,无运行时生成路径)、gpic(离线选样T1-T5 pipeline一次性产出)、textatlas(源parquet是2026-06-24一次性HF导出快照,sidecar manifest幂等builder产出)均为静态离线产物,当前范围内不存在真正'运行时动态生成'的域,故均可做确定性索引。残余风险(非阻塞项,已列入open):anime报告提示'不能排除他处流水线未来整体换版本'——这是版本管理层面的风险,不影响'当前数据是否可确定性索引'这一问题本身的答案。"
+   },
+   "g_逐item随机访问通路": {
+    "verdict": "混合(部分已答/部分未答,非矛盾——按域拆分结论清楚一致)",
+    "证据": "anime:已解决——fetch层面本身就是精确逐item HTTP GET(image_fetch.py:254),无需改造。gpic:已解决——read_gpic_bytes()直接按路径独立文件open,本来就是逐item随机访问(唯一代价是该S3挂载逐文件访问延迟较高,已被gpic报告用ls实测佐证但未做量化P50/P95)。textatlas:基本可行——parquet原生支持row-group随机读取,字节级定位信息(file_offset+size)已存在于footer,只是代码目前按~100行/组的row-group批量读取(非严格逐item),需构建一层'item→row_group'的持久化索引才能做到更细粒度的按需访问,相对成本可控。monet_real/synthetic(tar-based,合计占40M+13.8M=53.8M行、大部分训练曝光量的核心大头):未解决——当前是纯顺序流('r|'全扫shard收齐wanted keys),唯一随机读类TarMemberReader是死代码,offset索引不存在,且mountpoint-s3上的真实range-read可行性完全未测。这是Phase-1'三选一(tar range-read/shard-aware/重新分片)'决策目前完全没有实测数据支撑的核心风险点,权重最高(monet_real是domain_mix占比最大的真实图域之一,synthetic规模也不小)。"
+   },
+   "h_train.py插入面与resume契约": {
+    "verdict": "已答(针对生产系统)+需澄清的范围混淆(非事实矛盾)",
+    "证据": "reuse_map报告(在正确仓库mot_pilot_v1_cleanup_crop内)给出了清晰、带file:line的答案:train.py与dataline之间无torch DataLoader/collate_fn,dataset.loader(batch_size)是plain Python generator;checkpoint(training/checkpoint.py:144-214)只存{trainable_state,optimizer,ema,scheduler,global_step,ablation_fp},不存任何dataloader/数据位置状态;resume时dataset.set_start_step(global_step)只用于重算multi-AR的确定性BucketSchedule(seed,step)以对齐FSDP shape,而非恢复'消费到哪条数据'——这意味着当前系统本就没有可恢复的'数据位置'契约,Phase-1新设计在这一点上有充分自由度,不存在需要保字节级兼容的负担。metrics钩子(train.py:306-339)通过getattr鸭子类型读取,新loader挂同名属性即可零改。但naifu_semantics报告调查的是完全不同的代码库/仓库(/fsx/evan/mot_code/troph-team_important_t2i_i2i/naifu/,非mot_pilot_v1_cleanup_crop),其train_fsdp2.py+sampler.py是另一套训练系统,resume机制(DCP+sampler.state_dict()存offset/current_epoch/epoch_seed+外部Rust异步dataio库导致的checkpoint与实际已训练批次之间的skew,且其自身scripts/dataio_smoke_notes.md明确记录'多节点验证DCP resume路径'尚未完成验证)与mot_pilot生产系统的resume契约无关。若在设计综合时把两份报告的'train.py'/'resume'混为一谈,会产生实质性误判——建议明确naifu_semantics只能作为'业界桶调度算法的参考实现'使用,不代表当前生产系统的插入面或resume契约现状。"
+   }
+  },
+  "跨域交叉发现(超出单份报告独立视角)": [
+   "已用grep核实:monet_real的uid('monet:'+id, t5_build_rich_manifest.py:187)与synthetic的uid('monet:'+id, t5_build_synthetic_manifest.py:128)公式完全相同,两域共享同一个uid命名空间,而两份报告各自的'跨域全局唯一'论证都只覆盖了自己域内、且都未做全量去重(仅footer行数)。这是本次审查发现的最具体、最可复核的一个缺口,直接关系(a)项能否判'已答'。",
+   "五域报告在'manifest w/h可信度'这一点上高度一致地指向同一个悬而未决的假设(零EXIF处理+w/h来源于仓库外脚本/上游数据集,均无法在本仓库内证实或证伪),这不是各自孤立的小问题,而是一个横跨全部5域、直接决定Phase-1'能否脱离解码只凭元数据做桶指派'这一核心设计前提的单一最大风险点。",
+   "'tar range-read在mountpoint-s3上到底是真range语义还是内部整对象拉取'这一问题,在monet_real、synthetic、reuse_map三份报告的needs_jcc里都被独立提及但都未实测,是fetch adapter三选一决策目前唯一缺失的关键实证数据。"
+  ]
+ },
+ "needs_jcc": [
+  "1) 跨域manifest宽高/EXIF与真实解码结果一致性抽样(合并monet_real#1/synthetic#1/gpic#3/textatlas#1/anime#1,新增覆盖monet_real vs synthetic的uid命名空间检查)。目的:验证Phase-1能否信任manifest w/h做桶指派而无需解码,是当前最高优先级的单点缺口。做法:JCC CPU-only job,5域各抽样1000-5000条(按stage边界值分层),实际读取原始字节并用PIL Image.open()(不做exif_transpose)取.size+getexif().get(274)方向tag,与manifest对应uid的width/height比对,统计不一致率与EXIF!=1占比,分域分子源汇总输出。",
+  "2) monet_real/synthetic的tar在mountpoint-s3挂载上做真随机字节区间读(HTTP Range GET等价) vs 顺序流('r|')的延迟/吞吐对比,并判断该挂载是否真做range还是内部整对象拉取(合并monet_real#4/synthetic#2/reuse_map#3,新增'range vs整对象'判据)。目的:为fetch adapter三选一(tar range-read/shard-aware/重新分片)提供唯一目前完全缺失的实测依据,同时回答(e)项遗留的关键问题。做法:对1-2个已知shard,分别做(i)只读文件尾部一个已知小offset片段(ii)顺序全量读,用耗时/网络流量对比;再叠加1000次重复随机小区间读测P50/P99延迟。",
+  "3) tar member offset/length索引原型构建成本(合并monet_real#5/synthetic#5)。目的:量化MONET/synth全新建tar索引(必须全量顺序扫header)的耗时与索引体积,评估是否可接受。做法:JCC对monet_real 6子源、synthetic 3子源各选1-2个完整tar shard做一次性header级顺序扫描(仅512B块+size字段,不读.jpg内容),产出(uid→tar_path,offset,length)索引,记录耗时/大小,外推到monet_real全部子源(90个'<N>-0'目录/子源)及synthetic全部1440个shard的总成本。",
+  "4) 全域(5域,含monet_real与synthetic之间)uid唯一性与全量行数核对(合并monet_real#2/anime#4/reuse_map#1,新增monet_real∩synthetic跨域碰撞检查)。目的:确认'稳定唯一ID'假设在全量、且跨域(尤其monet_real与synthetic共享'monet:'前缀)下均成立无冲突。做法:JCC用pyarrow列裁剪(仅uid/id/sub_source窄列)对monet_real(40M行,6子源)与synthetic(13.8M行,3子源)的uid做合并去重统计,同时对其余3域各自做域内去重,并逐shard footer求和核对总行数。",
+  "5) anime CDN(img.metanomaly.co)规模化GET压测(anime#2)。目的:评估anime域(1650万行,全HTTP fetch,当前唯一已具备逐item随机访问能力的域)一次性/持续拉取的吞吐上限、延迟分布与限流(403/429)行为,判断是否需要预下载策略。做法:JCC采样5万-50万次GET压测,记录延迟分布及4xx/429比例。",
+  "6) gpic单文件随机open延迟实测+PARQUET_NATIVE_LOCK阻塞根因验证(gpic#5)。目的:量化GPIC独立文件慢挂载的P50/P95延迟,评估直读方案吞吐是否满足训练需求,并验证'长时间阻塞在pyarrow native调用'是否确由全局锁+慢挂载共同导致。做法:JCC对gpic images/train做1000次随机文件open+read计时;配合py-spy观察PARQUET_NATIVE_LOCK持锁耗时分布。",
+  "7) textatlas全量(600个,至少595训练用)shard的row_group粒度穷举(textatlas#2)。目的:确认是否严格均~100行/组、有无异常分组,为构建成本相对最低的'item→row_group offset'持久化索引提供依据,可作为优先验证的对照组(vs tar方案的高成本)。做法:JCC对全部shard跑ParquetFile(p).metadata遍历(纯footer,不read_table/不decode),导出row_group行数分布表。"
+ ],
+ "open_questions": [
+  "h项范围澄清:naifu_semantics报告调查的/fsx/evan/mot_code/troph-team_important_t2i_i2i/naifu是否本就是Phase-1设计时打算参考/复用其bucket调度算法的'目标范式源',还是纯属误连的另一套系统?若是前者,其DCP resume+Rust异步dataio的skew风险是否会被引入新设计,需要Evan明确该报告的定位。",
+  "a项关键缺口:monet_real与synthetic两域共享'monet:'+id的uid命名空间(已用grep核实,见facts.跨域交叉发现),需要Evan/数据团队确认这两个源(6个真实子源 vs 3个合成子源)的'id'列生成方式是否结构性保证不会重复(例如是否各自建立在不相交的哈希空间或不同长度/字符集编码上),还是纯属偶然从未发生过并需要靠一次性全量去重扫描来排除。",
+  "2.2GB tar线索(任务背景)只精确匹配monet_real 6子源中的cc12m(占比9.9%行),真正的大头coyo/laion(各约34%)对应tar是4-5.5GB级,commoncatalog-cc-by甚至到13.6GB——该'2.2GB'量级是否代表性不足,是否需要按子源分别评估fetch adapter而非假设所有tar同一量级,需要与Evan确认该线索的来源与代表性。",
+  "b项决策后置问题:一旦JCC验证manifest w/h与实际解码尺寸/EXIF存在不可忽略的不一致率,Phase-1的离线bucket index是应该(i)接受一定误差容忍度、仍主要依赖manifest元数据做桶指派,还是(ii)必须在catalog构建阶段插入一次性解码校正(即失去'免解码'的Phase-1核心卖点)——这是设计决策,不是本次侦察能回答的,需等JCC结果出来后由Evan拍板。",
+  "e/g项决策后置问题:若JCC证实mountpoint-s3对tar做真随机字节读时实际是整对象拉取(而非真range GET),则tar range-read方案基本不可行,'三选一'实质上退化为'shard-aware vs 重新分片'二选一——这一后续决策同样需要JCC实测结果作为前提,当前无法预判。"
+ ],
+ "summary": "已完成8份侦察摘要的缺口审查(a)-(h)逐项判定,并用2条grep命令核实了1项关键交叉发现。核心结论:(a)稳定ID总体已答,但发现具体矛盾——monet_real与synthetic的uid均为'monet:'+id(已grep核实t5_build_rich_manifest.py:187与t5_build_synthetic_manifest.py:128),monet_real报告\"5域因前缀全局唯一\"的断言未考虑到这2域共享同一前缀,存在未经跨域检查的碰撞风险。(b)宽高/EXIF可信度是5域一致的最大悬而未决问题,全部只有文档断言、零EXIF处理、无解码抽样验证,直接卡Phase-1\"免解码桶指派\"的核心前提,判未答。(c)tar压缩状态已实测确认未压缩ustar,但挂载层真实range-read可行性未测,判部分已答。(d)按域清晰已答:tar需全新建offset索引(monet/synth),textatlas索引已存在于parquet footer只需提取,gpic/anime不需要。(e)现状缓存语义已答(仅anime有整对象缓存),但mountpoint-s3底层是否真支持range还是整对象拉取这一关键问题未测,判部分未答。(f)全部5域确认静态,已答。(g)混合:anime/gpic已有随机访问通路,textatlas基本可行需建索引,monet_real/synthetic(tar,数据量最大)完全未解决,是Phase-1最大技术风险集中点。(h)针对生产train.py已答(reuse_map证据充分,resume不存数据位置状态),但需澄清naifu_semantics调查的是另一套完全不同的代码库(troph-team_important_t2i_i2i/naifu),不能与生产系统的resume契约混为一谈。已合并/补充产出7条(≤8)最小JCC验证集,覆盖w/h-EXIF一致性、tar range-read可行性实测、offset索引构建成本、跨域uid去重、anime/gpic吞吐延迟、textatlas row_group穷举。\""
+}

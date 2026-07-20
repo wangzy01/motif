@@ -1,0 +1,54 @@
+name: evan-offarb-caption-plan-audit
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_arb_caption_availability.$(hostname)
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  PLAN=$BASE/offline_arb_plans_v1/w64_prod/plan
+  CATALOG=$BASE/offline_arb_catalog_v1
+  SIDECAR=$BASE/offline_arb_caption_sidecar_v1
+  OUT=$BASE/offline_arb_planned_caption_availability_audit_v1
+  RESULT=$OUT/audit.json
+  test ! -e "$OUT" || { echo "FATAL: immutable output already exists: $OUT"; exit 34; }
+  mkdir -p "$OUT"
+
+  "$PY" -m py_compile scripts/offline_arb/audit_planned_caption_availability.py
+  "$PY" scripts/offline_arb/audit_planned_caption_availability.py \
+    --plan-root "$PLAN" \
+    --catalog-root "$CATALOG" \
+    --sidecar-root "$SIDECAR" \
+    --steps 166667 \
+    --workers 16 \
+    --known-answer-uid monet:023_a11e3e8b8dc53b6a \
+    --output "$RESULT"
+
+  "$PY" - "$RESULT" <<'PYEOF'
+  import json, sys
+  value = json.load(open(sys.argv[1], encoding="utf-8"))
+  assert value["status"] == "PASS"
+  assert value["scan"]["exposures"] == 384_000_768
+  known = value["known_answer"]
+  assert known["pass"] is True
+  assert known["row_id"] == 23_881_582
+  assert known["plan_exposures"] > 0
+  assert known["sidecar_nonempty_mask"] == "0b00000"
+  monet = value["plan_summary"]["monet_real"]
+  assert monet["planned_unavailable_unique_rows"] >= 1
+  assert monet["planned_unavailable_exposures"] >= known["plan_exposures"]
+  print(json.dumps({"status": "PASS", "known_answer": known, "monet": monet}, sort_keys=True))
+  PYEOF
+  sha256sum "$RESULT" > "$OUT/audit.json.sha256"
+  touch "$OUT/_SUCCESS"

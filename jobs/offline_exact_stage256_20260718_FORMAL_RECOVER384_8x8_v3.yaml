@@ -1,0 +1,12 @@
+# Stage256 formal-v3 bounded recovery: reconcile the preserved uncheckpointed
+# tail, resume the CPU32-validated step-256 state, and write a full step-384
+# checkpoint through the normal terminal checkpoint path.
+name: evan-offarb-s256-20260718-causalmlf-recover384-8x8-v3
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 8
+gpuPerWorker: 8
+cpuPerWorker: 80
+memGBPerWorker: 900
+maxRetries: 0
+command: |
+  exec bash /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop/scripts/offline_arb/run_stage256_20260718_formal_v3.sh recover384

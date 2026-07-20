@@ -118,7 +118,15 @@ def stream_tar_images(tar_path: str, wanted_keys: set[str]):
                     if fobj is not None:
                         yield key, fobj.read()
                         remaining.discard(key)
-    except (FileNotFoundError, tarfile.TarError, OSError):
+    except (FileNotFoundError, tarfile.TarError, OSError) as e:
+        # 2026-07-09：不再静默吞（旧行为使坏挂载/缺 tar/中途截断与正常结束不可区分 →
+        # 整域断供零日志,bug hunt MINOR）。采样打印 + 计数进 FETCH_STATS 供监控。
+        with _FETCH_LOCK:
+            FETCH_STATS[f"tar_err:{type(e).__name__}"] += 1
+            n = FETCH_STATS[f"tar_err:{type(e).__name__}"]
+        if n <= 20 or n % 100 == 0:
+            print(f"[image_fetch] ⚠️ tar 流式读中断 #{n}: {type(e).__name__} {e} "
+                  f"tar={tar_path} 未取到 {len(remaining)} key", flush=True)
         return
 
 
@@ -129,15 +137,26 @@ def fetch_url_bytes(url: str, retries: int = 3, timeout: int = 20,
     if cache_dir:
         # 缓存读 = best-effort（2026-07-03 硬化）：磁盘异常 / janitor 轮换目录把文件清走的竞态
         # → 落到 HTTP 正常取图，不再把整个 fetch 判失败（旧行为会连带 producer 跳过该 shard）。
+        # 2026-07-09：加图片魔数校验——缓存目录跨 rank 共享,旧版 .tmp 撕裂写可能留下坏条目且
+        # 永不失效;坏条目视为 miss、尽力删除、落 HTTP 重取重写。
         try:
             os.makedirs(cache_dir, exist_ok=True)
             cache_path = os.path.join(cache_dir, url.rsplit("/", 1)[-1])
             if os.path.exists(cache_path):
                 with open(cache_path, "rb") as f:
                     data = f.read()
-                with _FETCH_LOCK:
-                    FETCH_STATS["cache_hit"] += 1
-                return data
+                if len(data) >= 16 and (data[:3] == b"\xff\xd8\xff" or data[:4] == b"\x89PNG"
+                                        or (data[:4] == b"RIFF" and data[8:12] == b"WEBP")
+                                        or data[:4] == b"GIF8"):
+                    with _FETCH_LOCK:
+                        FETCH_STATS["cache_hit"] += 1
+                    return data
+                with _FETCH_LOCK:                          # 坏魔数/截断 → 当 miss,清掉坏条目
+                    FETCH_STATS["cache_corrupt"] += 1
+                try:
+                    os.remove(cache_path)
+                except OSError:
+                    pass
         except OSError as ce:
             with _FETCH_LOCK:
                 FETCH_STATS[f"cache_read_fail:e{getattr(ce, 'errno', 0)}"] += 1
@@ -152,7 +171,10 @@ def fetch_url_bytes(url: str, retries: int = 3, timeout: int = 20,
                 # 【已成功取到的图】判为取图失败丢弃（主训练 fail rate 0.2%→9% 的 ERR:OSError 风暴
                 # 即此）。现在写失败只计数，不影响本次成功取图。
                 try:
-                    tmp = cache_path + ".tmp"
+                    # tmp 带 pid+tid（2026-07-09）：缓存目录跨 rank/线程共享,共用 ".tmp" 会被并发
+                    # truncate 撕裂 → os.replace 落成坏条目（bug hunt MAJOR;对齐 manifest_index
+                    # 的 .tmp.{pid} 做法）。
+                    tmp = f"{cache_path}.tmp.{os.getpid()}.{threading.get_ident()}"
                     with open(tmp, "wb") as f:
                         f.write(data)
                     os.replace(tmp, cache_path)
@@ -180,11 +202,14 @@ def fetch_url_bytes(url: str, retries: int = 3, timeout: int = 20,
         nfail = FETCH_STATS["fail"]
         ok = FETCH_STATS.get("ok", 0)
         do_warn = (nfail % _WARN_EVERY == 0)
+        # top 快照须在锁内取（2026-07-09）：锁外迭代 FETCH_STATS 遇到并发新键插入会
+        # RuntimeError(dict changed size) 静默杀掉当前 shard（fetch_workers_anime>1 时可触发）。
+        reasons = ([(k, v) for k, v in FETCH_STATS.items() if k.startswith("reason:")]
+                   if do_warn else [])
     if do_warn:
         rate = ok / (ok + nfail) if (ok + nfail) else 0.0
         top = ", ".join(f"{k[7:]}={v}" for k, v in
-                        sorted(((k, v) for k, v in FETCH_STATS.items() if k.startswith("reason:")),
-                               key=lambda kv: -kv[1])[:4])
+                        sorted(reasons, key=lambda kv: -kv[1])[:4])
         print(f"[image_fetch] ⚠️ anime 取图累计 ok={ok} fail={nfail} (成功率 {rate:.1%}); "
               f"失败原因 top: {top} | 最近: {last_reason}", flush=True)
     return None

@@ -1,0 +1,168 @@
+name: evan-mot-crop-offlinearb-gpic-tar-seq-quick
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 8
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 32
+maxRetries: 0
+command: |
+  set -euo pipefail
+  umask 077
+  export LC_ALL=C
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONDONTWRITEBYTECODE=1
+  export OMP_NUM_THREADS=1
+  export MKL_NUM_THREADS=1
+
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  HOST=$(hostname)
+  NODE_RANK=${HOST##*-}
+  JOBTAG=${HOST%-*}
+  case "$NODE_RANK" in 0|1|2|3|4|5|6|7) ;; *) exit 2 ;; esac
+  [ "$HOST" = "$JOBTAG-$NODE_RANK" ] || exit 2
+
+  SELF=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop/jobs/offline_arb_gpic_tar_seq_quick_probe.yaml
+  SOURCE=/s3-mewtant-raw-datasets/stanford-vision-lab/gpic/train
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_gpic_tar_seq_quick_v1
+  ROOT=$BASE/$JOBTAG
+  mkdir -m 700 -p "$ROOT/barriers"
+  [ -f "$SELF" ] && [ ! -L "$SELF" ] || exit 2
+  SELF_SHA=$(sha256sum "$SELF" | awk '{print $1}')
+  BOOT_SHA=$(sha256sum /proc/sys/kernel/random/boot_id | awk '{print $1}')
+
+  SHA_INDEX=$((211 + NODE_RANK * 997))
+  LIST_INDEX=$((509 + NODE_RANK * 991))
+  printf -v SHA_NAME 'gpic_train_%05d.tar' "$SHA_INDEX"
+  printf -v LIST_NAME 'gpic_train_%05d.tar' "$LIST_INDEX"
+  SHA_TAR=$SOURCE/$SHA_NAME
+  LIST_TAR=$SOURCE/$LIST_NAME
+  for FILE in "$SHA_TAR" "$LIST_TAR"; do
+    [ -f "$FILE" ] && [ ! -L "$FILE" ] && [ -s "$FILE" ] || exit 2
+  done
+
+  barrier() {
+    LABEL=$1
+    DIR=$ROOT/barriers/$LABEL
+    mkdir -m 700 -p "$DIR"
+    : > "$DIR/ready-$NODE_RANK"
+    if [ "$NODE_RANK" = 0 ]; then
+      DEADLINE=$((SECONDS + 300))
+      while [ "$(find "$DIR" -maxdepth 1 -type f -name 'ready-*' | wc -l)" -ne 8 ]; do
+        [ "$SECONDS" -lt "$DEADLINE" ] || exit 2
+        sleep 1
+      done
+      : > "$DIR/GO"
+    fi
+    DEADLINE=$((SECONDS + 300))
+    while [ ! -f "$DIR/GO" ]; do
+      [ "$SECONDS" -lt "$DEADLINE" ] || exit 2
+      sleep 1
+    done
+  }
+
+  barrier start_sha
+  SHA_BYTES=$(stat -c %s "$SHA_TAR")
+  SHA_STARTED_NS=$(date +%s%N)
+  SHA_LINE=$(timeout --preserve-status --signal=TERM --kill-after=10s 300s sha256sum "$SHA_TAR")
+  SHA_ENDED_NS=$(date +%s%N)
+  SHA_DIGEST=${SHA_LINE%% *}
+  [ "${#SHA_DIGEST}" -eq 64 ] || exit 2
+
+  barrier start_list
+  LIST_BYTES=$(stat -c %s "$LIST_TAR")
+  LIST_STARTED_NS=$(date +%s%N)
+  MEMBER_COUNT=$(timeout --preserve-status --signal=TERM --kill-after=10s 300s tar -tf "$LIST_TAR" | wc -l)
+  LIST_ENDED_NS=$(date +%s%N)
+  [ "$MEMBER_COUNT" -gt 0 ] && [ $((MEMBER_COUNT % 2)) -eq 0 ] || exit 2
+
+  export HOST NODE_RANK JOBTAG SELF SELF_SHA BOOT_SHA
+  export SHA_NAME SHA_BYTES SHA_STARTED_NS SHA_ENDED_NS SHA_DIGEST
+  export LIST_NAME LIST_BYTES LIST_STARTED_NS LIST_ENDED_NS MEMBER_COUNT ROOT
+  /fsx/evan/mot_code/venv-gpu/bin/python - <<'PY'
+  import hashlib
+  import json
+  import os
+  from pathlib import Path
+
+  def integer(name):
+      value = int(os.environ[name])
+      if value < 0:
+          raise RuntimeError(name)
+      return value
+
+  sha_ns = integer("SHA_ENDED_NS") - integer("SHA_STARTED_NS")
+  list_ns = integer("LIST_ENDED_NS") - integer("LIST_STARTED_NS")
+  if sha_ns <= 0 or list_ns <= 0:
+      raise RuntimeError("non-positive elapsed time")
+  value = {
+      "schema_version": "offline_gpic_tar_seq_quick_v1",
+      "jobtag": os.environ["JOBTAG"],
+      "worker_id": integer("NODE_RANK"),
+      "host": os.environ["HOST"],
+      "boot_id_sha256": os.environ["BOOT_SHA"],
+      "job_spec": {"path": os.environ["SELF"], "sha256": os.environ["SELF_SHA"]},
+      "sha_arm": {
+          "tar": os.environ["SHA_NAME"],
+          "bytes": integer("SHA_BYTES"),
+          "sha256": os.environ["SHA_DIGEST"],
+          "elapsed_ns": sha_ns,
+          "bytes_per_second": integer("SHA_BYTES") / (sha_ns / 1e9),
+      },
+      "list_arm": {
+          "tar": os.environ["LIST_NAME"],
+          "bytes": integer("LIST_BYTES"),
+          "members": integer("MEMBER_COUNT"),
+          "elapsed_ns": list_ns,
+          "bytes_per_second": integer("LIST_BYTES") / (list_ns / 1e9),
+      },
+  }
+  raw = (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+  value["receipt_raw_sha256"] = hashlib.sha256(raw).hexdigest()
+  raw = (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+  path = Path(os.environ["ROOT"]) / f"worker-{value['worker_id']}.json"
+  with path.open("xb", buffering=0) as handle:
+      handle.write(raw)
+      handle.flush()
+      os.fsync(handle.fileno())
+  print(raw.decode().strip(), flush=True)
+  PY
+
+  barrier receipts
+  if [ "$NODE_RANK" = 0 ]; then
+    export ROOT
+    /fsx/evan/mot_code/venv-gpu/bin/python - <<'PY'
+  import json
+  import os
+  from pathlib import Path
+
+  root = Path(os.environ["ROOT"])
+  rows = [json.loads((root / f"worker-{rank}.json").read_text()) for rank in range(8)]
+  if [row["worker_id"] for row in rows] != list(range(8)):
+      raise RuntimeError("worker closure")
+  if len({row["boot_id_sha256"] for row in rows}) != 8:
+      raise RuntimeError("workers did not land on eight physical boots")
+  sha_rates = [row["sha_arm"]["bytes_per_second"] for row in rows]
+  list_rates = [row["list_arm"]["bytes_per_second"] for row in rows]
+  summary = {
+      "schema_version": "offline_gpic_tar_seq_quick_summary_v1",
+      "jobtag": rows[0]["jobtag"],
+      "workers": 8,
+      "distinct_boots": 8,
+      "sha_aggregate_bytes_per_second": sum(sha_rates),
+      "sha_slowest_bytes_per_second": min(sha_rates),
+      "sha_fastest_bytes_per_second": max(sha_rates),
+      "list_aggregate_bytes_per_second": sum(list_rates),
+      "list_slowest_bytes_per_second": min(list_rates),
+      "list_fastest_bytes_per_second": max(list_rates),
+      "member_counts": [row["list_arm"]["members"] for row in rows],
+      "rows": rows,
+  }
+  raw = (json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+  path = root / "summary.json"
+  with path.open("xb", buffering=0) as handle:
+      handle.write(raw)
+      handle.flush()
+      os.fsync(handle.fileno())
+  print(raw.decode().strip(), flush=True)
+  PY
+  fi

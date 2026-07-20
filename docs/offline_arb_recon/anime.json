@@ -1,0 +1,98 @@
+{
+ "key": "anime",
+ "facts": {
+  "Q1_存储形态": {
+   "结论": "anime 域不是 tar/单图对象,是【HTTP 取图】,源头物理存储是外部 R2/CDN 上的私有『chunk 大文件+offset+length』打包格式,但对本机不可见——只能过 CDN 逐 URL GET,天然逐 item 随机访问,无需 tar range-read。有两份 parquet 元数据(见 Q2),均非图片本体。",
+   "证据": [
+    "image_fetch.py:1-9 文档: 'anime —— R2 HTTP（s3key URL,img.metanomaly.co）,urllib 取+重试+可选磁盘缓存'; tar 只用于 MONET/synth 域",
+    "manifest_index.py:96,103 list_shards(): anime 只 glob cfg.anime_caption_source 下的 *.parquet,无 tar 路径",
+    "config.py:226 anime_caption_source = raw['manifest']['anime_caption_source'].split(' ')[0] = '/s3/evan/anime_core_ditv04_ct_soft/data'（来自 t5_sampling_redesign_v1.json:14）",
+    "命令: ls /s3/evan/anime_core_ditv04_ct_soft/data → 17 个 *.parquet, 每个 ~0.9-2.2GB",
+    "命令抽样 3 行 s3key 字段值: 'https://img.metanomaly.co/r2/<base64key>'（实测,与 README 文档中 'ncotar-worker.mewtant.workers.dev' 域名不一致,可能是 CNAME/别名,不确定）",
+    "关键证据(base64 解码+文件校验): key='YW5pbWUtcGljdHVyZXNfY2h1bmtfMDAwMDMkNzMwNjYwMzUyJDU4MjcyOA' → base64.b64decode → b'anime-pictures_chunk_00003$730660352$582728'；本机缓存文件 /local/evan/anime_img_cache/<同名> 实际大小=582728 字节,与解码出的长度字段精确一致 → 证实 key = base64('{dataset}_chunk_{shard_id}${byte_offset}${byte_length}'),即上游确有 chunk 文件+offset+length 索引,但该 chunk 文件本身不在本机任何挂载点可见,只能过 CDN worker 解析取图",
+    "命令: head -c4 该缓存文件 | od → 52 49 46 46 = 'RIFF'（WEBP 容器,非 JPEG）,与 image_fetch.py:148-150 的多格式魔数校验(webp分支)一致"
+   ]
+  },
+  "Q2_item身份与manifest": {
+   "结论": "稳定唯一 ID = `key`（100% unique, 0 null,官方 schema 文档确认）,`uuid` 也全局唯一。存在两份【行数完全一致(16,499,287)】但列集合/分片方式不同的 parquet: (a) 权威源=anime_caption_source(17 shard,139 顶层列/144 物理列),驱动全部采样+caption+取图,当前 live 路径唯一使用者;(b) 薄指针索引 manifest_anime=daily_v1/anime(64 shard,24列,含显式 width/height/elig_256/512/1024),仅被 latent-cache 侧脚本(build_latent_cache_index.py/vae_cache_flux2_moments.py等)使用,当前 config use_latent_cache:false → 未激活。两者用 uid='anime:'+key 关联(代码里显式这样拼)。",
+   "证据": [
+    "/s3/evan/anime_core_ditv04_ct_soft/README.md:39-45: 'Total Rows 16,499,287 | key 100% unique 0 nulls | uuid 100% unique 0 nulls'",
+    "footer 命令(pyarrow.parquet.ParquetFile,仅 metadata,未 read_table): shard0 num_rows=999994, num_row_groups=9, len(schema_arrow)=139, metadata.num_columns=144(struct 列展开导致leaf数>顶层字段数)",
+    "17 shard 逐文件 footer 求和命令输出: TOTAL=16499287,与 README 完全一致",
+    "manifest_index.py:369-376 _ANIME_COLS 列表 = key,uuid,s3key,dataset,width,height,rating_bucket,risk_bucket,cluster_clipl14_level2,ct_weight,ct_lanes,quality_z,hps_v3_score_qwen3vl,...",
+    "config.py:118,225 manifest_anime = raw['manifest']['anime'] = daily_v1/anime 路径(s3-pixai-test-uw2)",
+    "命令: ls .../daily_v1/anime/*.parquet → 64 个文件(glob 结果,目录ls显示65项,其一非 .parquet或为父级项);footer 求和 total rows=16499287,与权威源完全相等 → 同一 16.5M 目录的 1:1 重新分片投影",
+    "build_latent_cache_index.py:1-11 文档: 'anime 训练读源 parquet(cfg.anime_caption_source,17 shard),缓存按薄 manifest(cfg.manifest_anime,64 shard)切片写 part——shard 名不对齐,无法按 shard 局部 glob,故需全局 uid->path'",
+    "scripts/{test_latent_cache,vae_cache_flux2_moments,verify_latent_cache_gpu}.py 均 glob cfg.manifest_anime,证实该薄 manifest 只在 latent-cache 三脚本里用",
+    "config yaml stage256_redesign_naifu_arb_v1.yaml:66 use_latent_cache: false → 薄 manifest 路径当前训练未激活",
+    "complete_dataset.py:1404 uid = rec['uid'] if domain!='anime' else f\"anime:{rec['key']}\" （latent-cache 命中查找用,证实 uid/key 关联约定）",
+    "命令抽样薄 manifest 3 行: uid='anime:'+key 精确拼接,且 key/uuid/s3key 与权威源同 3 行完全相同值 → 确认为同一实体的投影"
+   ]
+  },
+  "Q3_宽高与EXIF": {
+   "结论": "manifest(两份)都带原生 width/height 列。但代码里这两份 width/height 只用于:(a) elig_512/elig_1024 粗筛(短边阈值)、(b) bucket 分布审计/native_bucket_dist 统计——manifest_index.py 明确注释其为'审计用,行为中性,其余路径不读'。真正决定训练时实际分桶(bucket_idx/AR)与 resize 尺寸的,是取图后【解码出的 PIL Image.size】(img.width/img.height),而非 manifest 列。decode_rgb() 全代码库搜索(training/,networks/)未发现任何 exif/EXIF/Orientation/orientation 关键字——即没有做 EXIF 方向校正,PIL 默认解码返回的是原始物理像素宽高(不含 EXIF 自动转正)。因此 manifest 的 width/height 是否与'解码后经EXIF校正的方向'一致,无法在本机验证。",
+   "证据": [
+    "manifest_index.py:343-348 注释: 'width/height：bucketdist 快速审计用（免取图）;其余路径不读,行为中性'",
+    "manifest_index.py:475-476 load_anime_shard 里 width/height 只用来算 short_dim→elig_512/elig_1024(478-479行),及原样返回供审计",
+    "complete_dataset.py:264-265, multi_ar.py:245-258 Bucketer.resize(img,...)：aspect = img.width/max(img.height,1)；assign_adaptive_bucket(img.width, img.height, ...) —— 均取解码后 PIL Image 对象的 .width/.height,不是 manifest 列",
+    "multi_ar.py:164-181 resize_crop_to_bucket(img,...)：w0,h0 = img.size（解码后）",
+    "命令: grep -rn 'exif|EXIF|Orientation|orientation' training/ networks/ → 无匹配(0 命中)",
+    "image_fetch.py:221-227 decode_rgb(): Image.open(io.BytesIO(raw)).convert('RGB')——无 ImageOps.exif_transpose 或等价调用"
+   ]
+  },
+  "Q4_随机访问现状": {
+   "结论": "当前是【逐条 HTTP fetch,带随机 row-group 采样窗口】,不是顺序流。取图层面(s3key→HTTP GET)本身已是精确逐 item 随机访问,天然支持按 key 精确取——这点和 MONET/synth 的 tar 顺序流完全不同。但 manifest 读取层面用的是'随机 row-group + 组内随机 offset 取 nrows(20000)行'的采样窗口,不是全表遍历,所以每次 load_anime_shard 调用只看到 shard 的一个随机切片,不构成一次性全量 catalog 枚举。tar member offset/length 这个问题对 anime 不适用(它本来就不是 tar);唯一潜在的'物理 offset/length'信息藏在 key 字段编码里(chunk_id/offset/length),但这只是上游内部存储的巧合暴露,当前代码完全不使用它,也没有到达那个底层 chunk 文件的直接文件系统访问路径。",
+   "证据": [
+    "manifest_index.py:408-417 load_anime_shard() 文档: nrows 限制读取行数(避免整 shard 1M 行 ~279s 阻塞);随机选 row-group+组内随机 offset 取 nrows 连续行",
+    "complete_dataset.py:366-421 _Producer.run(): while not stop_evt: rng.shuffle(order); for shard in order: iter_anime_shard(...) —— 无限循环重复过 shard 列表,每轮对同一 shard 重新随机采样窗口",
+    "manifest_index.py:163-185 shard_subset_for_rank() 文档 + complete_dataset.py:647 _row_level_domains={'anime'} → anime 恒定'行级'强制,每 rank 拿全部 17 shard,靠 rng 在行内错开,不做文件级分片",
+    "image_fetch.py:133-134 fetch_url_bytes(url,...)：逐 URL(=逐 key)HTTP GET,是精确的按 item 随机访问(不依赖顺序)",
+    "footer命令确认: shard0 num_row_groups=9 (999994行/9≈111110行每组),与 nrows=20000<组大小 一致,即每次只随机看 1 个 row-group 内的一个 20000 行窗口"
+   ]
+  },
+  "Q5_静态vs动态": {
+   "结论": "两份 anime manifest 均是【一次性静态快照】的证据:17 个 rich-source 文件 mtime 全部相同(Jun 17 09:38),README 给出固定统计数(16,499,287行/17文件/139列),无版本号/latest 软链接/增量分区痕迹。代码里也没有发现任何刷新/重建该 manifest 的定时任务或运行时写入逻辑(只有离线 build_latent_cache_index.py 之类的一次性构建脚本)。但这是仅基于本仓库训练侧代码 + 文件 mtime 的判断,不能排除该数据集在其他流水线里被整体替换版本(如生成新的 anime_core_ditv0X)的可能性。",
+   "证据": [
+    "命令 ls -la /s3/evan/anime_core_ditv04_ct_soft/data → 全部 17 文件 mtime = 'Jun 17 09:38'",
+    "/s3/evan/anime_core_ditv04_ct_soft/README.md:39-44 固定统计: Total Rows 16,499,287 | Files 17×parquet | Columns 139",
+    "仓库内(mot_pilot_v1_cleanup_crop)未发现 anime manifest 的写入/刷新代码,只读 glob(manifest_index.py:96,103)"
+   ]
+  },
+  "Q6_fetch与cache": {
+   "结论": "fetch: image_fetch.py:fetch_url_bytes()(行133-215)——urllib GET,timeout=20s,retries=3,退避 0.3*(i+1)s;4xx(除408/429)不重试直接放弃(CF 反爬判定同一 URL 60s 内结果不变);5xx/超时/网络抖动才重试。cache: 目录=cfg.anime_cache_dir=/local/evan/anime_img_cache(yaml:63),cache key=URL 最后一段=manifest 的 `key` 字段本身(无扩展名)——即缓存天然按稳定 ID 索引,支持逐 item 随机存取(已验证:本机缓存里 392 个文件,文件名与 key 字段一致)。读侧做魔数校验(jpg/png/webp/gif,行148-150)防撕裂写坏条目;写侧用 pid+tid 命名临时文件+os.replace 原子替换(行174-180)防并发撕裂。anime fetch_workers 默认串行(fetch_workers_anime=1,yaml 未覆盖),因为该域已是缓存/CDN 域,并发无益。",
+   "证据": [
+    "image_fetch.py:133-215 fetch_url_bytes() 完整实现",
+    "yaml stage256_redesign_naifu_arb_v1.yaml:63 anime_cache_dir: /local/evan/anime_img_cache",
+    "image_fetch.py:144 cache_path = os.path.join(cache_dir, url.rsplit('/',1)[-1])",
+    "命令: ls /local/evan/anime_img_cache | wc -l → 392；文件名如 'YW5pbWUtcGljdHVyZXNfY2h1bmtfMDAwMDMk...' 与 manifest key 字段格式(base64)完全一致",
+    "complete_dataset.py:432,439 CompleteV1Dataset 构造默认 fetch_workers_anime=1；yaml 未设置该键(grep 无匹配)→ 走默认串行",
+    "image_fetch.py:189-197 4xx(非408/429)不重试立即放弃 的注释与实现"
+   ]
+  },
+  "Q7_远端与nrows语义": {
+   "结论": "远端 = Cloudflare Worker/CDN(img.metanomaly.co,可能等价 ncotar-worker.mewtant.workers.dev)+ R2 对象存储;字段里存的是完整 HTTP URL(s3key),不是裸 S3 key。anime_nrows=20000 语义 = 【每次 load_anime_shard() 调用的读取行数上限(单次 I/O 延迟控制),不是全量 catalog 的截断】——生产者线程会无限循环重扫 17 个 shard,每次对撞到某 shard 时用不同随机 row-group+offset 重新采样 20000 行窗口,长期看会覆盖同一 shard 的不同部分但无去重/完整性追踪、不保证遍历全量。对'全量 catalog'的含义是:manifest 本身(17 shard 全表)确实是全量 16.49M 行,可以脱离训练 loader 单独全列/全表扫出全量 catalog(width/height/key 等列都在);但当前训练用的读取方式(load_anime_shard 的随机窗口采样)本身从来不构成一次全量枚举,若要做 Phase-1 的离线全量 catalog 构建,需要单独写一遍全表扫描(轻量列:key/width/height/dataset等),与现有采样逻辑无关、互不影响。",
+   "证据": [
+    "README.md:45 's3key | 0 nulls (`https://ncotar-worker.mewtant.workers.dev/r2/<key>`)' vs 实测抽样值域名为 img.metanomaly.co(不一致,未查证原因)",
+    "manifest_index.py:369-376,471-484 s3key 列直接是完整 URL,取图侧(image_fetch.py:254)直接对 arr['s3key'][i] 发 GET,无需再拼域名",
+    "yaml:62 anime_nrows: 20000；complete_dataset.py:432 默认 anime_nrows=20000",
+    "manifest_index.py:408-417 nrows 语义文档：'避免整 shard 1M 行 ~279s 阻塞'的读取窗口,非'全量截断为20000行'",
+    "complete_dataset.py:366-367 while not stop_evt: rng.shuffle(order); for shard in order — 证实 loader 无限期重复访问 17 个 shard,不是一次性单遍",
+    "t5_sampling_redesign_v1.json:119 static_select: 'NONE (manifest holds all 16.5M; exposure via domain_mix + this priority model)' — 官方采样文档自己确认权威源是全量16.5M,曝光靠概率模型而非静态截断子集"
+   ]
+  }
+ },
+ "needs_jcc": [
+  "验证 manifest width/height 是否与解码后(未做EXIF方向校正)的实际像素宽高一致——需要在 JCC 里对一批(如1000-10000)anime 样本做真实 HTTP 取图+PIL 解码,比较 img.size 与 manifest width/height 列(含检查 JPEG/WEBP EXIF Orientation tag 是否存在及占比),量化不一致率,以判断离线 bucket 指派能否脱离解码只用 manifest 元数据。",
+  "测量 anime CDN(img.metanomaly.co / R2 worker)在【全量16.5M item、每 item 1 次 HTTP GET】规模下的真实吞吐/延迟/限流(403/429)行为——需要 JCC 里跑一个采样(如 5万-50万 GET)压测,评估是否可行在合理时间内一次性拉全量做 one-time resize/crop,或是否必须先做全量下载再本地处理。",
+  "若考虑绕过 CDN 直接读取上游 chunk 文件(key 编码里已暴露 {dataset}_chunk_{id}${offset}${length} 结构)：需要跟基础设施/数据团队确认是否存在这些原始 chunk 文件的可挂载路径或 R2 bucket 直接访问权限；如可行,评估一次性顺序读取 chunk 文件+按 offset/length 批量切片是否比逐 item HTTP GET 效率高几个数量级(这是纯访问权限/基础设施问题,不是本机可验证的代码问题)。",
+  "全表统计:对 17 个 anime_caption_source shard 做全量列扫描(仅 key/width/height/dataset 等窄列,不含图片/长文本列)以真正构建 Phase-1 所需的『全量 item catalog』,并交叉核对 key/uuid 在全量下的唯一性(README 声称100%唯一但未独立验证)——列裁剪后数据量可能仍达 GB 级,建议在 JCC 用带内存限制的 pyarrow 流式 read_table(columns=[...])/iter_batches 做,不在本机跑。"
+ ],
+ "open_questions": [
+  "s3key 实际域名(img.metanomaly.co)与官方 README 文档记载域名(ncotar-worker.mewtant.workers.dev)不一致——是否为同一 Worker 的两个域名(自定义域 vs workers.dev 默认域),还是文档已过期？不影响当前结论但建议向数据团队确认。",
+  "薄manifest daily_v1/anime 的 64 个 parquet 文件用 ls 看到65项(其中一个可能非 .parquet 或为其它文件/隐藏项)，glob('*.parquet') 结果是64个且footer行数求和恰好=16,499,287，与rich source完全一致；未逐一确认那第65项是什么（不影响主结论）。",
+  "manifest 里 key 字段编码出的 {dataset}_chunk_{id}${offset}${length} 是否在所有17个shard/16.5M行里都严格遵循同一格式(本次只抽样验证了3条+1条cache文件)，尚未做大范围格式一致性抽查。",
+  "anime elig_256 在代码里对全部行硬编码为 True（不管实际 width/height 多小），意味着当前 256 阶段没有任何最小分辨率过滤——Phase-1 的 catalog/bucket 方案是否要在这里补一道最小尺寸门槛，需要产品侧/Evan 拍板，不是代码事实问题。",
+  "两份 manifest(rich 17-shard 与 thin 64-shard)是否本质上由同一份上游数据经不同流水线各自导出（因此长期看两者会不会不同步/漂移），还是有明确的『thin 从 rich 派生』保证同步的构建脚本——本次只验证了行数相等+3行内容相同，未找到显式的『thin 由 rich 生成』的构建脚本证据。"
+ ],
+ "summary": "anime 域核心结论(均带文件:行号或命令输出证据):\n1) 存储=HTTP取图，非tar/非单图对象。权威源=/s3/evan/anime_core_ditv04_ct_soft/data(17 parquet, 139顶层列/144物理列, 16,499,287行, footer已核对与README完全一致)，list_shards()只glob这里(manifest_index.py:96,103)。\n2) 稳定ID=`key`(README声称100%唯一0null)。存在第二份\"薄\"manifest(daily_v1/anime, 64 shard, 24列, 含显式width/height/elig)，行数与rich源完全相等(16,499,287)、内容逐行对应，但仅被latent-cache脚本使用且当前config use_latent_cache:false未激活；两者以uid=\"anime:\"+key关联(complete_dataset.py:1404)。\n3) manifest带width/height，但代码只用它做elig_512/1024粗筛与审计(manifest_index.py:343-348注释\"行为中性\")；真正驱动训练bucket指派的是解码后PIL Image.size(multi_ar.py:245-258)。全仓库grep exif/EXIF/Orientation零命中——无EXIF方向校正，manifest w/h与解码后实际像素w/h是否一致无法本机验证(→needs_jcc)。\n4) 当前是\"逐条HTTP fetch+随机row-group采样窗口\"，非顺序流；fetch层面本身已是精确逐item随机访问(image_fetch.py:254直接对s3key GET)。base64解码key字段+对照本机缓存文件字节数，实锤验证key编码格式={dataset}_chunk_{id}${offset}${length}——上游确有chunk+offset+length索引，但该底层chunk文件对本机不可见，只能过CDN。\n5) 两份manifest文件mtime均为一次性快照(全部Jun 17 09:38)，代码内无刷新逻辑，判断为静态；不能排除他处流水线整体换版本。\n6) fetch=image_fetch.py:fetch_url_bytes(133-215)，重试3次/超时20s/4xx除408,429不重试；cache目录/local/evan/anime_img_cache(已用ls验证392个文件存在)，缓存key=URL末段=manifest的key本身(无扩展名)，天然按稳定ID随机存取；魔数校验+pid/tid临时文件原子替换防撕裂。\n7) 远端=CDN(img.metanomaly.co，与README记载ncotar-worker.mewtant.workers.dev域名不同，未查证原因)+R2，字段存完整URL非裸key；anime_nrows=20000是\"单次shard读取的行数窗口\"(避免读1M行阻塞~279s)，不是全量截断——生产者无限循环重扫17个shard、每次窗口随机；全量catalog本身(16.49M行)是可脱离训练loader单独全表扫出的，只是当前loader不这样用。\n4项needs_jcc(EXIF一致性抽样解码验证、CDN规模化GET压测、chunk直连可行性需要基础设施权限确认、全量catalog列裁剪扫描)已列出；5项open_questions已列出（多为domain名不一致/构建脚本溯源等次要存疑点，不影响主结论）。"
+}

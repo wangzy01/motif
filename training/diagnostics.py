@@ -93,6 +93,9 @@ class StepTraceDiagnostics:
         self.trace_fp = None
         self.trace_dir = None
         self.trace_enabled = False
+        self._fh_fp = None                    # 周期 dump 目标 fp（生命周期归本类管,2026-07-09）
+        self._dump_armed = False
+        self._enabled_by_us = False           # faulthandler.enable 是否本类所开（close 只撤自己的）
 
     def setup(self):
         config = self._config
@@ -114,7 +117,13 @@ class StepTraceDiagnostics:
             os.environ["MOT_DEBUG_TRACE_LOCAL_RANK"] = str(local_rank)
             dump_interval = float(config.trainer.get("debug_trace_dump_interval", 0) or 0)
             if dump_interval > 0:
+                # ⚠️ 已实证的危险探针（2026-07-09 根因）：dump_traceback_later 从 watchdog 线程
+                # 【不停世界】遍历运行中线程帧栈,Py3.12.3 有已确认竞态段错误（CPython gh-140815,
+                # 修复仅 backport 3.13/3.14）——2×8 smoke + CPU 压测全部 23 个 SIGSEGV 均由此产生
+                # （A/B: dump=0 → 5/5 case 零崩;dump=5s → 5/5 case 必崩）。仅在明确接受
+                # 「探针本身可崩训练进程」时才开;hang 诊断请改用进程外 py-spy dump。
                 faulthandler.dump_traceback_later(dump_interval, repeat=True, file=self.trace_fp)
+                self._dump_armed = True
         else:
             for env_key in (
                 "MOT_DEBUG_TRACE_FILE",
@@ -130,14 +139,30 @@ class StepTraceDiagnostics:
         # 线程栈 dump 到 per-rank 文件；连续两次相同栈即卡点。默认 0=关。
         fh_interval = float(config.trainer.get("debug_faulthandler_dump_interval", 0) or 0)
         if fh_interval > 0:
-            fh_dir_cfg = config.trainer.get("debug_step_trace_dir", None)
-            fh_dir = str(fh_dir_cfg) if fh_dir_cfg else os.path.join(out_dir, "faulthandler")
-            os.makedirs(fh_dir, exist_ok=True)
-            _fh_host = os.uname().nodename.split(".")[0]
-            _fh_path = os.path.join(fh_dir, f"rank{rank:05d}_local{local_rank}_{_fh_host}_pid{os.getpid()}.fh")
-            _fh_fp = open(_fh_path, "a", encoding="utf-8", buffering=1)
-            faulthandler.dump_traceback_later(fh_interval, repeat=True, file=_fh_fp)
-            log(f"[train] faulthandler periodic dump every {fh_interval}s -> {fh_dir}")
+            # ⚠️ 同上：危险探针（Py3.12 竞态 SIGSEGV 实锤根因）,默认 0=关。另注意
+            # dump_traceback_later 是【全局单例定时器】——与 debug_trace_dump_interval 同开时
+            # 后装的覆盖先装的（无告警）,故这里显式拒绝双开。
+            if self._dump_armed:
+                log("[train] ⚠️ debug_trace_dump_interval 与 debug_faulthandler_dump_interval 同开："
+                    "faulthandler 定时器是全局单例,只保留 trace 那份,忽略本项。")
+            else:
+                fh_dir_cfg = config.trainer.get("debug_step_trace_dir", None)
+                fh_dir = str(fh_dir_cfg) if fh_dir_cfg else os.path.join(out_dir, "faulthandler")
+                os.makedirs(fh_dir, exist_ok=True)
+                _fh_host = os.uname().nodename.split(".")[0]
+                _fh_path = os.path.join(fh_dir, f"rank{rank:05d}_local{local_rank}_{_fh_host}_pid{os.getpid()}.fh")
+                self._fh_fp = open(_fh_path, "a", encoding="utf-8", buffering=1)
+                faulthandler.dump_traceback_later(fh_interval, repeat=True, file=self._fh_fp)
+                self._dump_armed = True
+                log(f"[train] faulthandler periodic dump every {fh_interval}s -> {fh_dir}"
+                    "（⚠️ 危险探针,Py3.12 可致 SIGSEGV,详见 setup 注释）")
+        # 任一诊断文件在 → 顺带 enable()（on-fault 才触发,安全;真崩溃能拿到 Fatal 栈,
+        # 补齐旧 smoke「12/15 段错误无任何栈」的观测盲区）。记录是否本类所开：close() 只
+        # 撤自己开的,不碰 PYTHONFAULTHANDLER=1 建的全局 handler（review C2）。
+        _enable_fp = self._fh_fp or self.trace_fp
+        if _enable_fp is not None and not faulthandler.is_enabled():
+            faulthandler.enable(file=_enable_fp, all_threads=True)
+            self._enabled_by_us = True
 
     def trace(self, step, phase, **fields):
         if self.trace_fp is None:
@@ -152,14 +177,28 @@ class StepTraceDiagnostics:
 
     def cancel_faulthandler(self):
         faulthandler.cancel_dump_traceback_later()
+        self._dump_armed = False
 
     def flush(self):
         if self.trace_fp is not None:
             self.trace_fp.flush()
 
     def close(self):
+        # 顺序（2026-07-09）：先撤定时器/handler,再关 fd——否则 watchdog/崩溃 handler 可能写向
+        # 已关闭复用的 fd（旧版只在 trace_fp 路径 cancel,fh-only 配置定时器带病穿越解释器 teardown）。
+        self.cancel_faulthandler()
+        try:
+            if self._enabled_by_us and faulthandler.is_enabled():
+                faulthandler.disable()        # 只撤自己开的;PYTHONFAULTHANDLER 建的全局 handler 保留
+                self._enabled_by_us = False
+        except Exception:
+            pass
         if self.trace_fp is not None:
             self.trace_fp.close()
+            self.trace_fp = None
+        if self._fh_fp is not None:
+            self._fh_fp.close()
+            self._fh_fp = None
 
 
 class BatchReadyBarrier:

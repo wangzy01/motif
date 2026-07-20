@@ -114,6 +114,13 @@ SCHEMA = {
     "dataset": {
         "__open__": True,
         "store_cls": str,
+        "offline_plan_root": str,
+        "offline_catalog_root": str,
+        "offline_anime_freq_root": str,
+        "offline_caption_sidecar_root": str,
+        "offline_gpic_blob_root": str,
+        "caption_sidecar_workers": int,
+        "anime_caption_root": str,
         "sampling_config": str,
         "stage": NO_TYPECHECK,                 # "256"/"512"/"1024"（YAML 里是 str）
         "image_size": int,
@@ -135,6 +142,17 @@ SCHEMA = {
         "first_fill_timeout_s": float,
         "fetch_workers": int,                  # gpic 逐文件并发取图线程数（默认 8）；1=串行
         "fetch_workers_anime": int,            # anime 逐 URL 并发取图线程数（默认 1=串行：anime 缓存/R2 域并发只过订阅挂载、不提配比，反饿死 tar 域）
+        "fetch_workers_tar": int,              # offline exact:monet/synth 合并读的逐 tar 并发数（默认 8;2026-07-11 gpuval r3:随机 plan 下串行逐 tar=每窗口 60-100s 停顿）
+        "caption_workers_anime": int,          # offline exact:anime caption parquet row-group 并发数（默认 1）
+        "caption_workers_monet_real": int,     # offline exact:monet_real caption parquet row-group 并发数（默认 1）
+        "caption_workers_gpic": int,           # offline exact:gpic caption parquet row-group 并发数（默认 1）
+        "caption_workers_synthetic": int,      # offline exact:synthetic caption parquet row-group 并发数（默认 1）
+        "gpic_payload_in_memory": bool,        # offline exact:直接把 GPIC 原图 bytes 留在预取窗口，跳过 /local 写后再读
+        "gpic_source_consistency_mode": str,   # offline exact:strict_path(默认,fd+路径双重稳定) | fd_stable(仅已打开 inode 稳定)
+        "gpic_threads_per_node": int,          # offline exact:GPIC 节点级总并发；正式显式16，环境变量只能同值确认、不可静默覆盖
+        "gpic_payload_backend": str,           # offline exact:source_files_v1 | offline_gpic_blob_v1；blob 模式全量覆盖且零 source fallback
+        "gpic_blob_manifest_sha256": str,      # offline exact:FSx canonical manifest 文件 SHA；_SUCCESS/index/verifier/S3 blob map 由其闭合
+        "gpic_blob_fd_cache_size": int,        # offline exact:每 rank lease-aware S3 blob FD LRU 上限；正式W64/probation显式冻结，首选>=manifest blob_count（预估候选1024），并受RLIMIT_NOFILE/FD/RSS门约束
         "producer_native_io_serial": bool,     # 诊断/安全阀：每 rank 串行执行 producer 的 native I/O/decode/resize next()，q.put 不进锁；不改变采样语义
         "drain_mode": str,                     # buffer 排空策略：uniform(默认,旧)/proportional(F1,排空∝消费)/keep_present(F2,F1+目标域空时阻塞补料防 renorm-away)
         "keep_present_timeout_s": float,       # keep_present(F2) 下单域阻塞补料的超时(s)；到点放弃该域回退 renorm，防慢域死等拖速

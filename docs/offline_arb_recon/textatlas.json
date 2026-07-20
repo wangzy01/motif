@@ -1,0 +1,73 @@
+{
+ "key": "textatlas",
+ "facts": {
+  "1_存储形态": {
+   "结论": "textatlas 不是 tar,是 HF-datasets 风格的内联图 parquet;无 tar/无压缩魔数问题(N/A)。sidecar(元数据) 和源图(含字节) 是两套平行 parquet 目录,按 <Subset>/<shardname> 一一对齐。",
+   "sidecar 根": "/fsx/evan/textatlas_manifest_v1/<Subset>/train-NNNNN-of-MMMMM.parquet",
+   "源图根(S3挂载)": "/s3/evan/textatlas5m/<Subset>/train-NNNNN-of-MMMMM.parquet (本机可读, ls确认存在)",
+   "本地预存根(配置期望)": "/local/evan/textatlas5m/<Subset>/<shardname> —— 本机(非GPU节点)该路径不存在,ls报 No such file or directory",
+   "源parquet schema(footer,CleanTextSynth shard0)": "image: struct<bytes:binary, path:string>, image_path: string, annotation: string (TextScenesHQ 额外多一列 raw_text)",
+   "sidecar schema(footer)": "image_path:string, uid:string, width:int32, height:int32, elig_512:bool, elig_1024:bool, caption1..5:string",
+   "每 sample 在源parquet里是几个member": "1 行 = 1 张图(image.bytes列内联)+ image_path + annotation,全部同一行、同一个parquet文件里,不存在多member拆分(不像MONET/synth的tar一个key对应.jpg/.json/.pth多member)。证据: complete_dataset.py:309 pf.read_row_group(rg, columns=[\"image\",\"image_path\"]) 只按行取,无第二次join另一文件。",
+   "压缩(footer确认)": "源parquet每个column chunk compression=SNAPPY(parquet-cpp-arrow 17.0.0写出,典型HF export默认); sidecar column chunk compression=ZSTD(build_textatlas_manifest.py:161 pq.write_table(..., compression='zstd')写出,parquet-cpp-arrow 24.0.0)。",
+   "该域不走image_fetch.py": "grep image_fetch.py 全文无 textatlas 字样;docstring(image_fetch.py:1-9)只列GPIC/MONET-synth/anime三种取法,textatlas走complete_dataset.py自己的iter_textatlas_shard直接pq.read_row_group内联取字节。",
+   "600 vs 595 shard": "全10子集(含CoverBook)共600 shard(ls核对: 67+5+11+34+14+36+116+290+5+22=600,与jobs/textatlas_build.yaml注释'读/s3/evan/textatlas5m 600 shards'一致); 训练实际用9子集(去CoverBook)=595 shard,与manifest_index.py:171-179注释'textatlas 595 shard≫world'及prestage_textatlas.py:10注释'595 shard'一致。"
+  },
+  "2_item身份": {
+   "稳定唯一ID": "uid = f\"{subset}:{image_path}\" (字符串),由 scripts/build_textatlas_manifest.py:130 生成,写入 sidecar 的 uid 列。",
+   "manifest路径": "/fsx/evan/textatlas_manifest_v1/<Subset>/<shard>.parquet (10子集全建,训练侧cfg.manifest_textatlas只glob其中9个,见t5_sampling_redesign_v1.json:15,18 和 manifest_index.py:105-110)",
+   "schema": "见上(image_path,uid,width,height,elig_512,elig_1024,caption1..5)",
+   "num_rows(footer实测,9个训练用子集之和)": "5,191,260 行 (CleanTextSynth 1,907,721 / LongWordsSubset-A 259,897 / LongWordsSubset-M 1,250,428 / PPT2Details 298,565 / PPT2Structured 96,401 / Paper2Text 356,658 / StyledTextSynth 425,826 / TextScenesHQ 48,935 / TextVisionBlend 546,829)",
+   "被排除的CoverBook": "207,566 行(footer实测,5 shard),sidecar已建但 textatlas_subsets 配置未含它 → list_shards()训练侧完全不读。全10子集合计 5,398,826 行,与设计文档提到的 i1 caption 'key=<Subset>:<image_path>' ~5.4-6M uid 及 jobs/textatlas_build.yaml 注释 '5.4M uid' 吻合。",
+   "行序对齐前提": "sidecar与源图parquet的1:1行序对齐是builder自身保证(build_textatlas_manifest.py:15 hard schema contract注释'in source row order'),没有独立校验列(如row_idx),完全靠约定;训练侧iter_textatlas_shard按同一row_group读出的image_path字符串去sidecar建的lut(image_path->行号)反查,不是直接按位置对齐(manifest_index.py:290 lut = {ip_arr[i]: i for ...}; complete_dataset.py:316 lut.get(ipaths[j]))"
+  },
+  "3_宽高与EXIF": {
+   "宽高来源": "sidecar的width/height 是 builder 用 PIL.Image.open(io.BytesIO(b)).size 算的(scripts/build_textatlas_manifest.py:122-124),注释明确'header-only 不解码/does NOT fully decode'。",
+   "EXIF方向处理": "全代码库未发现任何 ImageOps.exif_transpose 或等价EXIF方向矫正调用(grep decode_rgb/build_textatlas_manifest.py均无);build时的PIL .size 属性和train时decode_rgb()的Image.open().convert('RGB')(image_fetch.py:221-227)都不读取/应用EXIF orientation tag。两处一致(都是raw未旋转),内部自洽,但若原始图确有非1的EXIF orientation,则视觉方向与manifest的w/h及最终训练张量都不会被矫正——这是待验证的潜在正确性问题,已列入needs_jcc。",
+   "三个loader怎么用w/h": {
+    "load_textatlas_shard(manifest_index.py:132-160)": "elig_256 = min(w,h)>=256 现算(builder只产elig_512/1024,manifest_index.py:151注释); elig_512/1024直接读sidecar列; width/height本身仅用于'bucketdist快速审计'(注释:'其余路径不读')",
+    "load_real_synth_shard(manifest_index.py:285-363)": "同样模式:w/h只在elig_256/512/1024列缺失时才现算派生(REDESIGN rich_v1/synthetic_v1场景),否则优先直接读elig_*列;width/height字段同样标注'bucketdist审计用,其余路径不读'",
+    "load_anime_shard(manifest_index.py:408-491)": "w/h(width/height列)算short_dim来生成elig_512/1024(elig_256对anime恒为True);字段同样标注'bucketdist审计用'"
+   }
+  },
+  "4_随机访问现状": {
+   "现状": "既非纯顺序流(不像MONET/synth的tar 'r|'顺序读),也非真正逐item随机访问,而是【行组(row-group)级乱序访问】:complete_dataset.py:301-314 先pf=pq.ParquetFile(src_path)拿num_row_groups,rng.shuffle(row_group顺序),对选中的row_group整组pf.read_row_group()读出(每组约100行),组内再rng.shuffle(order)打乱行序,再逐行按image_path去sidecar lut过滤是否elig。",
+   "是否已有tar/parquet member的offset&length索引": "没有任何持久化的 item->(shard,row_group,offset) 索引文件。但parquet footer本身天然带这个信息且可零成本(纯footer)取得:pf.metadata.row_group(i).column(j).file_offset / total_compressed_size 已验证可读(见下方row_group分布证据),即'哪个row_group对应哪段字节'完全在文件自身footer里,只是当前代码没有把它抽出来做成独立索引,而是每次按需在运行时通过ParquetFile打开临时得到。",
+   "跨rank/shard切分": "shard_subset_for_rank(manifest_index.py:163-185): textatlas 595 shard ≫ world(节点数×8), 走文件级切分 idx%world==rank(非行级/非force_row_level)。"
+  },
+  "5_静态vs动态": {
+   "结论": "全静态、固定文件集。源图parquet是HF导出的一次性快照(/s3/evan/textatlas5m,ls显示mtime均为2026-06-24,固定不变);sidecar manifest由scripts/build_textatlas_manifest.py一次性构建(jobs/textatlas_build.yaml,幂等skip-exists,非每次训练重新生成);/local预存(prestage_textatlas.py)只是逐字节拷贝,不改变/不生成数据,纯粹是bandwidth优化的镜像拷贝。"
+  },
+  "6_现有fetch_cache": {
+   "取图函数": "iter_textatlas_shard, training/dataline/complete_dataset.py:279-342",
+   "shard路径解析(含local优先)": "同函数294-300行: local_root优先(os.path.exists检查), 否则回退 source_root(S3挂载)。这是【路径级】一次性回退,不是逐item级重试。",
+   "cache目录/键": "没有传统意义的cache(无LRU、无TTL、无corrupt校验);/local预存(prestage_textatlas.py)是训练启动前(理论上train.py之前)按节点一次性把该节点8个rank需要的shard整份copyfile到本地NVMe,幂等判断=文件存在且非空就跳过(prestage_textatlas.py:63-64),原子写用tmp+os.replace(prestage_textatlas.py:68-71)。这与anime域的磁盘缓存(image_fetch.py:133-215,有魔数校验/坏条目清理/cache_hit计数)不是同一机制。",
+   "失败重试语义": "iter_textatlas_shard 内部对 pq.ParquetFile(src_path)/pf.read_row_group() 没有任何try/except包裹,也没有FETCH_STATS类的计数器(那套只在image_fetch.py里为anime/monet-tar做,textatlas未接入);单行图片损坏时decode_rgb()内部try/except吞掉返回None、该行被continue跳过(complete_dataset.py:324-326),不计数、不重试、无日志。prestage_textatlas.py本身对单shard拷贝失败仅打印warn+计数,不重试(prestage_textatlas.py:73-75),读侧回退S3兜底正确性。"
+  },
+  "7_额外": {
+   "atlas大图裁剪区域 vs 独立图": "是独立图,不是大图里裁剪出的子区域。证据:源parquet每行只有一个image.bytes+一个image_path+一个annotation,sidecar schema也没有任何bbox/crop/region类字段;'TextAtlas5M'只是数据集/项目名称,不代表物理拼图。（未做像素级解码验证,基于schema+代码推断,置信但非100%decode-verified）",
+   "row-group定位可行性": "可行,且footer即可给出定位所需信息。已用ParquetFile(p).metadata.row_group(i).column(j)验证file_offset/total_compressed_size在footer里唾手可得(命令输出示例: image.bytes file_offset=7186380 total_compressed_size=7186376),即真正的字节级range-read定位不需要额外索引即可从parquet自身footer解出。",
+   "row_group大小分布(footer抽样,非全量595 shard穷举)": "CleanTextSynth shard0: 285个row_group,前几组均100行,末组74行(28474=284*100+74);7个跨子集抽样(LongWordsSubset-A/PPT2Details/Paper2Text/StyledTextSynth/TextScenesHQ/TextVisionBlend/CoverBook)均呈现 num_row_groups ≈ ceil(num_rows/100) 的规律,即HF导出时row_group_size≈100行为默认切分,最后一组可能不满100。未对全部595个shard逐一穷举确认(只测了8个shard),完整穷举需求写入needs_jcc(虽是footer-only、理论上本机也能做,但要遍历/s3挂载600次open,谨慎起见列入JCC验证)。",
+   "/local预存铺法(job yaml/脚本逻辑)": "scripts/prestage_textatlas.py: 每训练节点(NNODES个)各自算出'本节点8个rank(node_rank*8+L, L=0..7)各自会读到哪些sidecar shard'的并集(用list_shards+shard_subset_for_rank,world=NNODES*8),然后用16线程ThreadPoolExecutor把这些shard的源parquet(从/s3/evan/textatlas5m)整份shutil.copyfile到/local/evan/textatlas5m,幂等/原子写。也就是说:【每节点只镜像自己需要的那一份shard子集,不是全量5.19M行/600shard的全镜像】,不同节点上/local目录内容不同、互不重叠(除非world<shard数导致某些回退到'全部shard'的情况,但textatlas 595≫world恒走文件级切分不会触发该回退)。",
+   "该脚本是否已接入实际训练job": "cleanup_crop repo内 grep -rln prestage jobs/*.yaml *.sh 未命中任何调用点(只有脚本自身文件),说明在本仓库范围内没找到把prestage_textatlas.py接进JCC job command的地方;不确定是否在live的mot_pilot_v1_cleanup worktree的job yaml里被调用(该目录按硬规则不可进入核实)。已列入open_questions。"
+  },
+  "配置证据(路径/开关来源)": {
+   "训练config": "configs/stage256_redesign_naifu_arb_v1.yaml:61 textatlas_local_root: /local/evan/textatlas5m; :95 square_only_domains: [synthetic, textatlas]",
+   "采样JSON(权威配比/路径)": "/fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json:15-18 manifest.textatlas=/fsx/evan/textatlas_manifest_v1, textatlas_source=/s3/evan/textatlas5m, textatlas_subsets=9个(丢CoverBook)"
+  }
+ },
+ "needs_jcc": [
+  "EXIF方向实测: 本机规则禁止解码图片,需在JCC CPU-only job里对≥200张跨9个子集抽样图做 PIL Image.open(...).getexif().get(274) 读取,统计orientation!=1(或None)的比例,并与sidecar w/h、decode_rgb()输出核对是否存在视觉方向不一致——目的:判断Phase-1的width/height元数据(用于桶指派)是否与实际解码/裁剪方向一致。",
+  "row_group大小分布全量穷举: 目前只footer抽样了8/600个shard(均≈100行/组、末组不满)。若Phase-1要建立精确的'item行号->row_group索引'离线映射表,建议起一个轻量CPU-only JCC job,对全部600个(或至少训练用595个)shard做 ParquetFile(p).metadata (纯footer,不read_table/不decode)遍历,导出每shard的row_group行数累积表,验证是否全部严格100行/组、有无异常大/异常小的row_group。",
+  "/local NVMe实际铺设状态核查: 本机(非GPU节点)没有/local/evan/textatlas5m目录,需要在真实GPU训练节点上(JCC job里)ls -la /local/evan/textatlas5m/<Subset>/ 核对: (a) prestage_textatlas.py是否真的在当前直播训练中被调用过(本仓库job yaml未找到调用点); (b) 若被调用,每节点实际铺了多少shard、与shard_subset_for_rank算出的期望集合是否吻合、是否有拷贝失败/缺失。",
+  "S3 mountpoint字节级range-read实测吞吐/延迟: 验证'tar range-read/shard-aware/重新分片'三选一中,基于parquet row-group column-chunk file_offset+length做精确字节范围读(而非read_row_group整组读或整shard顺序流)在真实多rank并发负载下,对/s3 mountpoint(源)和/local NVMe(预存)两种介质的吞吐/延迟差异——需要类似jobs/naifu_arb_real_dataline_stress_cpu_matrix_textatlas.yaml那种CPU-only压测job,本机不可执行(重IO)。"
+ ],
+ "open_questions": [
+  "prestage_textatlas.py是否已被接入某个正在跑/曾跑过的JCC job command?本仓库(cleanup_crop)jobs/*.yaml和*.sh里grep不到任何调用,不确定是接入在live的mot_pilot_v1_cleanup worktree里(按硬规则不可进入核实),还是压根尚未接入训练流程、只是一段待用脚本。",
+  "CoverBook子集(sidecar已建,207,566行,仅约15张elig_512)当前被textatlas_subsets配置完全排除在训练之外——Phase-1的'全量item catalog'范围是否要把它计入(哪怕多数不达标),还是维持现状彻底不管这5个shard?",
+  "Phase-1桶指派是否要保留textatlas现有的'square-only'限制(configs/stage256_redesign_naifu_arb_v1.yaml:95 square_only_domains含textatlas,代码里force_square强制走方形resize_crop_uint8而非bucketer.resize)?还是重构后允许它进入非方桶?",
+  "elig_256目前是训练时由sidecar的width/height现算(不是builder落盘列),Phase-1若要把'某item在某stage是否合格'固化进离线catalog,需决定是否要新增elig_256落盘列或改为在catalog构建阶段统一预计算所有分辨率阈值的elig,而不是运行时现算。",
+  "sidecar与源parquet的行序一致性目前完全靠builder的约定(build_textatlas_manifest.py保证'preserving source row order'),没有独立的行号/hash校验字段——Phase-1的稳定桶指派如果要跨多次manifest重建保持一致,需不需要给这个隐式契约加一层显式校验(比如把image_path当作join key而非行位置,目前训练侧已经是这么做的,image_path是唯一可信关联键)?"
+ ],
+ "summary": "textatlas域已完整侦察:(1)存储=HF风格内联图parquet(非tar),源图/s3/evan/textatlas5m与sidecar元数据/fsx/evan/textatlas_manifest_v1按<Subset>/<shard>1:1对齐,595个训练用shard(全10子集600个,CoverBook被排除),源列压缩SNAPPY、sidecar列ZSTD。(2)item稳定ID=uid(\"{subset}:{image_path}\"),存在sidecar,footer实测9子集共5,191,260行(CoverBook另207,566行未用,合计5,398,826与i1 caption ~5.4M吻合)。(3)宽高在sidecar(builder用PIL .size头部读取,未解码),elig_256现算/elig_512&1024落盘;三个loader都仅把w/h当'bucketdist审计'用,不进主路径;全代码库未发现EXIF orientation矫正(build时和decode时都没有exif_transpose),需JCC解码抽样验证实际影响。(4)现状既非纯顺序流也非真随机:按row_group(约100行/组)乱序读取+组内乱序,parquet footer本身已含每个row_group/column-chunk的file_offset+size(已验证可读),即字节级随机定位所需信息已存在于文件自身,只是代码里没做成持久化索引。(5)完全静态:源parquet是2026-06-24的一次性HF导出快照,sidecar manifest一次性builder产出(幂等),/local预存只是逐shard镜像拷贝不生成数据。(6)取图函数iter_textatlas_shard(complete_dataset.py:279-342),无cache层(不同于anime的带校验磁盘缓存),无重试/无FETCH_STATS,单图损坏静默跳过;/local预存脚本prestage_textatlas.py按节点镜像'仅本节点需要的shard子集'而非全量,但本仓库job yaml里找不到它的调用点。(7)每item是独立图非拼图裁剪;row_group定位可行,footer抽样显示约100行/组的规律(未全量600个shard穷举);/local铺法是per-node按shard_subset_for_rank(文件级idx%world==rank)分配。多项重IO/解码验证已列入needs_jcc,关键开放决策列入open_questions。"
+}

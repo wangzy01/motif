@@ -1,0 +1,433 @@
+# Full fresh successor to the spent v1/v2 smokes.  The training invocation is
+# identity-normalized equivalent to v2; only fresh v3 identities and the
+# moment-backed postflight differ.  Canonical receipts are the final commit.
+name: evan-offarb-s256-20260718-causalmlf-smoke-1x8-v3
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 8
+cpuPerWorker: 80
+memGBPerWorker: 900
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  CACHE_TAG=${JCC_JOB_ID:-${JOB_ID:-smoke-v3}}
+  export PYTHONPYCACHEPREFIX="/local/evan/stage256_20260718_pycache/$CACHE_TAG/$(hostname)"
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN FI_EFA_USE_DEVICE_RDMA=1
+  export OFFLINE_ARB_PREFETCH_STEPS=4 OFFLINE_ARB_STEP_TIMEOUT_S=1800
+  unset OFFLINE_ARB_GPIC_THREADS_PER_NODE
+  unset MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_ ARROW_DEFAULT_MEMORY_POOL LD_PRELOAD TCMALLOC_RELEASE_RATE
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  FORMAL_RUN_ID=stage256_20260718_causalmlf_offline_exact_v1
+  RUN_ID=stage256_20260718_causalmlf_offline_exact_v1_smoke_1x8_v3
+  V1_JOB=evan-offarb-s256-20260718-causalmlf-smoke-1x8-v1-hznz
+  V2_JOB=evan-offarb-s256-20260718-causalmlf-smoke-1x8-v2-nlxr
+  D0_JOB=evan-offarb-s256-20260718-smoke-v2-forensics-v1-cl9w
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  ROOT=$BASE/offline_arb_stage256_20260718_semantic_v1
+  RES=$ROOT/smoke_1x8_v3
+  CK=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage256_20260718_causalmlf_offline_exact_v1_smoke_1x8_v3
+  V1_RES=$ROOT/smoke_1x8
+  V1_CK=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage256_20260718_causalmlf_offline_exact_v1_smoke_1x8
+  V1_LOG=$V1_RES/train.evan-offarb-s256-20260718-causalmlf-smoke-1x8-v1-hznz.20260718T172113Z.log
+  V1_METRICS=$V1_CK/metrics.jsonl
+  V1_GPIC=$V1_RES/gpicpreflight.evan-offarb-s256-20260718-causalmlf-smoke-1x8-v1-hznz.20260718T172113Z.json
+  V1_YAML=jobs/offline_exact_stage256_20260718_smoke_1x8.yaml
+  V2_RES=$ROOT/smoke_1x8_v2
+  V2_CK=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage256_20260718_causalmlf_offline_exact_v1_smoke_1x8_v2
+  V2_TRAIN_EVIDENCE=$V2_RES/TRAIN_EVIDENCE_V2.json
+  V2_LOG=$V2_RES/train.evan-offarb-s256-20260718-causalmlf-smoke-1x8-v2-nlxr.20260718T182626Z.log
+  V2_METRICS=$V2_CK/metrics.jsonl
+  V2_GPIC=$V2_RES/gpicpreflight.evan-offarb-s256-20260718-causalmlf-smoke-1x8-v2-nlxr.20260718T182626Z.json
+  V2_VERIFY_LOG=$V2_RES/checkpoint_verifier.evan-offarb-s256-20260718-causalmlf-smoke-1x8-v2-nlxr.20260718T182626Z.log
+  V2_YAML=jobs/offline_exact_stage256_20260718_smoke_1x8_v2.yaml
+  V2_ADDENDUM=docs/SMOKE_V2_HUMAN_DECISION_ADDENDUM.md
+  FORENSICS_ADDENDUM=docs/SMOKE_V2_ACTIVATION_FORENSICS_ADDENDUM.md
+  FORENSICS_YAML=jobs/offline_exact_stage256_20260718_smoke_v2_activation_forensics_v1.yaml
+  FORENSICS=$ROOT/smoke_v2_activation_forensics_v1/ACTIVATION_FORENSICS_EVIDENCE_SUCCESS.json
+  CFG=configs/stage256_20260718_causalmlf_offline_exact_v1.yaml
+  PLAN=$ROOT/w8_smoke/plan
+  CAT=$BASE/offline_arb_catalog_v1
+  AUDIT=$PLAN/PLAN_AUDIT_SUCCESS.json
+  OVERLAY=$ROOT/OVERLAY_VERIFY_SUCCESS.json
+  FREEZE=$ROOT/FREEZE_VERIFY_SUCCESS.json
+  FREEZE_MANIFEST=$ROOT/FREEZE_MANIFEST.json
+  SEMANTIC_VALIDATE=$ROOT/SEMANTIC_VALIDATE_SUCCESS.json
+  SELECTION=$ROOT/SELECTION_PLANS_SUCCESS.json
+  MATERIALIZE=$ROOT/SEMANTIC_MATERIALIZE_SUCCESS.json
+  ORCHESTRATION=docs/ORCHESTRATION.md
+  TRAIN_SOURCE=train.py
+  ARCH_SOURCE=networks/arch_mot.py
+  CHECKPOINT_SOURCE=training/checkpoint.py
+  ARTIFACT_BUILDTAG=evan-mot-crop-offlinearb-gpic-s3-production-build-zg8g
+  ARTIFACT_ROOT=$BASE/offline_gpic_blob_v1_release/$ARTIFACT_BUILDTAG
+  MANIFEST_SHA256=a18ba1f1250e3b00abdc1051dc71e08a254b8855d5b61b9975e88d2e6ae2ee05
+  EXPECTED_ARCH_FP_SHA256=70546507a768a9d01705b8118b6e3cfea3f055f22db5e9bcdfb3e25e7d022642
+  EXPECTED_CONFIG_SHA256=70c8b4cdadfd17af29e087a9718958bc3e5655feff7afaf8d48ed7bd32bef00a
+  EXPECTED_V1_YAML_SHA256=0630cfea8fd9a7f55b3c4e477520b81ec04952a01d36f6a90b7eb3b75f5ab8fa
+  EXPECTED_V2_YAML_SHA256=56f18a4e375c4af3ec3a9fdb022f14e06b93ec5956164ed8301201e8d718b9b0
+  EXPECTED_V2_ADDENDUM_SHA256=6000007d0438caea8af1714a5ad07aadf732fe6a9c5ad6eebd4d7bbacab6bb18
+  EXPECTED_FORENSICS_ADDENDUM_SHA256=e0a1091c8155e80b727f46bf5570db55053527f927faf5c8968c38c0714f4d72
+  EXPECTED_FORENSICS_YAML_SHA256=cdb2319f87f9252ee916c37cb0880586106f0564b70a0e9a8f2887972fe3864a
+  EXPECTED_FORENSICS_SHA256=391d9fa31a99a9176367c65226f3966ba031c12b8e9262b6c9e8d1603707a994
+  EXPECTED_V2_CHECKPOINT_SHA256=010f754fabc59734e459b6224af692675c9562798d7d69f45097301a24a23480
+  EXPECTED_HELPER_SHA256=8d106c39914083a87b0a372b56c2bf41477ee0279ea0f51e5daa844a38cd736a
+  EXPECTED_GPIC_PREFLIGHT_SHA256=c24d22fe68c100c09c8dd145a6013a2bd359b8d3ca493d804604579953d6686e
+  EXPECTED_V3_ADDENDUM_SHA256=bf4762436380f0c6a09dba611670fb361624f97ee0431a9bc98192a1552e3aa3
+  EXPECTED_V3_VERIFIER_SHA256=6f6d701a4b26f82fa276b68c7b2f6d71bda0298ef498bdaa67d33ce1736f5af6
+  EXPECTED_ORCHESTRATION_SHA256=f7949b6fc8c347753e7fcf4f8fae7e441add42a1799031d6756216c1bdcd992f
+  EXPECTED_TRAIN_SOURCE_SHA256=38cf641682dec5174f4f783fbf833eb8e7145e4819f70108bd316803ab616e88
+  EXPECTED_ARCH_SOURCE_SHA256=ab80127206aa6a78b4920da373231898ef5fa6eb250a9765d026207ed87bfc05
+  EXPECTED_CHECKPOINT_SOURCE_SHA256=af0039161adafd555d0a69af0df389eeadc9010b0af24bb5333f2c025e655409
+  EXPECTED_AUDIT_SHA256=b79638a721a32b86605d4d27d4f01eb196b4c140f83bed571a0e6067371b2010
+  EXPECTED_OVERLAY_SHA256=be40b0ff71e747251076d59b2847906a0cbd60a507ee41b0b681d7d6c370722f
+  EXPECTED_FREEZE_SHA256=b520d45de584abb6118a7a5b07d69666fd6e8c9e2ab6570d08b53776f888fc68
+  EXPECTED_FREEZE_MANIFEST_SHA256=bca617e5b6491a5253d6adbe382d573e57f141fdf114577dc4479c6a71805fa3
+  EXPECTED_SEMANTIC_VALIDATE_SHA256=b955961d07de741843215636d2d5de8950a9c09be558c2f21c69e3b01f08cc47
+  EXPECTED_SELECTION_SHA256=0778f50e813b63427612b5bd7ad4a9ca8ed55f4a75f22fbb8f25793b9c0c543e
+  EXPECTED_MATERIALIZE_SHA256=8547911c8437b00343605f0b69bea1e602ecc5369a2e6bdb7f7ee0d93f9d96c0
+  YAML_SELF=jobs/offline_exact_stage256_20260718_smoke_1x8_v3.yaml
+  ADDENDUM=docs/SMOKE_V3_HUMAN_DECISION_ADDENDUM.md
+  GPIC_PREFLIGHT=scripts/offline_arb/verify_offline_gpic_compact_controls.py
+  V3_VERIFIER=scripts/offline_arb/verify_stage256_20260718_smoke_checkpoint_v3.py
+  EVAL_HELPER=/fsx/evan/mot_code/data_analysis/eval_releases/stage256_offline_exact_v1_vs_prev_final_20260718a/sample_two_final_eval.py
+  SEMANTIC_EQ=$RES/V3_SEMANTIC_EQUIVALENCE.json
+  TRAIN_EVIDENCE=$RES/TRAIN_EVIDENCE_V3.json
+  ACTIVATION_DIAGNOSTIC=$RES/ACTIVATION_DIAGNOSTIC_V3.json
+  FULL_STATE_AUDIT=$RES/FULL_STATE_AUDIT_V3.json
+  FORWARD_PROBE=$RES/FORWARD_PROBE_V3.json
+  VERSIONED_CHECKPOINT_RECEIPT=$RES/SMOKE_CHECKPOINT_SUCCESS_V3.json
+  VERIFY_LOG=$RES/checkpoint_verifier_v3.log
+  VERSIONED_SUCCESS=$RES/SMOKE_SUCCESS_V3.json
+  CHECKPOINT_RECEIPT=$ROOT/SMOKE_CHECKPOINT_SUCCESS.json
+  SUCCESS=$ROOT/SMOKE_SUCCESS.json
+  FORMAL_CK=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage256_20260718_causalmlf_offline_exact_v1
+  FORMAL_RES=$BASE/stage256_20260718_causalmlf_offline_exact_v1
+
+  for REQUIRED in \
+    "$V1_CK/last.pt" "$V1_LOG" "$V1_METRICS" "$V1_GPIC" "$V1_YAML" \
+    "$V2_CK/last.pt" "$V2_TRAIN_EVIDENCE" "$V2_LOG" "$V2_METRICS" "$V2_GPIC" "$V2_VERIFY_LOG" "$V2_YAML" "$V2_ADDENDUM" \
+    "$FORENSICS_ADDENDUM" "$FORENSICS_YAML" "$FORENSICS" \
+    "$CFG" "$AUDIT" "$OVERLAY" "$FREEZE" "$FREEZE_MANIFEST" "$SEMANTIC_VALIDATE" "$SELECTION" "$MATERIALIZE" "$PLAN/header.json" \
+    "$ORCHESTRATION" "$TRAIN_SOURCE" "$ARCH_SOURCE" "$CHECKPOINT_SOURCE" "$YAML_SELF" "$ADDENDUM" "$GPIC_PREFLIGHT" "$V3_VERIFIER" "$EVAL_HELPER"; do
+    test -f "$REQUIRED" && test ! -L "$REQUIRED" \
+      || { echo "FATAL: smoke-v3 prerequisite missing/non-regular: $REQUIRED"; exit 43; }
+  done
+  for FRESH in "$CK" "$RES" "$CHECKPOINT_RECEIPT" "$SUCCESS" "$ROOT/FINAL_HEALTH_SUCCESS.json" "$ROOT/STATIC_SUCCESS.json" "$ROOT/STATIC_CONTRACT_SUCCESS.json" "$FORMAL_CK" "$FORMAL_RES"; do
+    test ! -e "$FRESH" && test ! -L "$FRESH" \
+      || { echo "FATAL: create-once v3/downstream leaf exists: $FRESH"; exit 40; }
+  done
+  if grep -Eq '^[[:space:]]+init_from:' "$CFG"; then echo "FATAL: trainer.init_from is forbidden"; exit 42; fi
+  test "$(sha256sum "$CFG" | awk '{print $1}')" = "$EXPECTED_CONFIG_SHA256"
+  test "$(sha256sum "$V1_YAML" | awk '{print $1}')" = "$EXPECTED_V1_YAML_SHA256"
+  test "$(sha256sum "$V2_YAML" | awk '{print $1}')" = "$EXPECTED_V2_YAML_SHA256"
+  test "$(sha256sum "$V2_ADDENDUM" | awk '{print $1}')" = "$EXPECTED_V2_ADDENDUM_SHA256"
+  test "$(sha256sum "$FORENSICS_ADDENDUM" | awk '{print $1}')" = "$EXPECTED_FORENSICS_ADDENDUM_SHA256"
+  test "$(sha256sum "$FORENSICS_YAML" | awk '{print $1}')" = "$EXPECTED_FORENSICS_YAML_SHA256"
+  test "$(sha256sum "$FORENSICS" | awk '{print $1}')" = "$EXPECTED_FORENSICS_SHA256"
+  test "$(sha256sum "$ADDENDUM" | awk '{print $1}')" = "$EXPECTED_V3_ADDENDUM_SHA256"
+  test "$(sha256sum "$V3_VERIFIER" | awk '{print $1}')" = "$EXPECTED_V3_VERIFIER_SHA256"
+  test "$(sha256sum "$EVAL_HELPER" | awk '{print $1}')" = "$EXPECTED_HELPER_SHA256"
+  test "$(sha256sum "$GPIC_PREFLIGHT" | awk '{print $1}')" = "$EXPECTED_GPIC_PREFLIGHT_SHA256"
+  test "$(sha256sum "$ORCHESTRATION" | awk '{print $1}')" = "$EXPECTED_ORCHESTRATION_SHA256"
+  test "$(sha256sum "$TRAIN_SOURCE" | awk '{print $1}')" = "$EXPECTED_TRAIN_SOURCE_SHA256"
+  test "$(sha256sum "$ARCH_SOURCE" | awk '{print $1}')" = "$EXPECTED_ARCH_SOURCE_SHA256"
+  test "$(sha256sum "$CHECKPOINT_SOURCE" | awk '{print $1}')" = "$EXPECTED_CHECKPOINT_SOURCE_SHA256"
+  test "$(sha256sum "$AUDIT" | awk '{print $1}')" = "$EXPECTED_AUDIT_SHA256"
+  test "$(sha256sum "$OVERLAY" | awk '{print $1}')" = "$EXPECTED_OVERLAY_SHA256"
+  test "$(sha256sum "$FREEZE" | awk '{print $1}')" = "$EXPECTED_FREEZE_SHA256"
+  test "$(sha256sum "$FREEZE_MANIFEST" | awk '{print $1}')" = "$EXPECTED_FREEZE_MANIFEST_SHA256"
+  test "$(sha256sum "$SEMANTIC_VALIDATE" | awk '{print $1}')" = "$EXPECTED_SEMANTIC_VALIDATE_SHA256"
+  test "$(sha256sum "$SELECTION" | awk '{print $1}')" = "$EXPECTED_SELECTION_SHA256"
+  test "$(sha256sum "$MATERIALIZE" | awk '{print $1}')" = "$EXPECTED_MATERIALIZE_SHA256"
+  test "$(sha256sum "$V1_LOG" | awk '{print $1}')" = c1c6dc844314ea29bf5c3d2758af2d454fa7d484f70fc787e002cba9fc83ba21
+  test "$(sha256sum "$V1_METRICS" | awk '{print $1}')" = 74b147fe3e0dfb595f1a52edb42f4918d86802f06e3ce205d08c7dfcbd6661ec
+  test "$(sha256sum "$V1_GPIC" | awk '{print $1}')" = 7bd3d283fcb7f2458eb08f13c9e71e81f593a6bc1261b95db20cb84c76f62719
+  test "$(stat -c %s "$V1_CK/last.pt")" = 26328353144
+  test "$(sha256sum "$V2_TRAIN_EVIDENCE" | awk '{print $1}')" = b228786d1dfc9e7ba3469e58a8cc49467e9fe34a20c147e5b2c3c940067b53de
+  test "$(sha256sum "$V2_LOG" | awk '{print $1}')" = c2c701d4be9088c1e074cf0d09806f5a5bf2f2e74fe4618f800589a1bd82eabe
+  test "$(sha256sum "$V2_METRICS" | awk '{print $1}')" = acd9c39a845cec400b688f9eb6e605021cf6b56b4d67454ceb11957c951e00ac
+  test "$(sha256sum "$V2_GPIC" | awk '{print $1}')" = 715dbabca764d434635383f29bd23c7381ecb3e47e168338f95d57bc1639ae18
+  test "$(sha256sum "$V2_VERIFY_LOG" | awk '{print $1}')" = e2293dfe0a2bbdd32286ad889edc59e10050569f217f1b655049957f36f31dcd
+
+  "$PY" - "$FORENSICS" "$V2_CK/last.pt" "$EXPECTED_V2_CHECKPOINT_SHA256" <<'PYEOF'
+  import json, os, pathlib, sys
+  evidence_p, checkpoint_p = map(pathlib.Path, sys.argv[1:3]); expected_sha=sys.argv[3]
+  evidence=json.load(open(evidence_p,encoding="utf-8")); assert evidence.get("status")=="PASS"
+  assert evidence.get("evidence_only_not_smoke_success") is True
+  assert int(evidence.get("global_step",-1))==3
+  assert evidence["checkpoint"]["sha256"]==expected_sha and int(evidence["checkpoint"]["bytes"])==26328353144
+  stat=checkpoint_p.stat()
+  assert not checkpoint_p.is_symlink() and checkpoint_p.is_file()
+  for key,actual in {"bytes":stat.st_size,"device":stat.st_dev,"inode":stat.st_ino,"mode":stat.st_mode & 0o777,"mtime_ns":stat.st_mtime_ns}.items():
+      assert int(evidence["checkpoint"][key])==int(actual),(key,evidence["checkpoint"][key],actual)
+  diagnosis=evidence["diagnosis"]
+  for key in ("structural_identity_pass","all_14_adapter_dense_parameters_changed","exact_norm_only_parameter_gap","all_adapter_block_optimizer_moments_nonzero","all_reported_group_optimizer_moments_nonzero","all_zero_init_openers_changed","old_parameter_delta_proxy_false_negative_candidate"):
+      assert diagnosis.get(key) is True,(key,diagnosis)
+  assert diagnosis["adapter_block_changed_key_count"]==14 and diagnosis["adapter_block_key_count"]==22
+  assert diagnosis["adapter_block_optimizer_moment_nonzero_key_count"]==22
+  assert diagnosis["recommended_action"]=="REVIEW_MOMENT_BACKED_V3_GATE"
+  expected={"adapter_blocks":(22,14,22),"adapter_out_norm":(1,0,1),"adapter_out_proj":(1,1,1),"final_proj_out":(2,2,2),"mlf_gate":(1,1,1),"mlf_logits":(1,1,1),"text_k_norm":(28,21,28),"text_kv":(56,56,56)}
+  for name,(count,changed,moments) in expected.items():
+      group=evidence["groups"][name]
+      assert (group["key_count"],group["changed_key_count"],group["optimizer_moment_nonzero_key_count"])==(count,changed,moments),(name,group)
+      assert group["optimizer_step_values"]==[3] and not group["zero_moment_keys"]
+  assert evidence["keyset_sha256"]=="6c61b43d30a8bde2f13fc8a91e30a8a0de271934ba5c3fd72df392cd027a4424"
+  print("SMOKE_V3_FORENSICS_CONTROL_PASS",expected_sha)
+  PYEOF
+
+  mkdir -p "$CK" "$RES"
+
+  # Recompute the architecture constant and prove that v3 changes only attempt
+  # identity/postflight.  Raw invocation hashes are retained; equality is
+  # required only after the narrow identity normalization recorded below.
+  "$PY" - "$CFG" "$EXPECTED_ARCH_FP_SHA256" <<'PYEOF'
+  import hashlib,json,sys,yaml
+  c=yaml.safe_load(open(sys.argv[1],encoding="utf-8")); m=c["model"]; t=m["text_adapter"]; u=m["und_lora"]
+  fp={"text_adapter.enabled":bool(t["enabled"]),"text_adapter.bidirectional":bool(t["bidirectional"]),"text_adapter.num_layers":int(t["num_layers"]),"text_adapter.rope":bool(t["rope"]),"text_adapter.multi_layer_fusion.enabled":bool(t["multi_layer_fusion"]["enabled"]),"text_adapter.multi_layer_fusion.num_layers":int(t["multi_layer_fusion"]["num_layers"]),"und_lora.enabled":bool(u["enabled"]),"und_lora.num_layers":int(u["num_layers"]),"und_lora.rank":int(u["rank"]),"und_lora.alpha":float(u["alpha"]),"und_lora.lr_scale":float(u["lr_scale"]),"und_lora.target_modules":",".join(sorted(u["target_modules"])),"long_skip.enabled":bool(m["long_skip"]["enabled"]),"long_skip.mode":str(m["long_skip"]["mode"]),"noise_condition":bool(m["noise_condition"]),"abs_sincos.enabled":bool(m["abs_sincos"]["enabled"]),"sandwich_norm":bool(m["sandwich_norm"]),"patch_size":int(m["patch_size"])}
+  digest=hashlib.sha256(json.dumps(fp,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+  assert digest==sys.argv[2],(digest,fp); assert "init_from" not in c["trainer"]
+  print("ARCH_FP_PASS",digest)
+  PYEOF
+
+  "$PY" - "$SEMANTIC_EQ" "$V2_YAML" "$YAML_SELF" "$CFG" "$TRAIN_SOURCE" "$ARCH_SOURCE" "$FORENSICS" <<'PYEOF'
+  import hashlib,json,os,pathlib,re,sys,yaml
+  output,v2_p,v3_p,config_p,train_p,arch_p,forensics_p=map(pathlib.Path,sys.argv[1:8])
+  sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+  v2=yaml.safe_load(v2_p.read_text(encoding="utf-8")); v3=yaml.safe_load(v3_p.read_text(encoding="utf-8"))
+  assert (v2["numWorkers"],v2["gpuPerWorker"],v2["cpuPerWorker"],v2["memGBPerWorker"],v2["maxRetries"])==(1,8,80,900,0)
+  assert (v3["numWorkers"],v3["gpuPerWorker"],v3["cpuPerWorker"],v3["memGBPerWorker"],v3["maxRetries"])==(1,8,80,900,0)
+  def invocation(command):
+      lines=command.splitlines()
+      matches=[i for i,line in enumerate(lines) if line.strip().startswith('"$PY" -m torch.distributed.run')]
+      assert len(matches)==1,matches
+      start=matches[0]
+      selected=[]
+      for line in lines[start:]:
+          selected.append(line.strip())
+          if not line.rstrip().endswith("\\"): break
+      return "\n".join(selected)+"\n"
+  raw2,raw3=invocation(v2["command"]),invocation(v3["command"])
+  replacements=(("stage256_20260718_causalmlf_offline_exact_v1_smoke_1x8_v2","<SMOKE_RUN_ID>"),("stage256_20260718_causalmlf_offline_exact_v1_smoke_1x8_v3","<SMOKE_RUN_ID>"),("smoke_1x8_v2","<SMOKE_RESULT>"),("smoke_1x8_v3","<SMOKE_RESULT>"),("smoke-1x8-v2","smoke-1x8-<VERSION>"),("smoke-1x8-v3","smoke-1x8-<VERSION>"))
+  def normalize(value):
+      for old,new in replacements: value=value.replace(old,new)
+      return value
+  normalized2,normalized3=normalize(raw2),normalize(raw3)
+  assert normalized2==normalized3,(raw2,raw3,normalized2,normalized3)
+  required=("--max-steps 3","trainer.resume=false","trainer.checkpoint_steps=3","trainer.save_final=true","dataset.offline_plan_root=\"$PLAN\"","dataset.gpic_payload_backend=offline_gpic_blob_v1","dataset.gpic_blob_fd_cache_size=1024")
+  for token in required: assert token in normalized3,token
+  for forbidden in ("trainer.init_from","model.text_adapter.","optimizer.params.lr=","dataset.store_cls="): assert forbidden not in normalized3,forbidden
+  evidence=json.load(open(forensics_p,encoding="utf-8")); assert evidence.get("status")=="PASS"
+  value={"schema_version":"stage256_20260718_v3_semantic_equivalence_v1","status":"PASS","allowed_normalizations":[old for old,_ in replacements],"resources":{"num_workers":1,"gpu_per_worker":8,"cpu_per_worker":80,"mem_gb_per_worker":900,"max_retries":0},"v2_yaml":{"path":str(v2_p),"sha256":sha(v2_p)},"v3_yaml":{"path":str(v3_p),"sha256":sha(v3_p)},"raw_invocation_sha256":{"v2":hashlib.sha256(raw2.encode()).hexdigest(),"v3":hashlib.sha256(raw3.encode()).hexdigest()},"identity_normalized_invocation_sha256":hashlib.sha256(normalized3.encode()).hexdigest(),"identity_normalized_equal":True,"config_sha256":sha(config_p),"train_source_sha256":sha(train_p),"architecture_source_sha256":sha(arch_p),"forensics_receipt_sha256":sha(forensics_p)}
+  raw=(json.dumps(value,indent=2,sort_keys=True)+"\n").encode(); tmp=output.with_name(f".{output.name}.tmp.{os.getpid()}")
+  assert not output.exists() and not output.is_symlink() and not tmp.exists()
+  fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o444)
+  with os.fdopen(fd,"wb") as f: f.write(raw); f.flush(); os.fsync(f.fileno())
+  os.link(tmp,output); os.unlink(tmp)
+  directory=os.open(output.parent,os.O_RDONLY)
+  try: os.fsync(directory)
+  finally: os.close(directory)
+  print(json.dumps(value,sort_keys=True))
+  PYEOF
+
+  "$PY" - "$FREEZE" "$FREEZE_MANIFEST" "$AUDIT" "$OVERLAY" "$PLAN/header.json" <<'PYEOF'
+  import hashlib,json,pathlib,sys
+  freeze_p,manifest_p,audit_p,overlay_p,header_p=map(pathlib.Path,sys.argv[1:])
+  load=lambda p:json.load(open(p,encoding="utf-8"))
+  freeze,audit,overlay,header=map(load,(freeze_p,audit_p,overlay_p,header_p))
+  assert freeze.get("status")==audit.get("status")==overlay.get("status")=="PASS"
+  assert freeze["freeze_sha256"]==hashlib.sha256(manifest_p.read_bytes()).hexdigest()
+  assert int(audit["formal_prefix"]["steps"])==3 and int(audit["formal_prefix"]["exposures"])==864
+  assert int(audit["full_stage"]["anime_tag_only_exposures"])==0 and int(overlay["tag_only_exposure"])==0
+  catalog,assignment=header["catalog_hash"],header["assignment_hash"]
+  assert header["upstream_catalog_hash"]==catalog and header["upstream_assignment_hash"]==assignment
+  assert header["hashes"]["catalog_sha256"]==catalog and header["hashes"]["assignment_sha256"]==assignment
+  print("SMOKE_V3_RELEASE_CONTROL_PASS")
+  PYEOF
+
+  HOST=$(hostname); JOBTAG=${HOST%-*}; STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+  GPIC_JSON=$RES/gpicpreflight.$JOBTAG.$STAMP.json
+  TRAIN_LOG=$RES/train.$JOBTAG.$STAMP.log
+  "$PY" "$GPIC_PREFLIGHT" \
+    --artifact-root "$ARTIFACT_ROOT" --buildtag "$ARTIFACT_BUILDTAG" \
+    --manifest-sha256 "$MANIFEST_SHA256" --catalog-root "$CAT" \
+    --plan-root "$PLAN" --config "$CFG" --job-yaml "$YAML_SELF" \
+    --jobtag "$JOBTAG" --node-rank 0 --output "$GPIC_JSON"
+
+  set +e
+  "$PY" -m torch.distributed.run --standalone --nnodes 1 --nproc-per-node 8 \
+    train.py --config "$CFG" --max-steps 3 \
+    trainer.resume=false \
+    trainer.checkpoint_dir="$CK" \
+    trainer.checkpoint_steps=3 \
+    trainer.save_final=true \
+    dataset.offline_plan_root="$PLAN" \
+    dataset.gpic_payload_backend=offline_gpic_blob_v1 \
+    dataset.offline_gpic_blob_root="$ARTIFACT_ROOT" \
+    dataset.gpic_blob_manifest_sha256="$MANIFEST_SHA256" \
+    dataset.gpic_blob_fd_cache_size=1024 \
+    2>&1 | tee "$TRAIN_LOG"
+  PIPE_RC=("${PIPESTATUS[@]}")
+  set -e
+  TRAIN_RC=${PIPE_RC[0]}; TEE_RC=${PIPE_RC[1]}
+  [ "$TEE_RC" -eq 0 ] || { echo "FATAL: smoke-v3 evidence tee failed"; exit "$TEE_RC"; }
+  [ "$TRAIN_RC" -eq 0 ] || exit "$TRAIN_RC"
+  test -f "$CK/last.pt" && test ! -L "$CK/last.pt"
+  test -f "$CK/metrics.jsonl" && test ! -L "$CK/metrics.jsonl"
+
+  "$PY" - "$TRAIN_EVIDENCE" "$TRAIN_LOG" "$CK/metrics.jsonl" "$CK/last.pt" "$GPIC_JSON" "$AUDIT" "$OVERLAY" "$YAML_SELF" "$ADDENDUM" "$CFG" "$V3_VERIFIER" "$EVAL_HELPER" "$SEMANTIC_EQ" "$FORENSICS" "$FORMAL_RUN_ID" "$RUN_ID" "$V1_JOB" "$V2_JOB" "$D0_JOB" "$JOBTAG" "$TRAIN_RC" "$TEE_RC" "$MANIFEST_SHA256" <<'PYEOF'
+  import hashlib,json,math,os,pathlib,sys
+  (output,log_p,metrics_p,checkpoint_p,gpic_p,audit_p,overlay_p,v3_yaml_p,addendum_p,config_p,verifier_p,helper_p,semantic_p,forensics_p)=map(pathlib.Path,sys.argv[1:15])
+  formal_run_id,run_id,v1_job,v2_job,d0_job,jobtag=sys.argv[15:21]; train_rc,tee_rc=int(sys.argv[21]),int(sys.argv[22]); manifest_sha=sys.argv[23]
+  def sha(path):
+      h=hashlib.sha256()
+      with path.open("rb",buffering=0) as f:
+          for block in iter(lambda:f.read(16<<20),b""): h.update(block)
+      return h.hexdigest()
+  assert train_rc==tee_rc==0
+  rows=[]
+  with metrics_p.open(encoding="utf-8") as f:
+      for line_no,line in enumerate(f,1):
+          if not line.strip(): continue
+          row=json.loads(line); assert isinstance(row,dict),(line_no,row); rows.append(row)
+  assert [int(row["step"]) for row in rows]==[1,2,3],rows
+  for row in rows:
+      for key in ("loss","grad_norm","lr","iter_s","data_wait_s","flow_mse","sigma_mean","peak_mem_gb"):
+          assert key in row and math.isfinite(float(row[key])),(row["step"],key,row.get(key))
+  tag_values=[float(row["buf_semantic_anime_tag_only_records"]) for row in rows if "buf_semantic_anime_tag_only_records" in row]
+  fallback_values=[float(row["buf_semantic_tag_fallback_records"]) for row in rows if "buf_semantic_tag_fallback_records" in row]
+  assert tag_values and fallback_values and all(value==0.0 for value in tag_values+fallback_values)
+  assert any(float(row.get("buf_semantic_anime_nl_records",0.0))>0.0 for row in rows)
+  log=log_p.read_text(encoding="utf-8")
+  assert f"[train] checkpoint saved at step 3 -> {checkpoint_p}" in log
+  assert f"[train] done at step 3; metrics -> {metrics_p};" in log
+  assert "Traceback (most recent call last)" not in log
+  gpic=json.load(open(gpic_p,encoding="utf-8")); assert gpic.get("status")=="PASS" and gpic.get("manifest_sha256")==manifest_sha
+  assert gpic.get("jobtag")==jobtag and int(gpic.get("node_rank"))==0
+  writer_base="evan-offarb-s256-20260718-causalmlf-smoke-1x8-v3"
+  assert jobtag==writer_base or jobtag.startswith(writer_base+"-"),jobtag
+  assert gpic["bindings"]["job_yaml_sha256"]==sha(v3_yaml_p)
+  assert gpic["bindings"]["base_config_sha256"]==sha(config_p)
+  audit=json.load(open(audit_p,encoding="utf-8")); overlay=json.load(open(overlay_p,encoding="utf-8")); semantic=json.load(open(semantic_p,encoding="utf-8")); forensics=json.load(open(forensics_p,encoding="utf-8"))
+  assert audit.get("status")==overlay.get("status")==semantic.get("status")==forensics.get("status")=="PASS"
+  assert semantic["identity_normalized_equal"] is True and semantic["forensics_receipt_sha256"]==sha(forensics_p)
+  assert int(audit["formal_prefix"]["steps"])==3 and int(audit["formal_prefix"]["exposures"])==864
+  assert int(audit["full_stage"]["anime_tag_only_exposures"])==0 and int(overlay["tag_only_exposure"])==0
+  value={"schema_version":"stage256_20260718_smoke_train_evidence_v3","status":"PASS","run_id":formal_run_id,"smoke_run_id":run_id,"expected_step":3,"exposures":864,"tag_only_exposure":0,"preserved_failed_jobs":{"v1":v1_job,"v2":v2_job},"forensics_job":d0_job,"pipeline_rc":{"train":train_rc,"tee":tee_rc},"v3_yaml":{"path":str(v3_yaml_p),"sha256":sha(v3_yaml_p)},"authority":{"path":str(addendum_p),"sha256":sha(addendum_p)},"config":{"path":str(config_p),"sha256":sha(config_p)},"semantic_equivalence":{"path":str(semantic_p),"sha256":sha(semantic_p)},"forensics":{"path":str(forensics_p),"sha256":sha(forensics_p)},"metrics":{"path":str(metrics_p),"sha256":sha(metrics_p),"steps":[1,2,3]},"train_log":{"path":str(log_p),"sha256":sha(log_p)},"checkpoint":{"path":str(checkpoint_p),"bytes":checkpoint_p.stat().st_size},"gpic":{"path":str(gpic_p),"sha256":sha(gpic_p),"status":"PASS","jobtag":jobtag,"node_rank":0},"tools":{"v3_checkpoint_verifier_sha256":sha(verifier_p),"eval_helper_sha256":sha(helper_p)},"runtime":{"anime_nl_observed":True,"anime_tag_only_records":0,"tag_fallback_records":0}}
+  raw=(json.dumps(value,indent=2,sort_keys=True)+"\n").encode(); tmp=output.with_name(f".{output.name}.tmp.{os.getpid()}")
+  assert not output.exists() and not output.is_symlink() and not tmp.exists()
+  fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o444)
+  with os.fdopen(fd,"wb") as f: f.write(raw); f.flush(); os.fsync(f.fileno())
+  os.link(tmp,output); os.unlink(tmp)
+  directory=os.open(output.parent,os.O_RDONLY)
+  try: os.fsync(directory)
+  finally: os.close(directory)
+  print(json.dumps(value,sort_keys=True))
+  PYEOF
+
+  set +e
+  timeout --signal=TERM --kill-after=60s 10800s \
+    "$PY" "$V3_VERIFIER" \
+      --repo-root /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop \
+      --config "$(pwd)/$CFG" \
+      --checkpoint "$CK/last.pt" \
+      --expected-step 3 \
+      --eval-helper "$EVAL_HELPER" \
+      --forensics-receipt "$FORENSICS" \
+      --diagnostic-output "$ACTIVATION_DIAGNOSTIC" \
+      --full-state-output "$FULL_STATE_AUDIT" \
+      --forward-probe-output "$FORWARD_PROBE" \
+      --output "$VERSIONED_CHECKPOINT_RECEIPT" \
+      > "$VERIFY_LOG" 2>&1
+  VERIFY_RC=$?
+  set -e
+  cat "$VERIFY_LOG"
+  [ "$VERIFY_RC" -eq 0 ] || exit "$VERIFY_RC"
+  for REQUIRED in "$TRAIN_EVIDENCE" "$SEMANTIC_EQ" "$ACTIVATION_DIAGNOSTIC" "$FULL_STATE_AUDIT" "$FORWARD_PROBE" "$VERSIONED_CHECKPOINT_RECEIPT" "$VERIFY_LOG"; do
+    test -f "$REQUIRED" && test ! -L "$REQUIRED" || { echo "FATAL: v3 postflight evidence missing/non-regular: $REQUIRED"; exit 43; }
+  done
+  for FRESH in "$VERSIONED_SUCCESS" "$CHECKPOINT_RECEIPT" "$SUCCESS"; do
+    test ! -e "$FRESH" && test ! -L "$FRESH" || { echo "FATAL: final smoke receipt exists"; exit 40; }
+  done
+
+  # Final commit point.  No canonical leaf is written until every independent
+  # versioned gate above is PASS and mutually hash-bound.
+  "$PY" - "$TRAIN_EVIDENCE" "$SEMANTIC_EQ" "$ACTIVATION_DIAGNOSTIC" "$FULL_STATE_AUDIT" "$FORWARD_PROBE" "$VERSIONED_CHECKPOINT_RECEIPT" "$VERIFY_LOG" "$YAML_SELF" "$ADDENDUM" "$V3_VERIFIER" "$FORENSICS" "$VERSIONED_SUCCESS" "$CHECKPOINT_RECEIPT" "$SUCCESS" "$FORMAL_RUN_ID" "$EXPECTED_ARCH_FP_SHA256" <<'PYEOF'
+  import hashlib,json,os,pathlib,sys
+  train_p,semantic_p,diagnostic_p,full_p,probe_p,deep_p,verify_log_p,yaml_p,addendum_p,verifier_p,forensics_p,versioned_success_p,canonical_deep_p,success_p=map(pathlib.Path,sys.argv[1:15])
+  run_id,arch=sys.argv[15:17]
+  sha=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
+  load=lambda path:json.load(open(path,encoding="utf-8"))
+  train,semantic,diagnostic,full,probe,deep,forensics=map(load,(train_p,semantic_p,diagnostic_p,full_p,probe_p,deep_p,forensics_p))
+  assert all(value.get("status")=="PASS" for value in (train,semantic,diagnostic,full,probe,deep,forensics))
+  assert int(train["expected_step"])==int(deep["checkpoint_meta"]["global_step"])==3
+  assert train["semantic_equivalence"]["sha256"]==sha(semantic_p) and semantic["identity_normalized_equal"] is True
+  assert train["forensics"]["sha256"]==sha(forensics_p)=="391d9fa31a99a9176367c65226f3966ba031c12b8e9262b6c9e8d1603707a994"
+  assert train["v3_yaml"]["sha256"]==sha(yaml_p) and train["authority"]["sha256"]==sha(addendum_p)
+  assert train["tools"]["v3_checkpoint_verifier_sha256"]==sha(verifier_p)
+  assert train["tools"]["eval_helper_sha256"]=="8d106c39914083a87b0a372b56c2bf41477ee0279ea0f51e5daa844a38cd736a"
+  assert train["config"]["sha256"]=="70c8b4cdadfd17af29e087a9718958bc3e5655feff7afaf8d48ed7bd32bef00a"
+  assert train["runtime"]=={"anime_nl_observed":True,"anime_tag_only_records":0,"tag_fallback_records":0}
+  assert deep["config_identity"]["sha256"]==train["config"]["sha256"]
+  assert deep["load_audit"]["weights_src"]=="ema" and int(deep["load_audit"]["trainable_key_count"])==483
+  assert deep["load_audit"]["architecture_fingerprint"]["sha256"]=="d6db3855f1bd561ee21f31238b559dbff7adc65149a32025785cc259863d9abf"
+  assert deep["load_audit"]["checkpoint_ablation_fingerprint"]["sha256"]==arch
+  assert deep["load_audit"]["trainable_keyset_sha256"]=="6c61b43d30a8bde2f13fc8a91e30a8a0de271934ba5c3fd72df392cd027a4424"
+  assert deep["parameter_counts"]["rounded_millions"]==[3366.0,1645.5,1720.6]
+  assert deep["forensics_receipt_sha256"]==sha(forensics_p)
+  assert deep["activation_diagnostic_sha256"]==sha(diagnostic_p)
+  assert deep["full_state_audit_sha256"]==sha(full_p)
+  assert deep["forward_probe_sha256"]==sha(probe_p)
+  assert diagnostic["global_step"]==3 and diagnostic["forensics_receipt_sha256"]==sha(forensics_p)
+  adapter_blocks=diagnostic["adapter_blocks"]
+  assert adapter_blocks["key_count"]==22 and adapter_blocks["dense_changed_key_count"]==14
+  assert adapter_blocks["optimizer_moment_nonzero_key_count"]==22
+  assert adapter_blocks["norm_key_count"]==adapter_blocks["norm_delta_reported_count"]==8
+  assert adapter_blocks["unexpected_unchanged_dense_count"]==0
+  assert diagnostic["adapter_out_norm"]["key_count"]==1 and diagnostic["adapter_out_norm"]["optimizer_moment_nonzero_key_count"]==1
+  assert diagnostic["text_k_norm"]["key_count"]==28 and diagnostic["text_k_norm"]["optimizer_moment_nonzero_key_count"]==28
+  assert diagnostic["structural_identity"]["expected_optimizer_hparams"] is True
+  assert diagnostic["structural_identity"]["expected_scheduler_state"] is True
+  assert full["global_step"]==3 and full["trainable_count"]==full["ema_count"]==483
+  assert full["keyset_sha256"]=="6c61b43d30a8bde2f13fc8a91e30a8a0de271934ba5c3fd72df392cd027a4424"
+  assert full["all_shapes_match"] is True and full["all_finite"] is True
+  assert probe["adapter_blocks_executed"]==2 and probe["causal_prefix_independent"] is True
+  assert probe["trainable_fp32_pre_residual"]["all_finite"] is True
+  assert probe["trainable_fp32_pre_residual"]["adapter_nonzero"] is True and probe["trainable_fp32_pre_residual"]["mlf_nonzero"] is True
+  assert probe["checks"]["trainable_future_branch_sensitive"] is True
+  assert probe["strict_trainable_state_load"]["status"]=="PASS"
+  assert probe["ema"]["all_finite"] is True and probe["ema"]["shapes_match"] is True
+  actual_jobtag=train["gpic"]["jobtag"]; writer_base="evan-offarb-s256-20260718-causalmlf-smoke-1x8-v3"
+  assert actual_jobtag==writer_base or actual_jobtag.startswith(writer_base+"-"),actual_jobtag
+  checkpoint_identity=deep["checkpoint"]
+  assert train["checkpoint"]["path"]==checkpoint_identity["path"]
+  assert int(train["checkpoint"]["bytes"])==int(checkpoint_identity["size"])>0
+  evidence_paths={"training":train_p,"semantic_equivalence":semantic_p,"activation_diagnostic":diagnostic_p,"full_state_audit":full_p,"forward_probe":probe_p,"checkpoint_receipt":deep_p,"verifier_log":verify_log_p,"forensics":forensics_p}
+  value={"schema_version":"stage256_20260718_smoke_success_v3","status":"PASS","run_id":run_id,"expected_step":3,"exposures":864,"tag_only_exposure":0,"writer_jobtag":actual_jobtag,"architecture_fingerprint_sha256":arch,"config_sha256":train["config"]["sha256"],"checkpoint":checkpoint_identity,"v3_attempt":{"writer_job_name":writer_base,"writer_jobtag":actual_jobtag,"yaml":{"path":str(yaml_p),"sha256":sha(yaml_p)},"human_decision_addendum":{"path":str(addendum_p),"sha256":sha(addendum_p)},"verifier":{"path":str(verifier_p),"sha256":sha(verifier_p)}},"preserved_failures":train["preserved_failed_jobs"],"runtime_tag_only_evidence":{"planned_tag_only_exposure":0,"runtime_tag_only_exposure":0,"runtime_tag_fallback_records":0},"evidence":{name:{"path":str(path),"sha256":sha(path)} for name,path in evidence_paths.items()}}
+  success_raw=(json.dumps(value,indent=2,sort_keys=True)+"\n").encode(); deep_raw=deep_p.read_bytes()
+  def create(path,raw):
+      assert not path.exists() and not path.is_symlink(),path
+      tmp=path.with_name(f".{path.name}.tmp.{os.getpid()}"); assert not tmp.exists() and not tmp.is_symlink(),tmp
+      fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o444)
+      with os.fdopen(fd,"wb") as f: f.write(raw); f.flush(); os.fsync(f.fileno())
+      os.link(tmp,path); os.unlink(tmp)
+      directory=os.open(path.parent,os.O_RDONLY)
+      try: os.fsync(directory)
+      finally: os.close(directory)
+  create(versioned_success_p,success_raw); create(canonical_deep_p,deep_raw); create(success_p,success_raw)
+  print(json.dumps({"status":"PASS","expected_step":3,"checkpoint_sha256":checkpoint_identity["sha256"],"writer_jobtag":actual_jobtag},sort_keys=True))
+  PYEOF
+
+  test -f "$VERSIONED_SUCCESS" && test ! -L "$VERSIONED_SUCCESS"
+  test -f "$CHECKPOINT_RECEIPT" && test ! -L "$CHECKPOINT_RECEIPT"
+  test -f "$SUCCESS" && test ! -L "$SUCCESS"
+  test "$(stat -c %a "$CHECKPOINT_RECEIPT")" = 444
+  test "$(stat -c %a "$SUCCESS")" = 444
+  echo "SMOKE_V3_FULL_PASS"

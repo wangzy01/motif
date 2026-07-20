@@ -1,0 +1,54 @@
+{
+  "format_version": 1,
+  "plan_id": "offline_arb_demo_infeasible_square_capacity_v1",
+  "seed": 20260709,
+  "world_size": 2,
+  "per_rank_bs": 4,
+  "total_steps": 20,
+  "domains": [
+    "monet_real",
+    "synthetic"
+  ],
+  "domain_mix": {
+    "monet_real": 0.25,
+    "synthetic": 0.75
+  },
+  "square_only_domains": [
+    "synthetic"
+  ],
+  "buckets": [
+    [
+      320,
+      192
+    ],
+    [
+      256,
+      256
+    ],
+    [
+      192,
+      320
+    ]
+  ],
+  "square_bucket_idx": 1,
+  "N": [
+    [
+      100,
+      0
+    ],
+    [
+      100,
+      5
+    ],
+    [
+      100,
+      0
+    ]
+  ],
+  "R_max": {
+    "monet_real": 100,
+    "synthetic": 100
+  },
+  "epsilon_jitter": false,
+  "block_steps": 16
+}

@@ -12,6 +12,7 @@ VAE 在线 encode（forward 内），故只给 pixels。
 
 from __future__ import annotations
 
+import hashlib
 import os
 import queue
 import random
@@ -31,7 +32,8 @@ from .manifest_index import (CAPTIONER_CODE, CODE_TO_CAPTIONER, compute_real_glo
                              list_shards, load_anime_shard, load_real_synth_shard,
                              load_textatlas_shard, shard_subset_for_rank, textatlas_subset_shard)
 from .multi_ar import (Bucketer, BucketSchedule, build_adaptive_buckets, build_buckets,
-                       resize_u8_to_bucket, square_index)
+                       buckets_by_ar_distance, nearest_allowed_bucket, resize_u8_to_bucket,
+                       square_index)
 from .native_safety import PARQUET_NATIVE_LOCK, configure_pyarrow_single_thread
 from .sampler import CompleteSampler, DomainPool
 
@@ -49,6 +51,17 @@ _MONET_SRC_COL = {
 _ANIME_CAP_KEYS = ["rating_bucket", "refined_description", "medium_description", "short_description",
                    "tags_general", "tags_artist", "tags_character", "tags_copyright", "tags_meta",
                    "foreground", "background", "style", "image_type", "camera_and_lens_effects", "year"]
+
+# tar 流式 yield 的局部打乱窗口（2026-07-09 流式化）：≤该窗口条 (row, raw) 缓冲后洗牌再吐,
+# 保留去「连续切片」偏置的效果,同时把首条记录延迟从【整 tar 读完】(2-5GB,54-139s) 降到秒级、
+# producer 峰值内存从整 shard 原始 JPEG (~2-5GB) 降到 ~窗口×单图 (~百 MB 以内)。
+_TAR_SHUFFLE_CHUNK = 256
+
+
+def _domain_seed(name: str) -> int:
+    """稳定的域种子偏移。替代 hash(name)：PYTHONHASHSEED 未固定时 str hash 每进程随机 →
+    shard 访问序/anime row-group 抽样不可复现（bug hunt MINOR 项）。"""
+    return int.from_bytes(hashlib.md5(name.encode("utf-8")).digest()[:4], "little") % 100003
 
 
 # --------------------------------------------------------------------------- #
@@ -112,9 +125,10 @@ def iter_real_synth_shard(domain, manifest_shard, cfg, stats, stage, image_size,
     """yield real/synth 记录（按 src_shard 分组，回源 caption + tar/文件取图）。
     skip_image=True（latent cache 模式）：不取图/decode/resize（跳过 tar 流式与逐文件读），
     只产 caption+uid 字段；moments 由 batch 装配时按 uid 从缓存读。
-    rng：打乱 src_shard 处理顺序 + 每 src_shard 内行序（与 anime 的 rng.shuffle 对齐）。去"连续 elig 切片"
-    偏置——慢域被 buffer 保持 present 时其小窗口否则是某源 shard 的连续切片、反复重采 → 内容相关低变量（对抗
-    review 中项；流式 tar 已整 shard 读进 img_bytes dict、行序仅影响 yield 顺序，故打乱零额外 I/O）。"""
+    rng：打乱 src_shard 处理顺序 + 行序去偏。gpic/skip_image 路径 = 整 shard 行级 shuffle（旧语义不变）;
+    monet/synth tar 路径（2026-07-09 流式化后）= tar 物理序 + _TAR_SHUFFLE_CHUNK 窗口内打乱——
+    窗口外保留 tar 局部性（vs 旧版整 shard dict 物化后全打乱）,由下游 per-bucket buffer + 带权抽样
+    继续混合;换来的是首条记录秒级可达（旧版须读完整个 2-5GB tar）+ 峰值内存降两个量级。"""
     arr = load_real_synth_shard(manifest_shard, domain, cfg, stats)
     elig = arr[f"elig_{image_size}"]            # REDESIGN: elig 按分辨率(image_size)非 stage 标签 → 512a/512b 都用 elig_512；旧 stage==image_size 零变化
     idxs = np.where(elig)[0]
@@ -140,11 +154,12 @@ def iter_real_synth_shard(domain, manifest_shard, cfg, stats, stage, image_size,
         rows = [i for i in rows if float(arr["base_w"][i]) > 0.0]
         if not rows:
             continue
-        # 取图：gpic 逐文件（线程池并发预取，修单线程瓶颈）；monet/synth tar 流式（cache 模式跳过）
-        img_bytes = {}
-        if not skip_image and domain != "gpic":
-            wanted = {arr["src_key"][i] for i in rows}
-            img_bytes = dict(stream_tar_images(monet_tar_path(src_root, src_shard), wanted))
+        # 取图：gpic 逐文件（线程池并发预取，修单线程瓶颈）；monet/synth tar 流式（cache 模式跳过）。
+        # 2026-07-09 流式化：旧版 dict(stream_tar_images(...)) 把整 shard tar（monet ~2.2GB/
+        # synth ~5GB,wanted≈全部成员 → early-stop 无效）读完才 yield 首条 → 首批饿死主因 +
+        # producer 峰值内存 2-5GB（bug hunt MAJOR）。改为边流边吐：按 tar 顺序遇到 wanted 成员
+        # 即出记录,叠 _TAR_SHUFFLE_CHUNK 窗口内打乱（替代旧「整 shard 行级 shuffle」的去偏作用;
+        # 窗口外顺序 = tar 序,下游 shuffle buffer/bucket queue 再混合）。
         if skip_image:
             pairs = ((i, None) for i in rows)
         elif domain == "gpic":
@@ -153,36 +168,58 @@ def iter_real_synth_shard(domain, manifest_shard, cfg, stats, stage, image_size,
                 return read_gpic_bytes(src_root, src_shard, k, ext=capsrc.get(k, (None, None))[1])
             pairs = _prefetch_raw(rows, _gpic_fetch, workers=fetch_workers)
         else:
-            pairs = ((i, img_bytes.get(arr["src_key"][i])) for i in rows)
-        for i, raw in pairs:
-            key = arr["src_key"][i]
-            if not skip_image:
-                if not raw:
-                    continue
-                img = decode_rgb(raw)
-                if img is None:
-                    continue
-                if force_square:
-                    u8, _bk = resize_crop_uint8(img, image_size, v_anchor), square_idx
+            key2row = {arr["src_key"][i]: i for i in rows}
+
+            def _tar_pairs():
+                chunk = []
+                for key, raw in stream_tar_images(monet_tar_path(src_root, src_shard), set(key2row)):
+                    chunk.append((key2row[key], raw))
+                    if len(chunk) >= _TAR_SHUFFLE_CHUNK:
+                        if rng is not None:
+                            rng.shuffle(chunk)
+                        yield from chunk
+                        chunk = []
+                if chunk:
+                    if rng is not None:
+                        rng.shuffle(chunk)
+                    yield from chunk
+
+            pairs = _tar_pairs()
+        # try/finally：max_rows 提前 return / 上游 close 时显式关生成器链（GeneratorExit 传进
+        # stream_tar_images 的 with tarfile.open → 立即释放 S3 流 fd,不等 GC;review A3）。
+        try:
+            for i, raw in pairs:
+                key = arr["src_key"][i]
+                if not skip_image:
+                    if not raw:
+                        continue
+                    img = decode_rgb(raw)
+                    if img is None:
+                        continue
+                    if force_square:
+                        u8, _bk = resize_crop_uint8(img, image_size, v_anchor), square_idx
+                    else:
+                        u8, _bk = (bucketer.resize(img, image_size, v_anchor) if bucketer is not None
+                                   else (resize_crop_uint8(img, image_size, v_anchor), 0))
+                bc = arr["band_captioner"][i].tolist()
+                if domain == "gpic":
+                    cap_texts = {CAPTIONER_CODE["i1"]: capsrc.get(key, ("", None))[0]}
                 else:
-                    u8, _bk = (bucketer.resize(img, image_size, v_anchor) if bucketer is not None
-                               else (resize_crop_uint8(img, image_size, v_anchor), 0))
-            bc = arr["band_captioner"][i].tolist()
-            if domain == "gpic":
-                cap_texts = {CAPTIONER_CODE["i1"]: capsrc.get(key, ("", None))[0]}
-            else:
-                src = capsrc.get(key, {})
-                cap_texts = {c: src.get(c) for c in set(bc) if c > 0}
-            rec = {"domain": domain, "served_mask": int(arr["served_mask"][i]),
-                   "base_w": float(arr["base_w"][i]), "band_captioner": bc,
-                   "cap_texts": cap_texts, "uid": arr["uid"][i]}
-            if not skip_image:
-                rec["u8"] = u8
-                rec["bucket"] = _bk
-            yield rec
-            count += 1
-            if max_rows and count >= max_rows:
-                return
+                    src = capsrc.get(key, {})
+                    cap_texts = {c: src.get(c) for c in set(bc) if c > 0}
+                rec = {"domain": domain, "served_mask": int(arr["served_mask"][i]),
+                       "base_w": float(arr["base_w"][i]), "band_captioner": bc,
+                       "cap_texts": cap_texts, "uid": arr["uid"][i]}
+                if not skip_image:
+                    rec["u8"] = u8
+                    rec["bucket"] = _bk
+                yield rec
+                count += 1
+                if max_rows and count >= max_rows:
+                    return
+        finally:
+            if hasattr(pairs, "close"):
+                pairs.close()
 
 
 def iter_anime_shard(source_shard, cfg, stage, image_size, anime_cache=None, max_rows=None,
@@ -447,6 +484,10 @@ class CompleteV1Dataset:
         self._mar_bucket_buffer_size = 64
         self._mar_bucket_min_fill = 1
         self._mar_bucket_wait_timeout_s = 120.0
+        self._mar_bucket_wait_native_s = 30.0    # 软计划 Phase1：等全 native 供给的窗口（2026-07-09 重构）
+        self._mar_bucket_prob_floor = 0.0        # 调度剪枝：派生 P(B)<floor 的稀有桶折进最近保留桶（0=不剪）
+        self._mar_allowed_buckets = None         # 剪枝后的保留桶集（None=全部;producer 指派与调度共用）
+        self._mar_plan_degraded = Counter()      # 监控：软计划 Phase3（计划封顶/present 重归一）触发批数
         self._mar_bucket_mode = "fixed"
         self._mar_target_area = 262144
         self._mar_divisor = 16
@@ -484,6 +525,8 @@ class CompleteV1Dataset:
             self._mar_bucket_buffer_size = int(_mar.get("bucket_buffer_size", 64) or 64)
             self._mar_bucket_min_fill = int(_mar.get("bucket_min_fill", 1) or 1)
             self._mar_bucket_wait_timeout_s = float(_mar.get("bucket_wait_timeout_s", 120.0) or 0.0)
+            self._mar_bucket_wait_native_s = float(_mar.get("bucket_wait_native_s", 30.0) or 0.0)
+            self._mar_bucket_prob_floor = float(_mar.get("bucket_prob_floor", 0.0) or 0.0)
             # ---- 域采样模式（三选一, 互斥；warmup 期/未配置=旧行为）----
             #   MODE-A affinity（Tier2, native_bucket_dist 配了）：square_only 硬约束被 one-hot(square) 覆写吸收进
             #     同一套数学（不与 alpha 叠加=无双重补偿）；P(B)=Σ_d mix_d·P_native(B|d) 派生并【替代】config
@@ -513,6 +556,19 @@ class CompleteV1Dataset:
                     if _dev > 0.02 and rank in (None, 0):   # 构造参 rank(此时 self.rank 未定); None=单进程也打
                         print(f"[dataline] ⚠️ multi-AR: config bucket_probs 与派生 P(B)=Σ mix·P_native 最大偏差 "
                               f"{_dev:.4f}>0.02 → 以派生值为准（config 值仅参考）。派生={np.round(_pB, 4).tolist()}", flush=True)
+                # ---- 调度剪枝（2026-07-09,组批 blocker 修复之一,gated by bucket_prob_floor）----
+                #   派生 P(B)<floor 的稀有桶（多为 256 样本审计的 1/256 量化噪声）折进最近保留桶：
+                #   各域 native 行质量搬运 → 重derive P(B)/P(d|B)（恒等式 Σ_B P(B)P(d|B)=mix_d 保持精确）;
+                #   producer 侧 Bucketer 同步只指派保留桶（一次 resize 到位,无调度不到的死库存）。
+                if self._mar_bucket_prob_floor > 0:
+                    (self._mar_native_dist, _pB, self._mar_pdb,
+                     self._mar_allowed_buckets) = self._prune_scheduled_buckets(
+                        self.cfg.domain_mix[self.stage], self._mar_native_dist, _pB,
+                        self._mar_buckets, self._mar_square_idx, self._mar_bucket_prob_floor)
+                    if rank in (None, 0):
+                        _nz = int(np.count_nonzero(_pB))
+                        print(f"[dataline] multi-AR: bucket_prob_floor={self._mar_bucket_prob_floor} → "
+                              f"调度桶 {_nz}/{len(self._mar_buckets)}（保留集质量=1.0,稀有桶已折进最近邻）", flush=True)
                 _sched_probs = [float(x) for x in _pB]
             self._mar_schedule = BucketSchedule(len(self._mar_buckets), self._mar_square_idx,
                                                 probs=_sched_probs, base_seed=self.seed)
@@ -521,7 +577,8 @@ class CompleteV1Dataset:
                 adaptive=(self._mar_bucket_mode == "adaptive"),
                 target_area=self._mar_target_area, divisor=self._mar_divisor,
                 no_upscale=self._mar_adaptive_no_upscale,
-                max_aspect=self._mar_adaptive_max_aspect)
+                max_aspect=self._mar_adaptive_max_aspect,
+                allowed=self._mar_allowed_buckets)
             self._mar_square_prob = float(self._mar_schedule.probs[self._mar_square_idx])
             if self._mar_pdb is None:
                 # MODE-B alpha 接线(2026-07-05 拍板): 从归一后的 schedule.probs 读 P(square) + 按 config domain_mix 算补偿系数；
@@ -744,6 +801,41 @@ class CompleteV1Dataset:
             pdb[b] = (doms, probs)
         return rows, P_B, pdb
 
+    @staticmethod
+    def _prune_scheduled_buckets(domain_mix_stage: dict, rows: dict, P_B, buckets,
+                                 square_idx: int, floor: float):
+        """调度剪枝（纯数学,零 I/O,单测直击）：P(B)<floor 的桶从调度表移除。
+
+        做法：每个域的 native 行把被剪桶的质量搬到最近保留桶（nearest_allowed_bucket:
+        主序 |Δlog-AR| 次序 |Δ面积|）→ 重derive ① P(B)=Σ mix·P_native ② P(d|B)。
+        质量只在桶间搬运 → Σ_B P(B)·P(d|B)=mix_d 恒等式在剪枝后依然精确。
+        square 桶恒保留。返回 (rows2, P_B2, pdb2, kept frozenset)。"""
+        mix = {str(d): float(w) for d, w in domain_mix_stage.items() if float(w) > 0}
+        n = len(buckets)
+        kept = {b for b in range(n) if float(P_B[b]) >= floor}
+        kept.add(int(square_idx))
+        rows2 = {}
+        for d, v in rows.items():
+            v2 = np.asarray(v, dtype=np.float64).copy()
+            for b in range(n):
+                if v2[b] > 0 and b not in kept:
+                    tgt = nearest_allowed_bucket(b, buckets, kept)
+                    v2[tgt] += v2[b]
+                    v2[b] = 0.0
+            rows2[d] = v2
+        doms = tuple(d for d in mix if d in rows2)
+        P_B2 = np.zeros(n, dtype=np.float64)
+        for d in doms:
+            P_B2 += mix[d] * rows2[d]
+        pdb2 = {}
+        for b in range(n):
+            if P_B2[b] > 0:
+                probs = np.array([mix[d] * rows2[d][b] / P_B2[b] for d in doms], dtype=np.float64)
+            else:
+                probs = np.zeros(len(doms), dtype=np.float64)
+            pdb2[b] = (doms, probs)
+        return rows2, P_B2, pdb2, frozenset(kept)
+
     def _affinity_present_dist(self, b_idx: int, pools):
         """MODE-A: 当前桶 B_t 的域采样表, 限制到 present(pools 有货)域（缺席域按 sampler 一贯语义重归一——
         cum[-1] 缩放隐式完成）。全缺/全零 → (None, None)=退全池旧路径（会 re-resize 兜底）。"""
@@ -823,14 +915,24 @@ class CompleteV1Dataset:
         return rec
 
     def _loader_item_queue(self, bs: int):
-        """NAI-like item-level bucket assignment + per-bucket queues.
+        """NAI-like item-level bucket assignment + per-bucket queues（2026-07-09 软计划重构）。
 
-        Producers assign each decoded item to its native target bucket.  The main loader keeps
-        bucket->domain queues and still uses a deterministic cross-rank bucket schedule, so every
-        rank consumes the same target shape at the same step.  The normal path consumes only records
-        already assigned to the scheduled bucket; a shape-mismatch re-resize remains as a defensive
-        canary and must stay at zero in audits/metrics.  If a scheduled bucket is unavailable on a
-        rank we wait until it appears or fail fast for JCC retry/audit visibility.
+        调度不变：B_t 由确定性 BucketSchedule 决定（同 seed 同 step → 跨 rank 同 shape,零 collective）。
+        组批从「硬 multinomial 计划 + 全 native 前置 + 超时杀 rank」改为【软计划】三相：
+          Phase1 ≤bucket_wait_native_s   等 native 计划齐 → 全 native 组批（零二次裁剪）。
+                                          ⚠️ 生产配 0：_topup 被 buffer_size 封顶,补满后等待不再增
+                                          库存 = 纯烧墙钟（首个 GPU smoke 实测 dw≈30s/步,85%+ 迭代
+                                          耗在此;native 纯度由 buffer_size 决定,不由等待决定）;
+          Phase2 ≤bucket_wait_timeout_s  等每个计划域【总量】(任意桶)够 → 缺 native 的槽位用该域
+                                          AR 最近桶记录 re-resize 到 B_t（域配比不变,裁剪≈相邻桶级,
+                                          损失记 buf_reresize_*）;
+          Phase3 到点                     计划封顶到实际可得,缺口按 P(d|B_t) 在 present 域重归一
+                                          （与主 loader「sampler 对 present 域重归一」同一语义,
+                                          批数记 item_queue_degraded）。
+        只有【所有域全空】才走 empty_rounds fail-fast（真断供）。旧版把 multinomial 当硬前置：
+        需求 ≈bs·P(d|B) 结构性大于 buffer 内 ~buffer_size·P_native(B|d) 的可得量 → 稀有桶必超时
+        raise（实测 lxsr 16/16 rank 死于首个调度桶）= 2×8 smoke 的真 blocker,故重构。
+        batch_count 只在成功 yield 后自增（修 continue 路径消耗 schedule 步号 → FSDP shape desync）。
         """
         import torch
         if self._mar_bucket_buffer_size < int(bs):
@@ -848,7 +950,7 @@ class CompleteV1Dataset:
             if not self.shards[d] or dm.get(d, 0.0) <= 0:
                 continue
             p = _Producer(d, self.shards[d], self, queues[d],
-                          stop_evt, self.seed + hash(d) % 100003 + self.rank * 9973)
+                          stop_evt, self.seed + _domain_seed(d) + self.rank * 9973)
             p.start()
             producers.append(p)
             active.add(d)
@@ -860,12 +962,13 @@ class CompleteV1Dataset:
         sampler = CompleteSampler(self.cfg, self.stage, seed=self.seed + self.rank * 100003)
         cap_rng = random.Random(self.seed + self.rank * 31 + 7)
         pool_rng = np.random.default_rng(self.seed + self.rank * 100003 + 777)
+        n_buckets = len(self._mar_buckets)
 
         def _domain_total(d):
             return sum(len(bucket_buffers[b][d]) for b in bucket_buffers)
 
-        def _bucket_total(b):
-            return sum(len(bucket_buffers[b][d]) for d in self.domains)
+        def _total_all():
+            return sum(_domain_total(d) for d in self.domains)
 
         def _pool_len(pool):
             return int(getattr(pool, "n", 0))
@@ -890,177 +993,214 @@ class CompleteV1Dataset:
             counts = pool_rng.multinomial(int(n), w)
             return {d: int(c) for d, c in zip(kd, counts) if int(c) > 0}
 
-        def _plan_ready(pools, plan):
+        def _plan_native_ready(pools, plan):
             if plan is None:
                 return _pools_total(pools) >= self._mar_effective_bucket_min_fill
             return all(_pool_domain_len(pools, d) >= c for d, c in plan.items())
 
+        def _plan_soft_ready(plan):
+            if plan is None:
+                return _total_all() >= int(bs)
+            return all(_domain_total(d) >= c for d, c in plan.items())
+
         def _ready_by_domain(pools):
             return {d: _pool_domain_len(pools, d) for d in self.domains}
 
-        def _evict_non_target(d, target_bucket):
-            for b in range(len(self._mar_buckets)):
-                if b == target_bucket:
-                    continue
-                q = bucket_buffers[b][d]
-                if q:
-                    q.popleft()
-                    return True
-            return False
-
         def _put_record(d, rec):
+            rec = self._force_square_only_record(d, rec)     # square-only 硬护栏(producer 已 force,此处双保险)
             b = int(rec.get("bucket", self._mar_square_idx))
-            if b < 0 or b >= len(self._mar_buckets):
+            if b < 0 or b >= n_buckets:
                 b = self._mar_square_idx
             bucket_buffers[b][d].append(rec)
 
-        def _domain_plan_ready(bidx, domain, plan):
-            if plan is None or domain not in plan:
-                return True
-            return _pool_domain_len(_bucket_pools(bidx), domain) >= int(plan[domain])
-
-        def _topup(deadline=None, target_bucket=None, target_plan=None, domain_fill_limit=None):
-            made_progress = False
+        def _topup(deadline=None, domain_fill_limit=None):
+            """把各域 queue 记录搬进 bucket_buffers,每域封顶 fill_limit（修旧版非计划域无界增长）。"""
+            made = False
             fill_limit = self.buffer_size if domain_fill_limit is None else max(1, int(domain_fill_limit))
             for d in self.domains:
                 if d not in active:
                     continue
-                if target_plan is not None and d not in target_plan:
-                    try:
-                        rec = queues[d].get_nowait()
-                    except queue.Empty:
-                        continue
-                    _put_record(d, rec)
-                    made_progress = True
-                    continue
                 while _domain_total(d) < fill_limit and not stop_evt.is_set():
                     try:
                         if deadline is not None:
-                            remain = max(0.0, deadline - time.monotonic())
+                            remain = deadline - time.monotonic()
                             if remain <= 0:
                                 break
-                            rec = queues[d].get(timeout=min(0.2, remain))
+                            rec = queues[d].get(timeout=min(0.2, max(0.01, remain)))
                         else:
                             rec = queues[d].get_nowait()
                     except queue.Empty:
                         break
                     _put_record(d, rec)
-                    made_progress = True
-                    if target_bucket is not None:
-                        if target_plan is not None:
-                            if _domain_plan_ready(target_bucket, d, target_plan):
-                                break
-                        elif _pools_total(_bucket_pools(target_bucket)) >= self._mar_effective_bucket_min_fill:
-                            break
-                while (target_bucket is not None and _domain_total(d) >= self.buffer_size
-                       and (not _domain_plan_ready(target_bucket, d, target_plan)
-                            if target_plan is not None
-                            else _pools_total(_bucket_pools(target_bucket)) < self._mar_effective_bucket_min_fill)
-                       and _evict_non_target(d, target_bucket)):
-                    try:
-                        rec = queues[d].get_nowait()
-                    except queue.Empty:
-                        break
-                    _put_record(d, rec)
-                    made_progress = True
-            return made_progress
+                    made = True
+            return made
 
         def _bucket_pools(bidx):
             return self._build_pools(bucket_buffers[bidx], pool_rng)
 
+        _ar_order_cache: dict = {}
+
+        def _buckets_by_ar(bidx):
+            """到 bidx 的 AR 距离升序桶号（re-resize 兜底取样序;首元素=bidx 自身,惰性缓存）。"""
+            order = _ar_order_cache.get(bidx)
+            if order is None:
+                order = buckets_by_ar_distance(bidx, self._mar_buckets)
+                _ar_order_cache[bidx] = order
+            return order
+
+        def _remove_at(d, b, i):
+            del bucket_buffers[b][d][i]                      # deque.__delitem__,免整队重建（review D2）
+
         try:
-            batch_count = 0
+            batch_count = 0                                  # = 已成功 yield 的批数（只在 yield 后自增）
             empty_rounds = 0
             first = True
             self._mar_effective_bucket_min_fill = max(int(self._mar_bucket_min_fill), int(bs))
             while True:
                 if first:
-                    first_deadline = (time.monotonic() + self._mar_bucket_wait_timeout_s
-                                      if self._mar_bucket_wait_timeout_s > 0 else None)
+                    # 首批填充：语义对齐主 loader（first_fill_timeout_s;旧版误用 bucket_wait_timeout_s）
+                    first_deadline = (time.monotonic() + self.first_fill_timeout_s
+                                      if self.first_fill_timeout_s > 0 else None)
                     while (not stop_evt.is_set()
                            and any(_domain_total(d) < self.min_fill for d in active)):
                         progressed = _topup(deadline=first_deadline, domain_fill_limit=self.min_fill)
-                        if not progressed:
-                            if first_deadline is not None and time.monotonic() >= first_deadline:
-                                break
-                            time.sleep(0.05)
-                            continue
                         if first_deadline is not None and time.monotonic() >= first_deadline:
                             break
+                        if not progressed:
+                            time.sleep(0.05)
                     first = False
-                batch_count += 1
-                b_idx, (b_h, b_w) = self._mar_pick_bucket(batch_count)
-                deadline = (time.monotonic() + self._mar_bucket_wait_timeout_s
-                            if self._mar_bucket_wait_timeout_s > 0 else None)
+                # 桶调度：prospective 步号 = batch_count+1（成功 yield 后才消费;retry 同一步号 → 同桶）
+                b_idx, (b_h, b_w) = self._mar_pick_bucket(batch_count + 1)
                 affinity_plan = _sample_affinity_plan(b_idx, bs)
-                pools = _bucket_pools(b_idx)
-                while not _plan_ready(pools, affinity_plan) and not stop_evt.is_set():
-                    _topup(deadline=deadline, target_bucket=b_idx, target_plan=affinity_plan)
-                    pools = _bucket_pools(b_idx)
-                    if _plan_ready(pools, affinity_plan):
-                        break
-                    if deadline is not None and time.monotonic() >= deadline:
-                        ready = {i: _pools_total(_bucket_pools(i))
-                                 for i in range(len(self._mar_buckets))}
-                        top = sorted(ready.items(), key=lambda kv: kv[1], reverse=True)[:8]
-                        raise RuntimeError(
-                            f"[dataline] item_queue 等待 bucket={b_idx} shape={b_h}x{b_w} 超时 "
-                            f"{self._mar_bucket_wait_timeout_s:.0f}s；plan={affinity_plan} "
-                            f"ready_by_domain={_ready_by_domain(pools)} top_ready={top} active={sorted(active)}")
-                    time.sleep(0.05)
-                if not pools:
+                t0 = time.monotonic()
+                native_deadline = t0 + max(0.0, self._mar_bucket_wait_native_s)
+                hard_deadline = t0 + self._mar_bucket_wait_timeout_s
+                # Phase1：等全 native 计划（有界;满足即全 native 组批,零二次裁剪）
+                while (not stop_evt.is_set() and time.monotonic() < native_deadline
+                       and not _plan_native_ready(_bucket_pools(b_idx), affinity_plan)):
+                    if not _topup(deadline=min(native_deadline, time.monotonic() + 0.2)):
+                        time.sleep(0.05)
+                # Phase2：等软就绪（计划域【总量】够 → re-resize 可组满,域配比不变）
+                while (not stop_evt.is_set() and time.monotonic() < hard_deadline
+                       and not _plan_native_ready(_bucket_pools(b_idx), affinity_plan)
+                       and not _plan_soft_ready(affinity_plan)):
+                    if not _topup(deadline=min(hard_deadline, time.monotonic() + 0.2)):
+                        time.sleep(0.05)
+                # Phase3：到点降级——计划封顶到实际可得;缺口由组批时 P(d|B_t) present 重归一吸收
+                degraded = False
+                if affinity_plan and not _plan_soft_ready(affinity_plan):
+                    affinity_plan = {d: min(c, _domain_total(d)) for d, c in affinity_plan.items()}
+                    affinity_plan = {d: c for d, c in affinity_plan.items() if c > 0}
+                    degraded = True
+                if _total_all() == 0:
                     empty_rounds += 1
                     if empty_rounds > 5:
-                        raise RuntimeError("[dataline] item_queue 连续无可用 bucket pools")
-                    continue
+                        raise RuntimeError(
+                            f"[dataline] item_queue 连续 {empty_rounds} 轮所有域 buffer 全空"
+                            f"（active={sorted(active)}）——producer 卡死或数据源不可达（S3/R2/tar）。")
+                    _topup(deadline=time.monotonic() + 5.0)
+                    continue                                  # 未 yield → 不消费 schedule 步号
                 empty_rounds = 0
+                if degraded:
+                    self._mar_plan_degraded["batches"] += 1
 
+                # ---- 监控（键对齐旧版 + 新增 wait_s/degraded/reresize_total）----
                 self.buffer_fill = {d: _domain_total(d) / max(self.buffer_size, 1) for d in self.domains}
-                if self.multi_ar_enabled:
-                    ready_by_domain = _ready_by_domain(_bucket_pools(b_idx))
-                    for d in self.domains:
-                        sm = self._mar_sampled_by_domain.get(d, 0)
-                        if sm:
-                            self.buffer_fill[f"reresize_{d}"] = self._mar_reresize_by_domain.get(d, 0) / sm
-                        else:
-                            self.buffer_fill[f"reresize_{d}"] = 0.0
-                        self.buffer_fill[f"zerowpool_{d}"] = int(self._mar_zerow_pool_skips.get(d, 0))
-                        self.buffer_fill[f"zerowdrop_{d}"] = int(self.zerow_dropped.get(d, 0))
-                        self.buffer_fill[f"item_queue_ready_{d}"] = int(ready_by_domain.get(d, 0))
-                        self.buffer_fill[f"item_queue_plan_{d}"] = int((affinity_plan or {}).get(d, 0))
-                    self.buffer_fill["item_queue_bucket"] = int(b_idx)
-                    self.buffer_fill["item_queue_bucket_h"] = int(b_h)
-                    self.buffer_fill["item_queue_bucket_w"] = int(b_w)
-                    self.buffer_fill["item_queue_bucket_ready"] = _pools_total(_bucket_pools(b_idx))
-                    self.buffer_fill["extreme_clamped"] = int(self._mar_extreme_clamped)
+                _mon_pools = _bucket_pools(b_idx)             # 复用同一次构建（review D4）
+                ready_by_domain = _ready_by_domain(_mon_pools)
+                for d in self.domains:
+                    sm = self._mar_sampled_by_domain.get(d, 0)
+                    self.buffer_fill[f"reresize_{d}"] = (self._mar_reresize_by_domain.get(d, 0) / sm) if sm else 0.0
+                    self.buffer_fill[f"zerowpool_{d}"] = int(self._mar_zerow_pool_skips.get(d, 0))
+                    self.buffer_fill[f"zerowdrop_{d}"] = int(self.zerow_dropped.get(d, 0))
+                    self.buffer_fill[f"item_queue_ready_{d}"] = int(ready_by_domain.get(d, 0))
+                    self.buffer_fill[f"item_queue_plan_{d}"] = int((affinity_plan or {}).get(d, 0))
+                self.buffer_fill["item_queue_bucket"] = int(b_idx)
+                self.buffer_fill["item_queue_bucket_h"] = int(b_h)
+                self.buffer_fill["item_queue_bucket_w"] = int(b_w)
+                self.buffer_fill["item_queue_bucket_ready"] = _pools_total(_mon_pools)
+                self.buffer_fill["item_queue_wait_s"] = round(time.monotonic() - t0, 3)
+                self.buffer_fill["item_queue_degraded"] = int(self._mar_plan_degraded.get("batches", 0))
+                self.buffer_fill["item_queue_reresize_total"] = int(self._mar_reresize_count)
+                self.buffer_fill["extreme_clamped"] = int(self._mar_extreme_clamped)
 
+                # ---- 组批（软计划;槽位级不 raise,唯组批中途全域断供且超时才 fail-fast）----
                 prompts, imgs, cfg_keep = [], [], []
-                sampled = Counter()
                 remaining_plan = Counter(affinity_plan or {})
-                for _ in range(bs):
-                    pools = _bucket_pools(b_idx)
-                    if not pools:
-                        raise RuntimeError(f"[dataline] item_queue bucket={b_idx} 在组 batch 中途耗尽")
+                # 组批限时 = 相位 hard_deadline + 30s 宽限（review B1/E3：不再另起一份完整
+                # bucket_wait_timeout_s,最坏总等待有界 ≈ timeout+30s,保住 JCC 干净失败信号）。
+                assembly_deadline = hard_deadline + 30.0
+                banned = set()          # 本批出局域（零权重池/空合并池;review A2 修 busy-loop）
+                b_is_square = (b_idx == self._mar_square_idx)
+                while len(imgs) < bs:
+                    if stop_evt.is_set():
+                        return
+                    # 1) 选域：计划权重（仅计 present）→ P(d|B_t) present 重归一 → present 均匀兜底
+                    dpick = None
                     if remaining_plan:
-                        eligible = [d for d, c in remaining_plan.items()
-                                    if c > 0 and _pool_domain_len(pools, d) > 0]
-                        if not eligible:
-                            raise RuntimeError(
-                                f"[dataline] item_queue bucket={b_idx} 计划域中途耗尽；"
-                                f"remaining={dict(remaining_plan)} ready_by_domain={_ready_by_domain(pools)}")
-                        w = np.asarray([remaining_plan[d] for d in eligible], dtype=np.float64)
-                        dpick = eligible[int(np.searchsorted(np.cumsum(w), pool_rng.random() * w.sum(), side="left"))]
-                        pools_for_sample = {dpick: pools[dpick]}
+                        elig = [d for d, c in remaining_plan.items()
+                                if c > 0 and d not in banned and _domain_total(d) > 0]
+                        if elig:
+                            w = np.asarray([remaining_plan[d] for d in elig], dtype=np.float64)
+                            cw = np.cumsum(w)
+                            dpick = elig[min(int(np.searchsorted(cw, pool_rng.random() * cw[-1], side="left")),
+                                             len(elig) - 1)]   # min()：ulp 越界防御（同 BucketSchedule.pick）
+                    if dpick is None:
+                        present = [d for d in self.domains if d not in banned and _domain_total(d) > 0]
+                        # square-only 硬不变量（review A1）：非方 B_t 的均匀兜底也不得抽 square-only 域
+                        # （其记录物理上全是方图,抽中必被 re-resize 破坏性裁剪;与主 loader 的
+                        # aff_fallback「无条件剔 S 域,剔空才退全池保活性」同一语义）。
+                        if not b_is_square and self._mar_square_only:
+                            present_ns = [d for d in present if d not in self._mar_square_only]
+                            present = present_ns or present
+                        if not present:
+                            if time.monotonic() >= assembly_deadline:
+                                raise RuntimeError(
+                                    f"[dataline] item_queue bucket={b_idx} 组批中途无可用域且等待超限"
+                                    f"（已组 {len(imgs)}/{bs}, banned={sorted(banned)}）。")
+                            _topup(deadline=time.monotonic() + 1.0)
+                            banned.clear()                    # 补料后解禁重评（producer 可能已供新的非零权重记录）
+                            continue
+                        keep_dp = []
+                        if self._mar_pdb is not None:
+                            doms, probs = self._mar_pdb[b_idx]
+                            keep_dp = [(d, float(p)) for d, p in zip(doms, probs) if p > 0 and d in present]
+                        if keep_dp:
+                            kd = [d for d, _ in keep_dp]
+                            cum = np.cumsum([p for _, p in keep_dp])
+                            dpick = kd[min(int(np.searchsorted(cum, pool_rng.random() * cum[-1], side="left")),
+                                           len(kd) - 1)]       # min()：ulp 越界防御
+                        else:
+                            dpick = present[int(pool_rng.integers(len(present)))]
+                    # 2) 取记录：B_t-native 子池优先（零裁剪）;缺 → 该域全桶合并池 + re-resize 兜底
+                    native_pools = self._build_pools({dpick: bucket_buffers[b_idx][dpick]}, pool_rng) \
+                        if bucket_buffers[b_idx][dpick] else {}   # 只建选中域（review D1,免 5 域全建）
+                    if dpick in native_pools:
+                        domain, idx, band = sampler.sample_one({dpick: native_pools[dpick]})
+                        rec = bucket_buffers[b_idx][dpick][idx]
+                        _remove_at(dpick, b_idx, idx)
                     else:
-                        pools_for_sample = pools
-                    domain, idx, band = sampler.sample_one(pools_for_sample)
-                    rec = bucket_buffers[b_idx][domain][idx]
-                    q = bucket_buffers[b_idx][domain]
-                    keep = [r for j, r in enumerate(q) if j != idx]
-                    q.clear()
-                    q.extend(keep)
+                        # AR 最近桶优先（替代旧「全桶合并池」：合并池 AR-blind,可能抽 9:16 硬裁成
+                        # 16:9 = 本项目要消灭的破坏性裁剪;逐桶按 |Δlog-AR| 试,裁剪幅度≈相邻桶级）
+                        rec = None
+                        for b_src in _buckets_by_ar(b_idx):
+                            q = bucket_buffers[b_src][dpick]
+                            if not q:
+                                continue
+                            mpool = self._build_pools({dpick: q}, pool_rng)
+                            if dpick not in mpool:           # 该桶全零权重 → 试更远桶
+                                continue
+                            domain, idx, band = sampler.sample_one(mpool)
+                            rec = q[idx]
+                            _remove_at(dpick, b_src, idx)
+                            break
+                        if rec is None:                      # 全桶空/全零权重 → 本批禁选该域（防 busy-loop）
+                            banned.add(dpick)
+                            remaining_plan.pop(dpick, None)
+                            continue
                     u8 = rec["u8"]
                     if u8.shape[0] != b_h or u8.shape[1] != b_w:
+                        self._mar_reresize_count += 1
                         self._mar_reresize_by_domain[domain] += 1
                         u8 = resize_u8_to_bucket(u8, b_h, b_w, self._v_anchor_for(domain))
                     self._mar_sampled_by_domain[domain] += 1
@@ -1068,13 +1208,13 @@ class CompleteV1Dataset:
                     imgs.append(uint8_to_norm_tensor(u8))
                     cfg_keep.append(self._is_cfg_protected(domain, rec))
                     self.domain_counter[domain] += 1
-                    sampled[domain] += 1
-                    if remaining_plan:
+                    if remaining_plan.get(domain, 0) > 0:
                         remaining_plan[domain] -= 1
                         if remaining_plan[domain] <= 0:
                             del remaining_plan[domain]
                     if domain == "anime":
                         self.cluster_counter[rec.get("cluster", -1)] += 1
+                batch_count += 1                              # 成功组满一批才消费 schedule 步号
                 yield {"prompts": prompts, "pixels": torch.stack(imgs, 0), "cfg_keep": cfg_keep}
                 _topup()
         finally:
@@ -1108,7 +1248,7 @@ class CompleteV1Dataset:
             if not self.shards[d] or dm.get(d, 0.0) <= 0:   # 跳过本 stage 不参与的域（如 512/1024 的 gpic）
                 continue
             p = _Producer(d, self.shards[d], self, queues[d],
-                          stop_evt, self.seed + hash(d) % 100003 + self.rank * 9973)
+                          stop_evt, self.seed + _domain_seed(d) + self.rank * 9973)
             p.start()
             producers.append(p)
             active.add(d)

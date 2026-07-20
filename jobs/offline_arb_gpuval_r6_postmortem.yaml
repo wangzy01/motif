@@ -1,0 +1,95 @@
+# Submit only after the clean r6 two-round 2x8 GPUVAL succeeds.  All parsing
+# and statistics run on a 16-CPU JCC worker; no local CPU analysis is required.
+name: evan-offarb-gpuval-r6-postmortem
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 32
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  RUN=$BASE/stage256_offline_exact_2x8_gpuval_20260711r6
+  RUN_ID=stage256_offline_exact_2x8_gpuval_20260711r6
+  CFG=configs/stage256_offline_exact_v1.yaml
+  METRICS=$RUN/ckpt/metrics.jsonl
+  HOST=$(hostname); JOBTAG=${HOST%-*}; STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+  OUTDIR=$BASE/offline_arb_gpuval_r6_postmortem
+  mkdir -p "$OUTDIR"
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/gpuval_r6_postmortem/$JOBTAG
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+
+  mapfile -t ROUND_A < <(find "$RUN" -maxdepth 1 -type f -name 'train.*.rA.n0.*.log' -print | sort)
+  mapfile -t ROUND_B < <(find "$RUN" -maxdepth 1 -type f -name 'train.*.rB.n0.*.log' -print | sort)
+  [ "${#ROUND_A[@]}" -eq 1 ] || { echo "FATAL: expected one Round-A n0 log, got ${#ROUND_A[@]}"; exit 41; }
+  [ "${#ROUND_B[@]}" -eq 1 ] || { echo "FATAL: expected one Round-B n0 log, got ${#ROUND_B[@]}"; exit 41; }
+  test -f "$METRICS" && test ! -L "$METRICS" || { echo "FATAL: r6 metrics missing"; exit 41; }
+
+  "$PY" -m py_compile scripts/offline_arb/analyze_gpuval_r6.py
+  TMP=$OUTDIR/.postmortem.$JOBTAG.$STAMP.json.tmp
+  FINAL=$OUTDIR/postmortem.$JOBTAG.$STAMP.json
+  FAILED=$OUTDIR/postmortem.$JOBTAG.$STAMP.failed.stdout
+  STDERR=$OUTDIR/postmortem.$JOBTAG.$STAMP.stderr.log
+  rm -f "$TMP" "$FINAL" "$FAILED"
+  set +e
+  timeout --signal=TERM --kill-after=30s 1800s \
+    "$PY" scripts/offline_arb/analyze_gpuval_r6.py \
+      --metrics "$METRICS" \
+      --round-a-log "${ROUND_A[0]}" \
+      --round-b-log "${ROUND_B[0]}" \
+      --config "$CFG" \
+      --gpuval-yaml jobs/offline_exact_256_2x8_gpuval.yaml \
+      --formal-yaml jobs/offline_exact_256_8x8_FORMAL.yaml \
+      --run-id "$RUN_ID" \
+      --formal-world-size 64 \
+      --formal-checkpoint-steps 3000 \
+      --formal-final-save true \
+      --setup-budget-s 1800 \
+      2> "$STDERR" | tee "$TMP"
+  PIPE_RC=("${PIPESTATUS[@]}")
+  set -e
+  ANALYZE_RC=${PIPE_RC[0]}; TEE_RC=${PIPE_RC[1]}
+  [ "$TEE_RC" -eq 0 ] || { rm -f "$TMP"; echo "FATAL: postmortem tee rc=$TEE_RC"; exit "$TEE_RC"; }
+  set +e
+  "$PY" - "$TMP" "$ANALYZE_RC" <<'PY'
+  import json, sys
+  path, raw_rc = sys.argv[1], sys.argv[2]
+  expected = {"PASS": 0, "BORDERLINE": 4, "REVIEW": 2, "NO_GO": 3}
+  with open(path, "r", encoding="utf-8") as handle:
+      value = json.load(handle)
+  if not isinstance(value, dict):
+      raise SystemExit("postmortem output is not a JSON object")
+  if value.get("schema_version") != "offline_arb_gpuval_r6_postmortem_v2":
+      raise SystemExit("unexpected postmortem schema")
+  status = value.get("status")
+  if status not in expected or expected[status] != int(raw_rc):
+      raise SystemExit(f"status/rc mismatch: status={status!r} rc={raw_rc}")
+  identity = value.get("identity")
+  projection = value.get("formal_projection")
+  gate = value.get("gate")
+  if not isinstance(identity, dict) or identity.get("run_id") != "stage256_offline_exact_2x8_gpuval_20260711r6":
+      raise SystemExit("postmortem identity/run-id mismatch")
+  if not isinstance(projection, dict) or projection.get("formal_checkpoint_steps") != 3000:
+      raise SystemExit("postmortem formal cadence missing/mismatched")
+  if projection.get("formal_world_size") != 64 or projection.get("target_samples") != 384000000:
+      raise SystemExit("postmortem formal exposure geometry mismatch")
+  if projection.get("setup_budget_seconds") != 1800.0 or not isinstance(gate, dict):
+      raise SystemExit("postmortem setup/gate evidence missing")
+  PY
+  VALIDATE_RC=$?
+  set -e
+  if [ "$VALIDATE_RC" -ne 0 ]; then
+    mv "$TMP" "$FAILED"
+    echo "FATAL: invalid postmortem stdout; preserved=$FAILED analyzer_rc=$ANALYZE_RC validator_rc=$VALIDATE_RC"
+    exit 42
+  fi
+  mv "$TMP" "$FINAL"
+  echo "GPUVAL_R6_POSTMORTEM result=$FINAL rc=$ANALYZE_RC"
+  exit "$ANALYZE_RC"

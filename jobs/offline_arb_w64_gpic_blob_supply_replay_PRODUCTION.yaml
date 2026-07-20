@@ -1,0 +1,82 @@
+# SUBMISSION-BLOCKED W64 overlay supply gate: 8 CPU nodes x 8 gloo ranks.
+# Fill only a verified immutable release; never point this template at "latest".
+name: evan-mot-crop-offlinearb-production-w64-gpic-blob-supply
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 8
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 128
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+  export NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/gpic_blob_w64.$(hostname)
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+
+  ARTIFACT_ROOT="/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_gpic_blob_v1_release/evan-mot-crop-offlinearb-gpic-s3-production-build-zg8g"
+  ARTIFACT_BUILDTAG="evan-mot-crop-offlinearb-gpic-s3-production-build-zg8g"
+  MANIFEST_SHA256="a18ba1f1250e3b00abdc1051dc71e08a254b8855d5b61b9975e88d2e6ae2ee05"
+  test -n "$ARTIFACT_ROOT" || { echo "FATAL: ARTIFACT_ROOT is submission-blocked"; exit 64; }
+  test -n "$ARTIFACT_BUILDTAG" || { echo "FATAL: ARTIFACT_BUILDTAG is submission-blocked"; exit 64; }
+  test -n "$MANIFEST_SHA256" || { echo "FATAL: MANIFEST_SHA256 is submission-blocked"; exit 64; }
+  case "$MANIFEST_SHA256" in (*[!0-9a-f]*|'') echo "FATAL: malformed manifest SHA"; exit 64;; esac
+  [ "${#MANIFEST_SHA256}" -eq 64 ] || { echo "FATAL: malformed manifest SHA length"; exit 64; }
+  [ "$(basename "$ARTIFACT_ROOT")" = "$ARTIFACT_BUILDTAG" ] \
+    || { echo "FATAL: artifact root/buildtag mismatch"; exit 64; }
+  [ "$ARTIFACT_BUILDTAG" != latest ] || { echo "FATAL: mutable latest buildtag forbidden"; exit 64; }
+
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  PLAN=$BASE/offline_arb_plans_v1/w64_prod/plan
+  CAT=$BASE/offline_arb_catalog_v1
+  RUNNER=$REPO/scripts/offline_arb/run_w64_gpic_blob_supply_replay.py
+  YAML_SELF=$REPO/jobs/offline_arb_w64_gpic_blob_supply_replay_PRODUCTION.yaml
+  HOST=$(hostname); NODE_RANK=${HOST##*-}; JOBTAG=${HOST%-*}
+  case "$NODE_RANK" in (0|1|2|3|4|5|6|7) ;; (*) echo "FATAL: invalid node rank"; exit 20;; esac
+  [ "$HOST" = "$JOBTAG-$NODE_RANK" ] || { echo "FATAL: hostname/jobtag drift"; exit 20; }
+  OUT_PARENT=$BASE/offline_gpic_blob_w64_supply_v1
+  OUT=$OUT_PARENT/$JOBTAG
+  RDZV_PARENT=$OUT_PARENT/.rendezvous
+  RDZV=$RDZV_PARENT/$JOBTAG.addr
+  mkdir -p "$OUT_PARENT" "$RDZV_PARENT"
+  PORT=29821
+
+  if [ "$NODE_RANK" = 0 ]; then
+    test ! -e "$OUT" && test ! -L "$OUT" \
+      || { echo "FATAL: W64 output namespace already exists"; exit 65; }
+    rm -f "$RDZV" "$RDZV.tmp"
+    MASTER_ADDR=$(hostname -i | awk '{print $1}')
+    printf '%s|%s|%s\n' "$MASTER_ADDR" "$JOBTAG" "$(date +%s)" > "$RDZV.tmp"
+    mv "$RDZV.tmp" "$RDZV"
+  else
+    MASTER_ADDR=""
+    for _ in $(seq 1 600); do
+      if [ -s "$RDZV" ]; then
+        IFS='|' read -r CANDIDATE TOKEN TS < "$RDZV" || true
+        NOW=$(date +%s)
+        case "$TS" in (*[!0-9]*|'') TS=0;; esac
+        if [ "$TOKEN" = "$JOBTAG" ] && [ "$TS" -le $((NOW + 60)) ] \
+          && [ $((NOW - TS)) -lt 1800 ]; then MASTER_ADDR=$CANDIDATE; break; fi
+      fi
+      sleep 2
+    done
+    [ -n "$MASTER_ADDR" ] || { echo "FATAL: fresh W64 rendezvous missing"; exit 20; }
+  fi
+
+  timeout --signal=TERM --kill-after=60s 7200s \
+    "$PY" -m torch.distributed.run \
+      --nnodes 8 --nproc-per-node 8 --node-rank "$NODE_RANK" \
+      --master-addr "$MASTER_ADDR" --master-port "$PORT" \
+      "$RUNNER" --artifact-root "$ARTIFACT_ROOT" \
+      --buildtag "$ARTIFACT_BUILDTAG" --manifest-sha256 "$MANIFEST_SHA256" \
+      --plan-root "$PLAN" --catalog-root "$CAT" --job-yaml "$YAML_SELF" \
+      --output-root "$OUT" --plan-start-step 0 --plan-steps 256 \
+      --warmup-reads 16 --reads-per-rank 512
+  test -s "$OUT/_SUCCESS" || { echo "FATAL: W64 aggregate _SUCCESS missing"; exit 66; }
+  echo "GPIC_BLOB_W64_SUPPLY_JOB_PASS node=$NODE_RANK output=$OUT"

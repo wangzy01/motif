@@ -1,0 +1,46 @@
+# Two-node CPU16 crossover: strict_x -> fd_x -> fd_y -> strict_y.
+# Each arm is a fresh 16-rank gloo process; no GPU/decode/model work is allowed.
+name: evan-mot-crop-offlinearb-w16-gpic-fd-crossover-abba
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 2
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 128
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_arb_w16_fd_crossover_capture.$(hostname)
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  export OFFLINE_ARB_STEP_TIMEOUT_S=1800
+  export OFFLINE_ARB_GPIC_THREADS_PER_NODE=16
+  unset OFFLINE_ARB_IO_TELEMETRY_DIR OFFLINE_ARB_ATTEMPT_JOBTAG OFFLINE_ARB_ATTEMPT_NONCE OFFLINE_ARB_ATTEMPT_HOST
+  unset OFFLINE_ARB_SIDECAR_HEADER_SHA256 OFFLINE_ARB_SIDECAR_RELEASE_DIGEST OFFLINE_ARB_SMOKE_DATASET_CONFIG
+  unset MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_ ARROW_DEFAULT_MEMORY_POOL LD_PRELOAD TCMALLOC_RELEASE_RATE
+  [ ! -e "$PYTHONPYCACHEPREFIX" ] && [ ! -L "$PYTHONPYCACHEPREFIX" ] \
+    || { echo "FATAL: crossover capture pycache prefix is not fresh"; exit 1; }
+  mkdir -p "$PYTHONPYCACHEPREFIX" /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/anime_img_cache
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  PY_REAL=$(readlink -f -- "$PY") \
+    || { echo "FATAL: cannot resolve crossover Python interpreter"; exit 1; }
+  [ -L "$PY" ] && [ -n "$PY_REAL" ] && [ -f "$PY_REAL" ] && [ ! -L "$PY_REAL" ] \
+    && [ -s "$PY_REAL" ] && [ -x "$PY_REAL" ] \
+    || { echo "FATAL: crossover Python target is not a real executable regular file"; exit 1; }
+  RUN_ID=stage256_offline_exact_w16_gpic_fd_crossover_abba_20260712r1
+  export OFFLINE_ARB_ABBA_RUN_ID="$RUN_ID"
+  RUNNER=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop/scripts/offline_arb/run_w16_gpic_fd_crossover_abba.py
+  YAML_SELF=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop/jobs/offline_arb_w16_gpic_fd_crossover_abba.yaml
+  NW_DECL=$(grep -m1 '^numWorkers:' "$YAML_SELF" | awk '{print $2}')
+  GPU_DECL=$(grep -m1 '^gpuPerWorker:' "$YAML_SELF" | awk '{print $2}')
+  CPU_DECL=$(grep -m1 '^cpuPerWorker:' "$YAML_SELF" | awk '{print $2}')
+  [ "$NW_DECL" = 2 ] && [ "$GPU_DECL" = 0 ] && [ "$CPU_DECL" = 16 ] \
+    || { echo "FATAL: crossover topology drift workers=$NW_DECL gpu=$GPU_DECL cpu=$CPU_DECL"; exit 1; }
+  [ -f "$RUNNER" ] && [ ! -L "$RUNNER" ] && [ -s "$RUNNER" ] \
+    || { echo "FATAL: crossover runner missing/empty/non-regular/symlinked"; exit 1; }
+  "$PY" "$RUNNER" node-wrapper

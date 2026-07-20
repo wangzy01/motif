@@ -1,0 +1,145 @@
+# Dedicated strict_path/fd_stable semantic and telemetry gate.
+# worker0: strict_path, fresh telemetry-off then telemetry-on processes
+# worker1: fd_stable,    fresh telemetry-off then telemetry-on processes
+name: evan-offarb-gpic-fd-semantic
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 2
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 128
+maxRetries: 0
+command: |
+  set -euo pipefail
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  cd "$REPO"
+  export PYTHONPATH="$REPO"
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+  export NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  unset OFFLINE_ARB_IO_TELEMETRY_DIR OFFLINE_ARB_ATTEMPT_JOBTAG
+  unset OFFLINE_ARB_ATTEMPT_NONCE OFFLINE_ARB_ATTEMPT_HOST
+  unset OFFLINE_ARB_SIDECAR_HEADER_SHA256 OFFLINE_ARB_SIDECAR_RELEASE_DIGEST
+  unset OFFLINE_ARB_ANIME_CAPTION_ROOT OFFLINE_ARB_ANIME_CAPTION_WORKERS
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  FORMAL_CFG=$REPO/configs/stage256_offline_exact_v1.yaml
+  PLAN_ROOT=$BASE/offline_arb_plans_v1/w4_smoke/plan
+  CATALOG_ROOT=$BASE/offline_arb_catalog_v1
+  ANIME_FREQ_ROOT=$BASE/offline_arb_animefreq_v1
+  SIDECAR_ROOT=$BASE/offline_arb_caption_sidecar_v1
+  OUT=$BASE/offline_arb_gpic_fd_semantic_v1
+  HOST=$(hostname)
+  IDX=${HOST##*-}
+  JOBTAG=${HOST%-*}
+  case "$IDX" in
+    0) MODE=strict_path ;;
+    1) MODE=fd_stable ;;
+    *) echo "FATAL: unexpected worker index $IDX from $HOST" >&2; exit 20 ;;
+  esac
+  case "$JOBTAG" in (*[!A-Za-z0-9_.-]*|'') echo "FATAL: malformed jobtag $JOBTAG" >&2; exit 20;; esac
+  RUN_DIR=$OUT/$JOBTAG
+  LOCAL_TMP=/local/evan/offline_arb_gpic_fd_semantic_${JOBTAG}_${IDX}
+  mkdir -p "$OUT"
+  test ! -e "$LOCAL_TMP" && test ! -L "$LOCAL_TMP"
+  mkdir -p -m 0700 "$LOCAL_TMP/pycache"
+  export PYTHONPYCACHEPREFIX=$LOCAL_TMP/pycache
+
+  RUN_NONCE=uninitialized
+  record_failure() {
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ -d "$RUN_DIR" ] && [ ! -L "$RUN_DIR" ]; then
+      tmp=$RUN_DIR/.failed.worker${IDX}.${HOST}.tmp
+      final=$RUN_DIR/failed.worker${IDX}
+      if [ ! -e "$final" ] && [ ! -L "$final" ]; then
+        printf '%s rc=%s host=%s mode=%s\n' "$RUN_NONCE" "$rc" "$HOST" "$MODE" > "$tmp" || true
+        mv "$tmp" "$final" || true
+      fi
+    fi
+  }
+  trap record_failure EXIT
+
+  if [ "$IDX" = 0 ]; then
+    test ! -e "$RUN_DIR" && test ! -L "$RUN_DIR"
+    "$PY" scripts/offline_arb/make_freeze_manifest.py \
+      --verify-sidecar-control --sidecar-root "$SIDECAR_ROOT" \
+      --catalog-root "$CATALOG_ROOT" > "$LOCAL_TMP/sidecar.control.initial.json.tmp"
+    mv "$LOCAL_TMP/sidecar.control.initial.json.tmp" "$LOCAL_TMP/sidecar.control.initial.json"
+    "$PY" scripts/offline_arb/run_gpic_fd_semantic_gate.py init \
+      --root "$RUN_DIR" --repo "$REPO" --jobtag "$JOBTAG" --host "$HOST" \
+      --formal-config "$FORMAL_CFG" --plan-root "$PLAN_ROOT" \
+      --catalog-root "$CATALOG_ROOT" --sidecar-root "$SIDECAR_ROOT" \
+      --anime-freq-root "$ANIME_FREQ_ROOT" \
+      --sidecar-control "$LOCAL_TMP/sidecar.control.initial.json"
+  else
+    timeout --signal=TERM --kill-after=10s 900s bash -c '
+      set -euo pipefail
+      for _ in $(seq 1 180); do
+        [ -s "$1/run.json" ] && exit 0
+        [ -s "$1/failed.worker0" ] && { echo "FATAL: worker0 failed before init" >&2; exit 31; }
+        sleep 5
+      done
+      echo "FATAL: timed out waiting for run contract" >&2
+      exit 32
+    ' _ "$RUN_DIR"
+  fi
+
+  RUN_NONCE=$("$PY" - "$RUN_DIR/run.json" "$JOBTAG" <<'PYEOF'
+  import json, re, sys
+  from pathlib import Path
+  value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+  nonce = value.get("run_nonce")
+  if (
+      value.get("schema_version") != "offline_arb_gpic_fd_semantic_run_v1"
+      or value.get("jobtag") != sys.argv[2]
+      or re.fullmatch(r"[0-9a-f]{64}", str(nonce or "")) is None
+  ):
+      raise SystemExit("FATAL: run contract identity mismatch")
+  print(nonce)
+  PYEOF
+  )
+  "$PY" scripts/offline_arb/run_gpic_fd_semantic_gate.py verify \
+    --root "$RUN_DIR" --jobtag "$JOBTAG"
+
+  "$PY" scripts/offline_arb/run_gpic_fd_semantic_gate.py arm \
+    --root "$RUN_DIR" --repo "$REPO" --jobtag "$JOBTAG" --host "$HOST" \
+    --worker-index "$IDX" --mode "$MODE" --python "$PY" \
+    --local-root "$LOCAL_TMP/arms"
+
+  if [ "$IDX" != 0 ]; then
+    exit 0
+  fi
+
+  "$PY" scripts/offline_arb/run_gpic_fd_contract_negatives.py \
+    --run-json "$RUN_DIR/run.json" --jobtag "$JOBTAG" \
+    --host "$HOST" --worker-index 0 \
+    --local-root "$LOCAL_TMP/negative" \
+    --output "$RUN_DIR/negative_contract.json"
+
+  timeout --signal=TERM --kill-after=30s 18000s bash -c '
+    set -euo pipefail
+    for _ in $(seq 1 1800); do
+      for index in 0 1; do
+        if [ -s "$1/failed.worker$index" ] && grep -Fq "$2" "$1/failed.worker$index"; then
+          echo "FATAL: semantic peer failed worker=$index" >&2
+          exit 41
+        fi
+      done
+      if [ -s "$1/arm.strict_path.json" ] && [ -s "$1/arm.fd_stable.json" ]; then
+        exit 0
+      fi
+      sleep 10
+    done
+    echo "FATAL: timed out waiting for both semantic arms" >&2
+    exit 42
+  ' _ "$RUN_DIR" "$RUN_NONCE"
+
+  "$PY" scripts/offline_arb/make_freeze_manifest.py \
+    --verify-sidecar-control --sidecar-root "$SIDECAR_ROOT" \
+    --catalog-root "$CATALOG_ROOT" > "$LOCAL_TMP/sidecar.control.final.json.tmp"
+  mv "$LOCAL_TMP/sidecar.control.final.json.tmp" "$LOCAL_TMP/sidecar.control.final.json"
+  "$PY" scripts/offline_arb/run_gpic_fd_semantic_gate.py aggregate \
+    --root "$RUN_DIR" --jobtag "$JOBTAG" --host "$HOST" --worker-index 0 \
+    --final-sidecar-control "$LOCAL_TMP/sidecar.control.final.json"
+  echo "GPIC_FD_SEMANTIC_GATE_PASS result=$RUN_DIR/aggregate.json"

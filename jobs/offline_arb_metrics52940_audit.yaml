@@ -1,0 +1,148 @@
+# Read-only CPU audit of the failed 8frz metrics stream.  It establishes the
+# immutable full/prefix/tail digests needed by a later one-shot resume prep,
+# but deliberately does not copy, truncate, or otherwise modify metrics.
+name: evan-offarb-formal-8frz-metrics52940-audit
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 32
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  SOURCE_JOBTAG=evan-mot-crop-offline-exact-256-8x8-formal-8frz
+  METRICS=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage256_offline_exact_v1/metrics.jsonl
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  AUDIT_HOST=$(hostname)
+  AUDIT_JOBTAG=${AUDIT_HOST%-0}
+  OUT=$BASE/offline_formal_metrics_audit_v1/$SOURCE_JOBTAG/$AUDIT_JOBTAG
+  test ! -e "$OUT" && test ! -L "$OUT" \
+    || { echo "FATAL: metrics-audit output namespace exists: $OUT"; exit 2; }
+  mkdir -p "$(dirname "$OUT")"
+  mkdir "$OUT"
+
+  "$PY" - "$METRICS" "$OUT" "$SOURCE_JOBTAG" "$AUDIT_JOBTAG" <<'PYEOF'
+  import hashlib
+  import json
+  import os
+  import stat
+  import sys
+  from pathlib import Path
+
+  metrics = Path(sys.argv[1])
+  output_root = Path(sys.argv[2])
+  source_jobtag = sys.argv[3]
+  audit_jobtag = sys.argv[4]
+  expected_identity = {
+      "device": 2_985_749_804,
+      "inode": 144_116_600_096_686_081,
+      "bytes": 17_451_080,
+      "mtime_ns": 1_784_014_126_000_000_000,
+      "ctime_ns": 1_784_014_126_000_000_000,
+  }
+  expected_last_step = 52_940
+  checkpoint_step = 51_000
+
+  def file_identity(path):
+      value = path.lstat()
+      if path.is_symlink() or not stat.S_ISREG(value.st_mode) or value.st_size <= 0:
+          raise SystemExit(f"FATAL: not a nonempty ordinary file: {path}")
+      return {
+          "device": value.st_dev,
+          "inode": value.st_ino,
+          "bytes": value.st_size,
+          "mtime_ns": value.st_mtime_ns,
+          "ctime_ns": value.st_ctime_ns,
+      }
+
+  def atomic_exclusive(path, raw):
+      temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+      if path.exists() or path.is_symlink() or temporary.exists() or temporary.is_symlink():
+          raise SystemExit(f"FATAL: refusing output overwrite: {path}")
+      with temporary.open("xb", buffering=0) as handle:
+          handle.write(raw)
+          handle.flush()
+          os.fsync(handle.fileno())
+      os.replace(temporary, path)
+
+  before = file_identity(metrics)
+  if before != expected_identity:
+      raise SystemExit(
+          f"FATAL: metrics identity drift: actual={before}, expected={expected_identity}"
+      )
+  metrics_raw = metrics.read_bytes()
+  after = file_identity(metrics)
+  if after != before:
+      raise SystemExit("FATAL: metrics changed while reading")
+  lines = metrics_raw.splitlines(keepends=True)
+  if len(lines) != expected_last_step or any(not line.endswith(b"\n") for line in lines):
+      raise SystemExit(f"FATAL: metrics shape drift: rows={len(lines)}")
+  for expected_step, raw_line in enumerate(lines, 1):
+      value = json.loads(raw_line)
+      if not isinstance(value, dict) or value.get("step") != expected_step:
+          raise SystemExit(
+              f"FATAL: metrics sequence drift at row={expected_step}: "
+              f"{value.get('step') if isinstance(value, dict) else type(value)}"
+          )
+  prefix_raw = b"".join(lines[:checkpoint_step])
+  tail_raw = b"".join(lines[checkpoint_step:])
+  full_sha = hashlib.sha256(metrics_raw).hexdigest()
+  prefix_sha = hashlib.sha256(prefix_raw).hexdigest()
+  tail_sha = hashlib.sha256(tail_raw).hexdigest()
+  if file_identity(metrics) != before:
+      raise SystemExit("FATAL: metrics changed while validating")
+
+  receipt = {
+      "schema_version": "offline_formal_metrics_audit_v1",
+      "status": "PASS",
+      "source_jobtag": source_jobtag,
+      "audit_jobtag": audit_jobtag,
+      "read_only": True,
+      "metrics": {
+          "path": str(metrics.resolve(strict=True)),
+          **before,
+          "rows": expected_last_step,
+          "step_range": [1, expected_last_step],
+          "sha256": full_sha,
+          "checkpoint_prefix": {
+              "rows": checkpoint_step,
+              "step_range": [1, checkpoint_step],
+              "bytes": len(prefix_raw),
+              "sha256": prefix_sha,
+          },
+          "post_checkpoint_tail": {
+              "rows": expected_last_step - checkpoint_step,
+              "step_range": [checkpoint_step + 1, expected_last_step],
+              "bytes": len(tail_raw),
+              "sha256": tail_sha,
+          },
+      },
+  }
+  receipt_raw = json.dumps(
+      receipt, sort_keys=True, separators=(",", ":"), allow_nan=False
+  ).encode("utf-8")
+  atomic_exclusive(output_root / "receipt.json", receipt_raw)
+  receipt_sha = hashlib.sha256(receipt_raw).hexdigest()
+  marker = (
+      f"PASS|{source_jobtag}|{audit_jobtag}|{checkpoint_step}|"
+      f"{expected_last_step}|{full_sha}|{prefix_sha}|{tail_sha}|{receipt_sha}\n"
+  ).encode("ascii")
+  atomic_exclusive(output_root / "_SUCCESS", marker)
+  directory_fd = os.open(output_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+  try:
+      os.fsync(directory_fd)
+  finally:
+      os.close(directory_fd)
+  print(
+      "OFFLINE_FORMAL_METRICS_AUDIT_PASS "
+      f"source={source_jobtag} checkpoint_step={checkpoint_step} "
+      f"last_step={expected_last_step} full_sha256={full_sha} "
+      f"prefix_sha256={prefix_sha} tail_sha256={tail_sha} "
+      f"receipt_sha256={receipt_sha}"
+  )
+  PYEOF

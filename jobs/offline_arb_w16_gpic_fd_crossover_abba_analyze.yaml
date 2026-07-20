@@ -1,0 +1,591 @@
+# Independent CPU16 analyzer. PASS requires both fd arms to pass every r4
+# absolute gate, fd drift <=5%, strict control drift <=10%, syscall contracts,
+# and exact same-slice plan/domain/raw-byte ledgers. INCONCLUSIVE/NO_GO exits 3.
+name: evan-mot-crop-offlinearb-w16-gpic-fd-crossover-analyze
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1
+  export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 NUMEXPR_NUM_THREADS=2 ARROW_NUM_THREADS=2
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_arb_w16_fd_crossover_analyze.$(hostname)
+  [ ! -e "$PYTHONPYCACHEPREFIX" ] && [ ! -L "$PYTHONPYCACHEPREFIX" ] \
+    || { echo "FATAL: crossover analyzer pycache prefix is not fresh"; exit 1; }
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  PY_REAL=$(readlink -f -- "$PY") \
+    || { echo "FATAL: cannot resolve crossover analyzer Python"; exit 1; }
+  [ -L "$PY" ] && [ -n "$PY_REAL" ] && [ -f "$PY_REAL" ] && [ ! -L "$PY_REAL" ] \
+    && [ -s "$PY_REAL" ] && [ -x "$PY_REAL" ] \
+    || { echo "FATAL: crossover analyzer Python target is invalid"; exit 1; }
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  RUN_ID=stage256_offline_exact_w16_gpic_fd_crossover_abba_20260712r1
+  RUN_ROOT=$BASE/$RUN_ID
+  PLAN=$BASE/offline_arb_plans_v1/w16_gpuval/plan
+  CATALOG=$BASE/offline_arb_catalog_v1
+  ANIMEFREQ=$BASE/offline_arb_animefreq_v1
+  SIDECAR=$BASE/offline_arb_caption_sidecar_v1
+  RUNNER=$REPO/scripts/offline_arb/run_w16_gpic_fd_crossover_abba.py
+  CAPTURE_YAML=$REPO/jobs/offline_arb_w16_gpic_fd_crossover_abba.yaml
+  ANALYZER=$REPO/scripts/offline_arb/analyze_w16_gpic_fd_crossover_abba.py
+  ANALYZE_YAML=$REPO/jobs/offline_arb_w16_gpic_fd_crossover_abba_analyze.yaml
+  CORE_RUNNER=$REPO/scripts/offline_arb/run_w16_gpic_abba_raw_gate.py
+  CORE_ANALYZER=$REPO/scripts/offline_arb/analyze_w16_gpic_abba_raw_gate.py
+  RUNTIME_FILES=(
+    "$PY_REAL"
+    "$RUNNER" "$CAPTURE_YAML" "$ANALYZER" "$ANALYZE_YAML"
+    "$CORE_RUNNER" "$CORE_ANALYZER"
+    "$REPO/configs/stage256_offline_exact_v1.yaml"
+    "$REPO/training/dataline_offline/offline_dataset.py"
+    "$REPO/training/dataline_offline/planner_v1.py"
+    "$REPO/training/dataline_offline/caption_sidecar.py"
+    "$REPO/training/dataline/complete_dataset.py"
+    "$REPO/training/dataline/config.py"
+    "$REPO/training/dataline/image_fetch.py"
+    "$REPO/training/dataline/manifest_index.py"
+    "$REPO/training/dataline/multi_ar.py"
+    "$REPO/training/dataline/native_safety.py"
+    "$REPO/training/dataline/pil_safety.py"
+    "$REPO/training/dataline/caption_build.py"
+    "$REPO/training/dataline/sampler.py"
+    "$REPO/scripts/offline_arb/caption_sidecar_contract.py"
+    "$REPO/scripts/offline_arb/make_freeze_manifest.py"
+    "/fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json"
+  )
+
+  NW_DECL=$(grep -m1 '^numWorkers:' "$ANALYZE_YAML" | awk '{print $2}')
+  GPU_DECL=$(grep -m1 '^gpuPerWorker:' "$ANALYZE_YAML" | awk '{print $2}')
+  CPU_DECL=$(grep -m1 '^cpuPerWorker:' "$ANALYZE_YAML" | awk '{print $2}')
+  [ "$NW_DECL" = 1 ] && [ "$GPU_DECL" = 0 ] && [ "$CPU_DECL" = 16 ] \
+    || { echo "FATAL: crossover analyzer topology drift"; exit 1; }
+  for FILE in "${RUNTIME_FILES[@]}" "$PLAN/header.json" "$PLAN/checksums.json" \
+              "$CATALOG/header.json" "$ANIMEFREQ/header.json" "$SIDECAR/header.json" "$SIDECAR/_SUCCESS"; do
+    [ -f "$FILE" ] && [ ! -L "$FILE" ] && [ -s "$FILE" ] \
+      || { echo "FATAL: crossover analyzer input invalid: $FILE"; exit 1; }
+  done
+  for DIR in "$RUN_ROOT" "$PLAN" "$PLAN/blocks" "$CATALOG" "$ANIMEFREQ" "$SIDECAR"; do
+    [ -d "$DIR" ] && [ ! -L "$DIR" ] \
+      || { echo "FATAL: crossover analyzer directory invalid: $DIR"; exit 1; }
+  done
+  "$PY" -m py_compile "$RUNNER" "$ANALYZER" "$CORE_RUNNER" "$CORE_ANALYZER"
+
+  ANALYZER_HOST=$(hostname)
+  case "$ANALYZER_HOST" in
+    *-0) ANALYZER_JOBTAG=${ANALYZER_HOST%-0} ;;
+    *) echo "FATAL: analyzer hostname is not a one-worker JCC identity: $ANALYZER_HOST"; exit 1 ;;
+  esac
+  case "$ANALYZER_JOBTAG" in (*[!A-Za-z0-9_.-]*|'') echo "FATAL: malformed analyzer jobtag"; exit 1;; esac
+  [ "$ANALYZER_HOST" = "$ANALYZER_JOBTAG-0" ] \
+    || { echo "FATAL: analyzer hostname/jobtag binding mismatch"; exit 1; }
+
+  SOURCE_JOBTAG=${OFFLINE_ARB_FD_CROSSOVER_SOURCE_JOBTAG:-}
+  if [ -n "$SOURCE_JOBTAG" ]; then
+    case "$SOURCE_JOBTAG" in (*[!A-Za-z0-9_.-]*) echo "FATAL: malformed crossover jobtag"; exit 1;; esac
+    [ "$SOURCE_JOBTAG" != . ] && [ "$SOURCE_JOBTAG" != .. ] \
+      && [ "$(basename "$SOURCE_JOBTAG")" = "$SOURCE_JOBTAG" ] \
+      || { echo "FATAL: non-canonical crossover jobtag"; exit 1; }
+    MASTER=$RUN_ROOT/$SOURCE_JOBTAG/abba.$SOURCE_JOBTAG.aggregate.json
+  else
+    [ ! -e "$RUN_ROOT/_analysis" ] && [ ! -L "$RUN_ROOT/_analysis" ] \
+      || { echo "FATAL: analyzer retry requires explicit OFFLINE_ARB_FD_CROSSOVER_SOURCE_JOBTAG"; exit 1; }
+    mapfile -t MASTERS < <(
+      find "$RUN_ROOT" -mindepth 2 -maxdepth 2 -type f -name 'abba.*.aggregate.json' -print | sort
+    )
+    [ "${#MASTERS[@]}" -eq 1 ] \
+      || { echo "FATAL: expected one crossover master or explicit source jobtag; found ${#MASTERS[@]}"; exit 1; }
+    MASTER=${MASTERS[0]}
+    SOURCE_JOBTAG=$(basename "$(dirname "$MASTER")")
+  fi
+  [ -f "$MASTER" ] && [ ! -L "$MASTER" ] && [ -s "$MASTER" ] \
+    || { echo "FATAL: selected crossover master invalid"; exit 1; }
+  RESULT_ROOT=$(dirname "$MASTER")
+  [ "$MASTER" = "$RESULT_ROOT/abba.$SOURCE_JOBTAG.aggregate.json" ] \
+    || { echo "FATAL: crossover master filename/jobtag mismatch"; exit 1; }
+  [ "$RESULT_ROOT" = "$RUN_ROOT/$SOURCE_JOBTAG" ] \
+    || { echo "FATAL: crossover capture root/source binding mismatch"; exit 1; }
+  ANALYSIS_ATTEMPT_NONCE=$("$PY" - "$RUN_ID" "$SOURCE_JOBTAG" "$ANALYZER_JOBTAG" <<'NONCEPY'
+  import hashlib
+  import json
+  import sys
+  run_id, source_jobtag, analyzer_jobtag = sys.argv[1:]
+  value = {
+      "schema_version": "offline_arb_w16_gpic_fd_crossover_analysis_attempt_v1",
+      "run_id": run_id,
+      "source_jobtag": source_jobtag,
+      "analyzer_jobtag": analyzer_jobtag,
+  }
+  raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+  print(hashlib.sha256(raw).hexdigest())
+  NONCEPY
+  )
+  case "$ANALYSIS_ATTEMPT_NONCE" in (*[!0-9a-f]*|'') echo "FATAL: malformed analyzer attempt nonce"; exit 1;; esac
+  [ "${#ANALYSIS_ATTEMPT_NONCE}" -eq 64 ] \
+    || { echo "FATAL: analyzer attempt nonce length mismatch"; exit 1; }
+  ANALYSIS_BASE=$RUN_ROOT/_analysis
+  ANALYSIS_SOURCE_ROOT=$ANALYSIS_BASE/$SOURCE_JOBTAG
+  ANALYSIS_JOB_ROOT=$ANALYSIS_SOURCE_ROOT/$ANALYZER_JOBTAG
+  for DIR in "$ANALYSIS_BASE" "$ANALYSIS_SOURCE_ROOT" "$ANALYSIS_JOB_ROOT"; do
+    if [ ! -e "$DIR" ] && [ ! -L "$DIR" ]; then
+      mkdir "$DIR" 2>/dev/null \
+        || { [ -d "$DIR" ] && [ ! -L "$DIR" ]; } \
+        || { echo "FATAL: cannot create real analyzer hierarchy directory: $DIR"; exit 1; }
+    fi
+    [ -d "$DIR" ] && [ ! -L "$DIR" ] \
+      || { echo "FATAL: analyzer hierarchy contains symlink/non-directory: $DIR"; exit 1; }
+  done
+  ANALYSIS_ATTEMPT_ROOT=$ANALYSIS_JOB_ROOT/$ANALYSIS_ATTEMPT_NONCE
+  [ ! -e "$ANALYSIS_ATTEMPT_ROOT" ] && [ ! -L "$ANALYSIS_ATTEMPT_ROOT" ] \
+    || { echo "FATAL: refusing to reuse analyzer attempt namespace: $ANALYSIS_ATTEMPT_ROOT"; exit 1; }
+  mkdir "$ANALYSIS_ATTEMPT_ROOT"
+  [ -d "$ANALYSIS_ATTEMPT_ROOT" ] && [ ! -L "$ANALYSIS_ATTEMPT_ROOT" ] \
+    || { echo "FATAL: analyzer attempt namespace is not a real directory"; exit 1; }
+  OUTPUT=$ANALYSIS_ATTEMPT_ROOT/fdx.analyzer-$ANALYZER_JOBTAG.attempt-$ANALYSIS_ATTEMPT_NONCE.json
+  ATTESTATION=$OUTPUT.attestation.json
+  CAPTURE_INPUT_ATTESTATION=$ANALYSIS_ATTEMPT_ROOT/capture_input_attestation.json
+  for FILE in "$OUTPUT" "$ATTESTATION" "$CAPTURE_INPUT_ATTESTATION"; do
+    [ ! -e "$FILE" ] && [ ! -L "$FILE" ] \
+      || { echo "FATAL: refusing to overwrite analyzer attempt artifact: $FILE"; exit 1; }
+  done
+
+  "$PY" - "$RESULT_ROOT" "$MASTER" "$RUN_ID" "$SOURCE_JOBTAG" "$ANALYZER_JOBTAG" \
+    "$ANALYSIS_ATTEMPT_NONCE" "$CAPTURE_INPUT_ATTESTATION" <<'CAPTUREPY'
+  import hashlib
+  import json
+  import os
+  import sys
+  from pathlib import Path
+  capture_raw, master_raw, run_id, source_jobtag, analyzer_jobtag, nonce, output_raw = sys.argv[1:]
+  capture = Path(capture_raw)
+  master = Path(master_raw)
+  output = Path(output_raw)
+  files = {}
+  for path in sorted(capture.rglob("*")):
+      if path.is_symlink():
+          raise SystemExit(f"FATAL: symlink in immutable capture: {path}")
+      if path.is_file():
+          relative = path.relative_to(capture).as_posix()
+          digest = hashlib.sha256()
+          with path.open("rb", buffering=0) as handle:
+              for block in iter(lambda: handle.read(1 << 20), b""):
+                  digest.update(block)
+          files[relative] = {"bytes": path.stat().st_size, "sha256": digest.hexdigest()}
+  master_relative = master.relative_to(capture).as_posix()
+  master_value = json.loads(master.read_text(encoding="utf-8"))
+  if (
+      master_value.get("schema_version") != "offline_arb_w16_gpic_fd_crossover_master_aggregate_v1"
+      or master_value.get("run_id") != run_id
+      or master_value.get("jobtag") != source_jobtag
+      or master_value.get("semantic_external_gate") != "PENDING"
+      or master_value.get("production_selection_qualified") is not False
+      or master_relative not in files
+  ):
+      raise SystemExit("FATAL: finalized crossover master identity mismatch")
+  value = {
+      "schema_version": "offline_arb_w16_gpic_fd_crossover_capture_input_attestation_v1",
+      "run_id": run_id,
+      "source_jobtag": source_jobtag,
+      "analyzer_jobtag": analyzer_jobtag,
+      "analysis_attempt_nonce": nonce,
+      "capture_root": str(capture),
+      "master_relative": master_relative,
+      "files": files,
+  }
+  payload = (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
+  temporary = output.with_name(f".{output.name}.tmp.{os.getpid()}")
+  with temporary.open("xb") as handle:
+      handle.write(payload)
+      handle.flush()
+      os.fsync(handle.fileno())
+  os.replace(temporary, output)
+  descriptor = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
+  try:
+      os.fsync(descriptor)
+  finally:
+      os.close(descriptor)
+  CAPTUREPY
+
+  declare -A INPUT_SHA
+  for FILE in "${RUNTIME_FILES[@]}" "$MASTER" "$PLAN/header.json" "$PLAN/checksums.json" \
+              "$CATALOG/header.json" "$ANIMEFREQ/header.json" "$SIDECAR/header.json" "$SIDECAR/_SUCCESS"; do
+    INPUT_SHA["$FILE"]=$(sha256sum "$FILE" | awk '{print $1}')
+  done
+  set +e
+  timeout --signal=TERM --kill-after=30s 7200s \
+    "$PY" "$ANALYZER" --master "$MASTER" --repo "$REPO" --plan "$PLAN" \
+      --catalog "$CATALOG" --animefreq "$ANIMEFREQ" --sidecar "$SIDECAR" \
+      --run-id "$RUN_ID" --analysis-attempt-root "$ANALYSIS_ATTEMPT_ROOT" \
+      --analyzer-jobtag "$ANALYZER_JOBTAG" --analysis-attempt-nonce "$ANALYSIS_ATTEMPT_NONCE" \
+      --output "$OUTPUT"
+  ANALYZE_RC=$?
+  set -e
+  [ -f "$OUTPUT" ] && [ ! -L "$OUTPUT" ] && [ -s "$OUTPUT" ] \
+    || { echo "FATAL: crossover analyzer did not preserve output"; exit 1; }
+  [ -f "$ATTESTATION" ] && [ ! -L "$ATTESTATION" ] && [ -s "$ATTESTATION" ] \
+    || { echo "FATAL: crossover analyzer did not preserve detached attestation"; exit 1; }
+  for FILE in "${!INPUT_SHA[@]}"; do
+    [ "$(sha256sum "$FILE" | awk '{print $1}')" = "${INPUT_SHA[$FILE]}" ] \
+      || { echo "FATAL: crossover input changed during analysis: $FILE"; exit 1; }
+  done
+
+  "$PY" - "$OUTPUT" "$ATTESTATION" "$CAPTURE_INPUT_ATTESTATION" "$ANALYZE_RC" \
+    "$RUN_ID" "$SOURCE_JOBTAG" "$ANALYZER_JOBTAG" "$ANALYSIS_ATTEMPT_NONCE" \
+    "$ANALYSIS_ATTEMPT_ROOT" "$RESULT_ROOT" "$MASTER" "${INPUT_SHA[$MASTER]}" <<'PYEOF'
+  import hashlib
+  import json
+  import math
+  import statistics
+  import sys
+  from pathlib import Path
+
+  (
+      output_raw,
+      attestation_raw,
+      capture_input_raw,
+      rc_raw,
+      run_id,
+      jobtag,
+      analyzer_jobtag,
+      attempt_nonce,
+      attempt_root_raw,
+      capture_root_raw,
+      master_raw,
+      master_sha,
+  ) = sys.argv[1:]
+  output_path = Path(output_raw)
+  attestation_path = Path(attestation_raw)
+  capture_input_path = Path(capture_input_raw)
+  attempt_root = Path(attempt_root_raw)
+  capture_root = Path(capture_root_raw)
+  master_path = Path(master_raw)
+  value = json.loads(output_path.read_text(encoding="utf-8"))
+  attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+  capture_input = json.loads(capture_input_path.read_text(encoding="utf-8"))
+  rc = int(rc_raw)
+  if value.get("schema_version") != "offline_arb_w16_gpic_fd_crossover_analysis_v1":
+      raise SystemExit("FATAL: crossover analysis schema mismatch")
+  expected_status = "PASS" if rc == 0 else "NO_GO" if rc == 3 else "FATAL"
+  if value.get("status") != expected_status:
+      raise SystemExit("FATAL: crossover rc/status mismatch")
+  if (
+      value.get("semantic_external_gate") != "PENDING"
+      or value.get("production_selection_qualified") is not False
+  ):
+      raise SystemExit("FATAL: CPU analysis is not explicitly blocked from production selection")
+  def file_sha(path):
+      digest = hashlib.sha256()
+      with path.open("rb", buffering=0) as handle:
+          for block in iter(lambda: handle.read(1 << 20), b""):
+              digest.update(block)
+      return digest.hexdigest()
+  def canonical_sha(item):
+      raw = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+      return hashlib.sha256(raw).hexdigest()
+  expected_attempt_root = capture_root.parent / "_analysis" / jobtag / analyzer_jobtag / attempt_nonce
+  expected_output_name = f"fdx.analyzer-{analyzer_jobtag}.attempt-{attempt_nonce}.json"
+  if (
+      attempt_root != expected_attempt_root
+      or output_path.parent != attempt_root
+      or output_path.name != expected_output_name
+      or attestation_path != output_path.with_name(output_path.name + ".attestation.json")
+      or capture_root in output_path.parents
+  ):
+      raise SystemExit("FATAL: analyzer attempt/capture namespace separation mismatch")
+  if (
+      attestation.get("schema_version") != "offline_arb_w16_gpic_fd_crossover_output_attestation_v1"
+      or attestation.get("status") != expected_status
+      or attestation.get("run_id") != run_id
+      or attestation.get("source_jobtag") != jobtag
+      or attestation.get("analyzer_jobtag") != analyzer_jobtag
+      or attestation.get("analysis_attempt_nonce") != attempt_nonce
+      or attestation.get("analysis_attempt_root") != str(attempt_root)
+      or attestation.get("output")
+      != {"path": output_raw, "bytes": output_path.stat().st_size, "sha256": file_sha(output_path)}
+      or attestation.get("capture_master")
+      != {"path": master_raw, "bytes": master_path.stat().st_size, "sha256": master_sha}
+      or attestation.get("capture_input_attestation")
+      != {
+          "path": capture_input_raw,
+          "bytes": capture_input_path.stat().st_size,
+          "sha256": file_sha(capture_input_path),
+      }
+  ):
+      raise SystemExit("FATAL: detached output attestation identity/SHA mismatch")
+  live_postcheck = attestation.get("live_artifact_postcheck")
+  if (
+      not isinstance(live_postcheck, dict)
+      or not live_postcheck
+      or attestation.get("live_artifact_postcheck_sha256") != canonical_sha(live_postcheck)
+  ):
+      raise SystemExit("FATAL: detached live-source postcheck malformed")
+  for label, declaration in live_postcheck.items():
+      path = Path(str(declaration.get("path", ""))) if isinstance(declaration, dict) else Path("")
+      if (
+          not isinstance(declaration, dict)
+          or set(declaration) != {"path", "bytes", "sha256"}
+          or path.is_symlink()
+          or not path.is_file()
+          or path.stat().st_size != declaration["bytes"]
+          or file_sha(path) != declaration["sha256"]
+      ):
+          raise SystemExit(f"FATAL: detached live-source postcheck drift: {label}")
+  if (
+      capture_input.get("schema_version")
+      != "offline_arb_w16_gpic_fd_crossover_capture_input_attestation_v1"
+      or capture_input.get("run_id") != run_id
+      or capture_input.get("source_jobtag") != jobtag
+      or capture_input.get("analyzer_jobtag") != analyzer_jobtag
+      or capture_input.get("analysis_attempt_nonce") != attempt_nonce
+      or capture_input.get("capture_root") != str(capture_root)
+  ):
+      raise SystemExit("FATAL: capture input attestation identity mismatch")
+  observed_capture_files = {}
+  for path in sorted(capture_root.rglob("*")):
+      if path.is_symlink():
+          raise SystemExit(f"FATAL: symlink appeared in immutable capture: {path}")
+      if path.is_file():
+          observed_capture_files[path.relative_to(capture_root).as_posix()] = {
+              "bytes": path.stat().st_size,
+              "sha256": file_sha(path),
+          }
+  if observed_capture_files != capture_input.get("files"):
+      raise SystemExit("FATAL: analyzer modified or observed drift in immutable capture")
+  if rc not in {0, 3}:
+      if not isinstance(value.get("error"), str) or not value["error"]:
+          raise SystemExit("FATAL: crossover fatal result lacks error")
+      print(f"W16_GPIC_FD_CROSSOVER_ANALYSIS_FATAL output={output_raw} error={value['error']}")
+      raise SystemExit(0)
+  expected_attempt_names = {
+      "capture_input_attestation.json",
+      f"sidecarfull.analysis.{jobtag}.json",
+      output_path.name,
+      attestation_path.name,
+  }
+  if {path.name for path in attempt_root.iterdir()} != expected_attempt_names:
+      raise SystemExit("FATAL: analyzer attempt output exact-set mismatch")
+  identity = value.get("identity")
+  evidence = value.get("evidence")
+  qualification = value.get("qualification")
+  telemetry = value.get("mode_telemetry")
+  raw_exact = value.get("crossover_raw_exact")
+  arms = value.get("arms")
+  if not all(isinstance(item, dict) for item in (identity, evidence, qualification, telemetry, raw_exact, arms)):
+      raise SystemExit("FATAL: crossover structured evidence missing")
+  if (
+      identity.get("run_id") != run_id
+      or identity.get("jobtag") != jobtag
+      or identity.get("analyzer_jobtag") != analyzer_jobtag
+      or identity.get("analysis_attempt_nonce") != attempt_nonce
+      or identity.get("analysis_attempt_root") != str(attempt_root)
+  ):
+      raise SystemExit("FATAL: crossover analysis identity mismatch")
+  if evidence.get("master") != master_raw or evidence.get("master_sha256") != master_sha:
+      raise SystemExit("FATAL: crossover master evidence mismatch")
+  if evidence.get("analysis_output_attestation_expected") != {
+      "path": attestation_raw,
+      "schema_version": "offline_arb_w16_gpic_fd_crossover_output_attestation_v1",
+  }:
+      raise SystemExit("FATAL: crossover output/attestation forward binding mismatch")
+  expected_modes = {"strict_x": "strict_path", "fd_x": "fd_stable", "fd_y": "fd_stable", "strict_y": "strict_path"}
+  if identity.get("mode_by_arm") != expected_modes or set(arms) != set(expected_modes):
+      raise SystemExit("FATAL: crossover mode/arm set mismatch")
+  for arm, mode in expected_modes.items():
+      if arms[arm].get("gpic_source_consistency_mode") != mode or telemetry.get(arm, {}).get("mode") != mode:
+          raise SystemExit(f"FATAL: crossover arm/telemetry mode mismatch: {arm}")
+      gates = arms[arm].get("gates")
+      failed = arms[arm].get("failed_gates")
+      if not isinstance(gates, list) or not gates or not isinstance(failed, list):
+          raise SystemExit(f"FATAL: crossover arm gates malformed: {arm}")
+      recomputed_failed = []
+      seen_names = set()
+      for gate in gates:
+          if not isinstance(gate, dict) or not isinstance(gate.get("name"), str):
+              raise SystemExit(f"FATAL: crossover gate entry malformed: {arm}")
+          name = gate["name"]
+          observed = gate.get("value")
+          threshold = gate.get("threshold")
+          operator = gate.get("operator")
+          if (
+              name in seen_names
+              or isinstance(observed, bool)
+              or not isinstance(observed, (int, float))
+              or isinstance(threshold, bool)
+              or not isinstance(threshold, (int, float))
+              or not math.isfinite(float(observed))
+              or not math.isfinite(float(threshold))
+              or operator not in {"<=", ">="}
+          ):
+              raise SystemExit(f"FATAL: crossover gate value malformed: {arm}/{name}")
+          seen_names.add(name)
+          passed = observed <= threshold if operator == "<=" else observed >= threshold
+          if gate.get("pass") is not passed:
+              raise SystemExit(f"FATAL: crossover gate result mismatch: {arm}/{name}")
+          if not passed:
+              recomputed_failed.append(name)
+      if failed != recomputed_failed or arms[arm].get("status") != ("PASS" if not failed else "NO_GO"):
+          raise SystemExit(f"FATAL: crossover arm status/failed-gate mismatch: {arm}")
+      t = telemetry[arm]
+      if t.get("gpic_threads_per_node") != 16 or t.get("gpic_workers_per_rank") != 2:
+          raise SystemExit(f"FATAL: crossover runtime GPIC thread identity mismatch: {arm}")
+      if not all(type(t.get(key)) is int and t[key] >= 0 for key in ("files", "fstat_calls", "path_stat_calls")):
+          raise SystemExit(f"FATAL: crossover syscall totals malformed: {arm}")
+  pairs = raw_exact.get("pairs")
+  expected_pair_names = {"strict_x_vs_fd_x", "fd_y_vs_strict_y"}
+  if not isinstance(pairs, dict) or set(pairs) != expected_pair_names:
+      raise SystemExit("FATAL: crossover exact-pair set mismatch")
+  independently_raw_exact = all(pair.get("exact") is True and pair.get("mismatches") == [] for pair in pairs.values())
+  fd_abs = all(arms[arm].get("status") == "PASS" for arm in ("fd_x", "fd_y"))
+  fd_left = arms["fd_x"]["domain_min_rank_capacity_ratio"]["gpic"]
+  fd_right = arms["fd_y"]["domain_min_rank_capacity_ratio"]["gpic"]
+  strict_left = arms["strict_x"]["domain_min_rank_capacity_ratio"]["gpic"]
+  strict_right = arms["strict_y"]["domain_min_rank_capacity_ratio"]["gpic"]
+  if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x > 0 for x in (fd_left, fd_right, strict_left, strict_right)):
+      raise SystemExit("FATAL: crossover capacity values malformed")
+  fd_drift = abs(fd_left - fd_right) / max(fd_left, fd_right)
+  strict_drift = abs(strict_left - strict_right) / max(strict_left, strict_right)
+  def pair_performance(strict_arm, fd_arm):
+      strict = arms[strict_arm]
+      fd = arms[fd_arm]
+      strict_capacity = strict["domain_min_rank_capacity_ratio"]["gpic"]
+      fd_capacity = fd["domain_min_rank_capacity_ratio"]["gpic"]
+      rank_speedups = {
+          str(rank): strict["rank_runner_elapsed_per_step_s"][str(rank)]
+          / fd["rank_runner_elapsed_per_step_s"][str(rank)]
+          for rank in range(16)
+      }
+      return {
+          "strict_arm": strict_arm,
+          "fd_arm": fd_arm,
+          "gpic_min_rank_capacity_ratio": {"strict": strict_capacity, "fd": fd_capacity},
+          "gpic_capacity_speedup_fd_over_strict": fd_capacity / strict_capacity,
+          "runner_elapsed_speedup_strict_over_fd": {
+              "per_rank": rank_speedups,
+              "min": min(rank_speedups.values()),
+              "median": statistics.median(rank_speedups.values()),
+              "mean": statistics.fmean(rank_speedups.values()),
+          },
+          "global_critical_wait_speedup_strict_over_fd": {
+              key: strict["global_critical_wait"][key] / fd["global_critical_wait"][key]
+              for key in ("mean_s", "p95_s", "max_s")
+          },
+          "combined_critical_window_speedup_strict_over_fd": {
+              key: strict["combined_critical_windows"][key] / fd["combined_critical_windows"][key]
+              for key in ("mean_s", "p95_s", "max_s")
+          },
+      }
+  expected_pair_performance = {
+      "x": pair_performance("strict_x", "fd_x"),
+      "y": pair_performance("strict_y", "fd_y"),
+  }
+  capacity_speedups = {
+      label: item["gpic_capacity_speedup_fd_over_strict"]
+      for label, item in expected_pair_performance.items()
+  }
+  min_capacity_speedup = min(capacity_speedups.values())
+  expected_performance = {
+      "pairs": expected_pair_performance,
+      "gpic_capacity_speedup_fd_over_strict": capacity_speedups,
+      "min_gpic_capacity_speedup": min_capacity_speedup,
+      "gpic_capacity_speedup_pair_drift": abs(capacity_speedups["x"] - capacity_speedups["y"])
+      / max(capacity_speedups["x"], capacity_speedups["y"]),
+      "min_runner_elapsed_speedup": min(
+          item["runner_elapsed_speedup_strict_over_fd"]["min"]
+          for item in expected_pair_performance.values()
+      ),
+      "min_global_critical_wait_mean_speedup": min(
+          item["global_critical_wait_speedup_strict_over_fd"]["mean_s"]
+          for item in expected_pair_performance.values()
+      ),
+      "min_combined_critical_window_mean_speedup": min(
+          item["combined_critical_window_speedup_strict_over_fd"]["mean_s"]
+          for item in expected_pair_performance.values()
+      ),
+  }
+  if value.get("crossover_performance") != expected_performance:
+      raise SystemExit("FATAL: crossover performance ratios were not independently reproduced")
+  fd_counter = all(
+      telemetry[a]["counter_contract_exact"] is True
+      and telemetry[a]["path_stat_timing_zero"] is True
+      and telemetry[a]["path_stat_calls"] == 0
+      and telemetry[a]["fstat_calls"] == 2 * telemetry[a]["files"]
+      for a in ("fd_x", "fd_y")
+  )
+  strict_counter = all(
+      telemetry[a]["counter_contract_exact"] is True
+      and telemetry[a]["path_stat_calls"] == 2 * telemetry[a]["files"]
+      and telemetry[a]["fstat_calls"] == 2 * telemetry[a]["files"]
+      for a in ("strict_x", "strict_y")
+  )
+  strict_stable = strict_drift <= 0.10 and strict_counter
+  selectable = strict_stable and fd_abs and fd_drift <= 0.05 and fd_counter and independently_raw_exact
+  expected_gpuval_candidate = (
+      independently_raw_exact
+      and fd_counter
+      and strict_counter
+      and min_capacity_speedup >= 1.5
+  )
+  diagnostic = value.get("gpuval_diagnostic")
+  if (
+      not isinstance(diagnostic, dict)
+      or diagnostic.get("status")
+      != ("GPUVAL_CANDIDATE" if expected_gpuval_candidate else "NOT_CANDIDATE")
+      or diagnostic.get("production_selection_qualified") is not False
+      or diagnostic.get("semantic_external_gate") != "PENDING"
+      or diagnostic.get("minimum_required_gpic_capacity_speedup") != 1.5
+      or diagnostic.get("raw_exact") is not independently_raw_exact
+      or diagnostic.get("fd_counter_contract_pass") is not fd_counter
+      or diagnostic.get("strict_counter_contract_pass") is not strict_counter
+      or diagnostic.get("both_slices_significantly_faster")
+      is not (min_capacity_speedup >= 1.5)
+      or diagnostic.get("min_observed_gpic_capacity_speedup") != min_capacity_speedup
+  ):
+      raise SystemExit("FATAL: GPUVAL diagnostic was not independently reproduced")
+  expected_decision = (
+      "SELECT_FD_STABLE"
+      if selectable
+      else "NO_GO"
+      if not independently_raw_exact or not fd_counter
+      else "INCONCLUSIVE"
+      if not strict_stable
+      else "NO_GO"
+  )
+  checks = {
+      "fd_arms_absolute_pass": fd_abs,
+      "fd_pair_drift": fd_drift,
+      "fd_pair_stable": fd_drift <= 0.05,
+      "fd_counter_contract_pass": fd_counter,
+      "strict_environment_drift": strict_drift,
+      "strict_counter_contract_pass": strict_counter,
+      "strict_environment_stable": strict_stable,
+      "same_slice_plan_domain_raw_bytes_exact": independently_raw_exact,
+      "selectable": selectable,
+  }
+  for key, expected in checks.items():
+      if qualification.get(key) != expected:
+          raise SystemExit(f"FATAL: crossover independently recomputed qualification mismatch: {key}")
+  if (
+      value.get("decision") != expected_decision
+      or value.get("status") != ("PASS" if selectable else "NO_GO")
+      or (rc == 0) is not selectable
+  ):
+      raise SystemExit("FATAL: crossover final decision mismatch")
+  print(
+      f"W16_GPIC_FD_CROSSOVER_ANALYSIS_{expected_status} output={output_raw} "
+      f"output_sha256={file_sha(output_path)} attestation={attestation_raw} "
+      f"attestation_sha256={file_sha(attestation_path)} decision={expected_decision}"
+  )
+  PYEOF
+
+  case "$ANALYZE_RC" in
+    0) exit 0 ;;
+    3) exit 3 ;;
+    *) exit 1 ;;
+  esac

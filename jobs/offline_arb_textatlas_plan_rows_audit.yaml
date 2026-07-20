@@ -1,0 +1,38 @@
+name: evan-offarb-textatlas-plan-rows-audit
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_arb_textatlas_plan_rows.$(hostname)
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  PLAN=$BASE/offline_arb_plans_v1/w64_prod/plan
+  CATALOG=$BASE/offline_arb_catalog_v1
+  OUT=$BASE/offline_arb_textatlas_integrity_audit_v1
+  RESULT=$OUT/plan_rows.json
+  BITMAP=$OUT/plan_rows_bitmap.npz
+  test ! -e "$OUT" || { echo "FATAL: immutable output already exists: $OUT"; exit 34; }
+  mkdir -p "$OUT"
+
+  "$PY" -m py_compile scripts/offline_arb/audit_textatlas_plan_rows.py
+  "$PY" scripts/offline_arb/audit_textatlas_plan_rows.py \
+    --plan-root "$PLAN" \
+    --catalog-root "$CATALOG" \
+    --formal-steps 166667 \
+    --target-row-id 94682834 \
+    --workers 16 \
+    --output-json "$RESULT" \
+    --output-bitmap "$BITMAP"
+  sha256sum "$RESULT" "$BITMAP" > "$OUT/plan_rows.sha256"
+  touch "$OUT/_PLAN_SUCCESS"

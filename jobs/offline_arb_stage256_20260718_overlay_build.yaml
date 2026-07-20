@@ -1,0 +1,64 @@
+# Build the Stage256 semantic eligibility/weight overlay.  Large parquet scans
+# are isolated to this CPU JCC job; the output leaf is create-once.
+name: evan-offarb-s256-20260718-overlay-build-v1
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 192
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=8 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=8
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  ROOT=$BASE/offline_arb_stage256_20260718_semantic_v1
+  OUT=$ROOT/overlay
+  CAT=$BASE/offline_arb_catalog_v1
+  SIDECAR=$BASE/offline_arb_caption_sidecar_v1
+  SOURCE_MANIFEST=$BASE/offline_arb_anime_caption_source_manifest_v1/header.json
+  SAMPLING=/fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json
+  SCRIPT=scripts/offline_arb/build_stage256_semantic_overlay.py
+
+  test -f "$CAT/header.json" && test ! -L "$CAT/header.json"
+  test -f "$SIDECAR/header.json" && test ! -L "$SIDECAR/header.json"
+  test -f "$SOURCE_MANIFEST" && test ! -L "$SOURCE_MANIFEST"
+  test -f "$SAMPLING" && test ! -L "$SAMPLING"
+  test -f "$SCRIPT" && test ! -L "$SCRIPT"
+  test ! -e "$OUT" && test ! -L "$OUT" \
+    || { echo "FATAL: create-once overlay leaf already exists: $OUT"; exit 40; }
+  mkdir -p "$ROOT"
+  "$PY" -m py_compile "$SCRIPT"
+  "$PY" "$SCRIPT" --self-test
+  timeout --signal=TERM --kill-after=60s 10800s \
+    "$PY" "$SCRIPT" \
+      --overlay-id stage256_20260718_semantic_overlay_v1 \
+      --catalog-root "$CAT" \
+      --catalog-header "$CAT/header.json" \
+      --caption-sidecar-header "$SIDECAR/header.json" \
+      --anime-source-manifest "$SOURCE_MANIFEST" \
+      --sampling-config "$SAMPLING" \
+      --manifest-index-py training/dataline/manifest_index.py \
+      --sampler-py training/dataline/sampler.py \
+      --workers 14 \
+      --output-dir "$OUT"
+
+  RECEIPT=$OUT/_SUCCESS
+  test -f "$RECEIPT" && test ! -L "$RECEIPT"
+  "$PY" - "$RECEIPT" "$OUT/header.json" <<'PYEOF'
+  import json, sys
+  value = json.load(open(sys.argv[1], encoding="utf-8"))
+  header = json.load(open(sys.argv[2], encoding="utf-8"))
+  assert value.get("format") == "offline_arb_semantic_overlay_v1", value
+  assert int(value.get("selected_rows", 0)) > 0, value
+  assert header["semantic_assertions"] == {
+      "anime_all_rows_strip_nonempty_nl": True,
+      "anime_tag_only_rows": 0,
+  }, header["semantic_assertions"]
+  print("OVERLAY_BUILD_PASS", json.dumps(value, sort_keys=True)[:2000])
+  PYEOF

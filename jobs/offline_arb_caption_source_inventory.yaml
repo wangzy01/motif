@@ -1,0 +1,58 @@
+# Read-only OFFLINE_ARB caption-source inventory.  Two independent 16-CPU pods:
+# worker 0 scans monet_real, worker 1 scans gpic.  Catalog bodies read only the
+# caption_parquet_path column; source parquets are inspected through stat/footer metadata.
+name: evan-mot-crop-offlinearb-caption-source-inventory
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 2
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+
+  HOST=$(hostname)
+  IDX=${HOST##*-}
+  case "$IDX" in
+    0) DOMAIN=monet_real ;;
+    1) DOMAIN=gpic ;;
+    *) echo "FATAL: unexpected worker index $IDX from $HOST"; exit 20 ;;
+  esac
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  OUT=$BASE/offline_arb_caption_source_inventory_v1
+  mkdir -p "$OUT"
+  "$PY" -m py_compile scripts/offline_arb/inventory_caption_sources.py
+
+  STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+  TMP=$OUT/.${DOMAIN}.${HOST}.${STAMP}.json.tmp
+  RESULT=$OUT/${DOMAIN}.${HOST}.${STAMP}.json
+  STDERR_LOG=$OUT/${DOMAIN}.${HOST}.${STAMP}.stderr.log
+  set +e
+  timeout --signal=TERM --kill-after=60s 5340s \
+    "$PY" scripts/offline_arb/inventory_caption_sources.py \
+      --domain "$DOMAIN" \
+      --metadata-workers 16 \
+      2> >(tee "$STDERR_LOG" >&2) | tee "$TMP"
+  PIPE_RC=("${PIPESTATUS[@]}")
+  set -e
+  SCRIPT_RC=${PIPE_RC[0]}
+  TEE_RC=${PIPE_RC[1]}
+  if [ "$TEE_RC" -ne 0 ]; then
+    rm -f "$TMP"
+    echo "FATAL: inventory tee failed domain=$DOMAIN rc=$TEE_RC"
+    exit "$TEE_RC"
+  fi
+  if [ "$SCRIPT_RC" -ne 0 ]; then
+    rm -f "$TMP"
+    echo "FATAL: inventory failed domain=$DOMAIN rc=$SCRIPT_RC"
+    exit "$SCRIPT_RC"
+  fi
+  mv "$TMP" "$RESULT"
+  echo "CAPTION_SOURCE_INVENTORY_DONE domain=$DOMAIN result=$RESULT stderr=$STDERR_LOG" >&2

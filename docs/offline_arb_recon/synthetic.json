@@ -1,0 +1,68 @@
+{
+ "key": "synthetic",
+ "facts": {
+  "1_存储形态": {
+   "配置追溯链": "configs/stage256_redesign_naifu_arb_v1.yaml:48 sampling_config=/fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json → 该 json 第8-11行 manifest.real_synth_roots.synthetic='/s3-pixai-test-uw2/evan/mot_filtering_v1/t5_manifest/synthetic_v1/monet_synth' → training/dataline/manifest_index.py:88-104 list_shards() 用此根 glob *.parquet(命中 manifest_index.py:95) → training/dataline/complete_dataset.py:122-222 iter_real_synth_shard() 对 domain='synthetic' 调 image_fetch.py:98 monet_tar_path(src_root,src_shard)=os.path.join(src_root, src_shard.replace('.parquet','.tar')) 拼出真实 tar 路径,src_root 来自 manifest 列(非硬编码)",
+   "manifest_vs_物理数据分离": "manifest(t5_manifest/synthetic_v1/monet_synth/*.parquet, 64 shard, ~9.4MB/shard, 元数据/权重, 无图无caption文本)与物理源数据(src_root=/s3-mewtant-raw-datasets/jasperai/monet/v1.1.0, 每 src_shard 一对同名 .parquet(caption列)+.tar(图))是两套完全不同路径,ls 已验证. 证据: docs/AAA数据交付文档_GPIC+MONET+anime_v2_20260617.md:54 表格 + docs/数据+训练阶段_执行计划与进度_v1_20260629.md:60 (JCC 实测 'synthetic_v1 src_root=jasperai/monet/v1.1.0 + src_shard=synthetic/flux-klein/… → tar .../synthetic/flux-klein/0-0/000000.tar 真实存在')",
+   "格式": "webdataset tar, 未压缩 POSIX ustar. 命令验证 3 个子源(flux-klein/flux-schnell/z-image)各 1 个 shard: head -c2 均为 '2e 2f'(即普通文件名首字符'./' ,非 gzip 魔数 1f8b); dd skip=257 count=5 均读出 'ustar'. 三个 shard 实测大小 5,722,439,680B / 5,115,781,120B / 5,036,001,280B(均~5GB级,与线索一致)",
+   "shard规模": "flux-klein 360 个 tar、flux-schnell 450 个、z-image 630 个(find -iname *.tar 计数),总计 1440 个 tar shard,粗估总体量数TB级(未精确求和,find 已够轻量未做du)",
+   "tar成员结构(直接从原始tar文件头部逐块解析验证,未解码图像/未全量扫描,仅读6个512B header块+size字段)": "对 flux-klein/0-0/000000.tar 手动走了2组样本共12个成员(用 dd 读 name(offset+0,100B)与 size(offset+124,12B 八进制)字段,按 size 算下一个 512 对齐 offset): 每个 sample 由 6 个 tar member 组成 —— 1×.jpg(全分辨率图,本例544,354B) + 1×.json(1,479B, caption/metadata) + 4×.pth(embedding_clip-vit-base-patch32.pth 3625B / embedding_dinov2-vitg14.pth 7721B / embedding_sscd.pth 3625B / embedding_vae-dc-sana1p5-1p6b-...pth 34345B,后者即 SANA-VAE latent). key 前缀形如 '000_<16位hex>' ,与 image_fetch.py stream_tar_images 的 key 提取逻辑(m.name[:-4].split('/')[-1])吻合. 与 docs/_archive/数据集问题审计_complete_v1_dataline_20260625.md:102(M6, 'webdataset tar 每样本 = {key}.jpg+.json+4个.pth, jpg有效载荷仅74-75%')及 docs/AAA数据交付文档...:49 完全一致",
+   "代码消费方式证据": "training/dataline/image_fetch.py:103-130 stream_tar_images() 用 tarfile.open(tar_path,'r|') 顺序流式(非随机seek),遍历所有成员,仅 m.name.endswith('.jpg') 才 yield,其余(.json/.pth)被跳过丢弃(不读入内存,但仍需被tarfile流过bytes,即M6注释的'~25%带宽浪费'代价)"
+  },
+  "2_item身份": {
+   "稳定ID": "有. 字段名 uid(large_string), 全局唯一, 格式 'monet:{id}' (synthetic域与monet_real共用同一命名规则,以 uid 前缀区分域). 证据: docs/AAA数据交付文档_GPIC+MONET+anime_v2_20260617.md:135 schema表 + scripts/t5_build_synthetic_manifest.py:128 'uid': 'monet:' + m['id'].astype(str)",
+   "manifest路径": "/s3-pixai-test-uw2/evan/mot_filtering_v1/t5_manifest/synthetic_v1/monet_synth/*.parquet (64 shard)",
+   "schema(footer读取,pyarrow ParquetFile.schema_arrow,未 read_table)": "32列: uid,dataset,sub_source,src_root,src_shard,src_key,width(int32),height(int32),res_bucket,aes,aes_scorer,cluster_id,dominant_cat,caption_type,caption_tier,has_t1..4,cap_i1/original/florence/internvl/sharegpt4v/gemini,tok_i1/original/florence/internvl/sharegpt4v/gemini,synthetic(int8),holdout(int8)",
+   "num_rows(footer,pf.metadata.num_rows)": "抽样3个shard: synth_0000.parquet=215,761行、synth_0031=215,762、synth_0063=215,762;64 shard 合计 13,808,747(与docs声明的13,808,747精确吻合),均 num_row_groups=1",
+   "src_key语义": "MONET/synthetic的src_key==源parquet的'id'列=='__key__'(即tar成员名去.jpg后缀). 证据: docs/AAA数据交付文档...:56 'src_key == id == __key__(各源已抽验一致)'"
+  },
+  "3_宽高元数据": {
+   "manifest带width/height": "是,int32列,语义'原图宽高(loader据此分桶,含1024细分)'. 证据: schema footer 直接看到width/height两列; docs/AAA数据交付文档...:131-146 表格",
+   "三个loader对width/height的用法(manifest_index.py)": [
+    "load_real_synth_shard(gpic/monet_real/synthetic 共用, manifest_index.py:285-363): line296注释'REDESIGN: rich_v1/synthetic_v1 无 elig_* 列 → 不读,下面从 w/h 派生';line307-310 当elig_256/512/1024列不存在时,用 min(width,height) 阈值现算 elig；line345-348 width/height 本身也放进输出dict,但注释明确'bucketdist 快速审计用(免取图);其余路径不读,行为中性' → 即当前真实训练路径(iter_real_synth_shard)不用manifest的w/h做实际resize/分桶决策,只用于elig派生和审计脚本",
+    "load_anime_shard(manifest_index.py:408-491): width/height同样只用于elig派生(line447-449)和输出留存,注释同'bucketdist快速审计用(免取图)'",
+    "load_textatlas_shard(manifest_index.py:132-160): width/height用于现算elig_256(line151 short_dim>=256,因builder只产elig_512/1024),同样注释'其余路径不读'"
+   ],
+   "实际训练路径的分桶依据": "training/dataline/complete_dataset.py:196-203 (iter_real_synth_shard内): 图片被 decode_rgb() 解码后,用 img.size(PIL解码后的实际像素尺寸)喂给 bucketer.resize()/resize_crop_uint8() 做真正的分桶与resize,而非manifest的width/height列 —— 即当前架构里manifest w/h只是'旁路提示',真正决策仍需解码",
+   "manifest w/h 与实际图片尺寸的吻合度(既有审计,非本次验证)": "docs/AAA数据交付文档...:49 与 docs/采样config/t5_sampling_weights_v1.json:57 均声明'已实测.tar 图尺寸==manifest width/height'(历史审计结论,未标明样本量,本次未独立复核,建议列入needs_jcc做更大样本交叉验证)",
+   "EXIF orientation处理": "未发现任何处理层. grep -rn -i 'exif|orientation' 覆盖 training/dataline/*.py + docs/*.md + scripts/*.py 全部 0 命中. image_fetch.py:221-227 decode_rgb() 只做 Image.open(io.BytesIO(raw)).convert('RGB'),无 ImageOps.exif_transpose() 调用. 结论: manifest的width/height来源于上游(monet_manifest,非本仓库脚本计算,t5_build_synthetic_manifest.py:132只是直接搬运m['width']/m['height'])且从未与EXIF方向标签做协调;对synthetic(AI模型生成图)这通常非问题(生成管线一般不写EXIF方向标签),但代码机制上是个空白,若real域(GPIC/MONET真实照片)有旋转EXIF会静默不处理——本次未验证(不确定,标注)"
+  },
+  "4_随机访问": {
+   "现状": "顺序流+全量重扫,非逐条随机fetch. 证据链: complete_dataset.py:348-421 class _Producer.run() 的外层 while not stop_evt: rng.shuffle(order); for shard in order 是无限循环反复重洗shard顺序再顺序过一遍(无epoch边界);对每个src_shard,内层用 image_fetch.py:103-130 stream_tar_images(tar_path,'r|')顺序流过整个tar,只在遇到wanted_keys成员时才吐出,配合 complete_dataset.py:58 _TAR_SHUFFLE_CHUNK=256 做局部(256条内)乱序缓冲,而非真随机寻址",
+   "已有的随机单成员读取类": "image_fetch.py:273-309 class TarMemberReader(基于 tarfile.open(path,'r')全量建索引+getmember随机取),但 grep -rn 'TarMemberReader' 全仓库(排除.pyc)只命中定义处本身+ archive/streaming_arb_v1_20260709/ 里的归档副本,当前 complete_dataset.py 的 import 列表(29-30行)不含它 → 生产路径完全未使用,是死代码/备用件. 其docstring自陈'首次getmember会扫全量header(S3上慢),主路径请用stream_tar_images顺序读'",
+   "按item精确取数缺什么": "manifest的32列schema里没有任何tar member offset/length列(footer schema已核对,无此类字段);代码里也没有任何地方计算或缓存过offset/length(全仓库grep 'offset'/'length' 未见此类tar索引,唯一offset语义是crop_offset裁剪坐标,与tar无关)。本次人工用dd逐块读取tar header验证了webdataset的member布局规律(每条记录固定为 .jpg/.json/4×.pth 六个连续member,512字节对齐),这类offset目前必须靠顺序扫描(或TarMemberReader的隐式全量header扫描)才能拿到,没有现成的每item物理定位索引可复用——Phase-1若要精确随机访问,需要新建一份"
+  },
+  "5_静态vs动态": {
+   "结论": "固定文件集,离线已物化,非运行时生成. 证据: docs/数据+训练阶段_重设计方案_v1_20260629.md:46 'synthetic 池权威=synthetic_v1 13.8M(...已物化;z-image 5.9M+flux-schnell 4.4M+flux-klein 3.5M...)';scripts/t5_build_synthetic_manifest.py 是一次性离线构建脚本(读monet_manifest,筛keep&synthetic&!holdout,写64个parquet,~3min job)而非训练时调用;training/dataline/config.py:15-17 把synthetic归入REAL_SYNTH_DOMAINS,与monet_real/gpic走同一套静态parquet+tar loader(load_real_synth_shard),代码里没有任何生成/调用生成模型的路径",
+   "manifest本身尚有历史遗留脏数据未清": "synthetic_v1仍带6,565条holdout==1(建池早于holdout决策),loader在 manifest_index.py:301 keep=holdout==0 处过滤掉,不影响静态性判断"
+  },
+  "6_现有fetch缓存": {
+   "取图函数": "image_fetch.py:98 monet_tar_path()(路径拼接) + image_fetch.py:103-130 stream_tar_images()(主取图函数,domain='synthetic'与'monet_real'共用) + image_fetch.py:273-309 TarMemberReader(未使用,见上)",
+   "caption回源函数": "complete_dataset.py:85-96 _load_monet_caption_src(src_root,src_shard): p=os.path.join(src_root,src_shard),pq.read_table该caption源parquet(id+5种captioner文本列),按id建dict——注意这是每个src_shard处理一次的整shard parquet读取(600MB级),非逐item",
+   "缓存目录与键": "synthetic/monet_real 域完全没有磁盘缓存层(不同于anime域). anime有 image_fetch.py:133-215 fetch_url_bytes() 的 cache_dir(anime_cache_dir配置项)+文件名=url最后一段+魔数校验防撕裂写,但这套只服务R2 HTTP的anime,不适用synthetic. synthetic每次都是直接对S3挂载点(mountpoint-s3,/s3-mewtant-raw-datasets/...)做顺序tar流读,零本地缓存",
+   "失败重试语义": "synthetic/monet_real路径无逐item重试:stream_tar_images()遇FileNotFoundError/tarfile.TarError/OSError直接break并计入FETCH_STATS['tar_err:...'](image_fetch.py:121-130,仅日志+计数,不重试);producer层(complete_dataset.py:420-421)对整个shard的任何Exception也只是打印跳过、不重试,'重试'只靠外层无限while循环下次再轮到该shard(complete_dataset.py:366-368的rng.shuffle(order)全量重复). 对比anime域fetch_url_bytes()有显式3次重试+指数退避+4xx不重试的语义(image_fetch.py:164-197),synthetic无此机制",
+   "既有生产实测(非本次测,来自docs)": "docs/vae_latent_cache_v1_20260622.md:171-178 单进程吞吐探针(纯CPU fetch+decode+resize,与训练抢IO,保守下界): synthetic=3.9 img/s/proc(1024px tar最大最慢),对比gpic 51.7/anime 30.8/monet_real 11.2;line197 一次8rank生产JCC(evan-mot-vae-cache-256-tx49)里 'gpic/synth 0 fail'(monet_real 713 fail,anime因R2限流fail 10.5%)——即synthetic的S3挂载点tar顺序流读非常可靠(未见坏挂载/丢失问题),瓶颈是速度不是失败率"
+  },
+  "7_额外": {
+   "是否固定成品图还是有运行时生成成分": "纯离线成品图,无运行时生成. 见'5_静态vs动态'证据链;synthetic三个sub_source(flux-klein/flux-schnell/z-image)均为预先跑生成模型产出并打包好的webdataset tar,dataline只读不生成",
+   "square_only的物理依据": "有直接的经验审计证据(非本次测,引自代码内已落地的经验结论,但机制经本次代码走查证实无误): docs/数据+训练阶段_重设计方案_v1_20260629.md:130 明确写'bucketdist实测每域native桶分布(...**synth 100%方图**)'; docs/数据+训练阶段_执行计划与进度_v1_20260629.md:86 '监控实测re-resize率: ...synth 0.66=结构性(100%方→非方桶必裁)'. 该审计由 scripts/audit_naifu_arb_bucketdist_domain.py 产出(已读全文,100行): 它调用 iter_real_synth_shard(...,skip_image=False,...)对synthetic做真实decode(image_fetch.decode_rgb→PIL)+真实bucketer.resize(基于解码后img.size,非manifest w/h),把每条记录落到的bucket计数汇总成 native_bucket_dist —— 即'100%方图'结论来自对解码后真实像素宽高的实测,不是道听途说的假设. config里 stage256_redesign_naifu_arb_v1.yaml:101 native_bucket_dist.synthetic=[...仅index48处为1.0,其余全0...](95桶中恰好方图桶为1.0)与此吻合。物理原因合理:synthetic源=文生图模型(flux-klein/flux-schnell/z-image)按1024x1024方形分辨率生成,天然产出方图",
+   "square_only_domains配置与生效机制": "configs/stage256_redesign_naifu_arb_v1.yaml:95 square_only_domains: [synthetic, textatlas]; complete_dataset.py:478,524,742-791,906-910等多处实现'非方桶不把synthetic/textatlas re-resize进去'的护栏(MODE-A/MODE-B两套互斥补偿机制,较复杂,detail见代码734-791行注释)"
+  },
+  "本机操作合规性说明": "全程未对任何parquet调用read_table/to_pandas做全量载入,仅用 pq.ParquetFile(p).schema_arrow / .metadata.num_rows(footer级);未解码任何图片(唯一涉及'实测100%方图'的解码工作是引用既有代码内文档记录的历史JCC审计结果,非本次执行);未全量扫描tar,仅用dd对单个tar文件的前20个512B header块做定点偏移读取(纯header,未读取任何jpg/pth/json内容字节);未修改/创建/删除任何文件;未提交任何job"
+ },
+ "needs_jcc": [
+  "大样本交叉验证 manifest width/height 与实际解码图片尺寸(尤其检查是否存在EXIF orientation导致W/H互换的边界情况):对synthetic_v1若干shard抽样N=1000+,按manifest src_root/src_shard/src_key流式取图解码后比对img.size vs manifest width/height,统计不一致率(现有结论仅来自历史文档一句话声明,未知样本量)",
+  "冷/热延迟实测:对一个具体synthetic tar shard做冷启动(清cache/新进程)vs热(same-process重复访问)顺序流读取单条记录的端到端延迟分布(p50/p90/p99),用于评估tar range-read/shard-aware/reshard三种fetch adapter候选的可行性差异;当前只有历史的3.9 img/s/proc粗略吞吐探针,无延迟分布",
+  "验证TarMemberReader(image_fetch.py:273)在S3 mountpoint-s3上做随机getmember的真实耗时(是否真的要scan全部header,还是mountpoint-s3支持某种fast seek),以确定其能否作为Phase-1 L4 'tar range-read'后端的基础",
+  "对1440个synthetic tar shard做全集压缩格式扫描(本次仅抽样3个,每个子源1个),确认是否所有shard都是未压缩ustar(理论上应一致,因同一构建流程,但需覆盖验证以排除个别异常shard)",
+  "构建/验证一份实际的 tar member offset+length 索引原型(哪怕只对1-2个shard),实测构建耗时与索引体积,用于评估L1 raw catalog里'tar member offset/length'字段的构建成本",
+  "全量核对synthetic_v1的13,808,747行是否64个shard精确求和(本次只读了3个shard的footer num_rows做外推吻合,未逐一读64个shard footer)"
+ ],
+ "open_questions": [
+  "manifest的width/height是否为'解码前原始JPEG像素尺寸'还是经过某种下采样/预处理后的尺寸?本次只确认了它来自上游monet_manifest(未追溯到最初生成/写入width/height这两列的具体计算代码,该脚本不在mot_pilot_v1_cleanup_crop或data_analysis已定位的builder脚本范围内)",
+  "1440个synthetic tar shard里src_shard列的实际字符串格式是否严格等于'{sub_source}/{group}/{shardnum}.parquet'这一种模式,还是存在其他变体路径写法?本次只从执行文档的一次JCC实测引用+目录ls验证了这一种具体样例(synthetic/flux-klein/0-0/000000)",
+  "既然当前生产训练路径对manifest的w/h'不读、只用于审计'(manifest_index.py:345-348注释),Phase-1若要完全绕过解码、纯靠manifest元数据做bucket指派,是否需要先把这份w/h的可信度从'历史一次性审计声明'提升到'生产级持续校验'?这是决策问题,已列入needs_jcc但优先级由Evan定",
+  "square_only的'100%方图'结论来自 audit_naifu_arb_bucketdist_domain.py 的 max-samples=256 抽样(脚本默认值),没有找到更大规模的复核记录——是否需要在Phase-1里补一次更大样本量的复核,还是接受现有256样本审计结论作为'方图物理依据'已经足够?"
+ ],
+ "summary": "已完成 synthetic 域只读侦察,全部证据均带文件:行号或命令输出。核心结论:\n1) 存储=webdataset .tar(未压缩ustar,已验3子源共3个shard,均~5GB)+同名 .tar/.parquet 配对物理源(src_root=/s3-mewtant-raw-datasets/jasperai/monet/v1.1.0),与离线 manifest(t5_manifest/synthetic_v1/monet_synth,64 shard parquet)是两套完全分离的路径。手工解析tar header证实每条记录=6个member(.jpg+.json+4×.pth embedding,含SANA-VAE latent),与既有M6审计文档(74-75% jpg有效载荷)吻合。\n2) 有稳定唯一ID:uid='monet:{id}',manifest 32列 schema(footer读)含width/height(int32);64 shard 合计 13,808,747行(3 shard footer抽样吻合)。\n3) manifest 带 width/height,但当前生产 loader 明确注释\"其余路径不读,行为中性\"——真正分桶/resize用的是解码后img.size,manifest w/h 目前只服务elig派生与离线审计脚本。EXIF orientation:全仓库grep零命中,decode_rgb 无 exif_transpose 调用,机制上是空白(对AI生成图通常非问题,但未验证)。\n4) 现状=顺序流(tar 'r|' + 256条局部shuffle窗口),非随机访问;manifest无任何 tar member offset/length 字段;唯一的随机读类 TarMemberReader 是死代码(未被任何生产路径import/使用)。\n5) 静态离线已物化数据集,无运行时生成路径(builder脚本一次性跑,训练时只读)。\n6) fetch=image_fetch.py:stream_tar_images(核心,行103)+monet_tar_path(行98);synthetic/monet_real域零本地缓存、零重试(遇错直接跳过整shard,靠外层无限循环下次重扫);production JCC 历史记录 synth 0 fail(可靠但慢,3.9 img/s/proc单进程探针)。\n7) square-only 有真实实测依据:audit_naifu_arb_bucketdist_domain.py(已读全文)对解码后真实像素做过256样本native桶分布测量,synth 100%落入方图桶,与生成模型(flux-klein/schnell/z-image)天然产1024x1024方图的物理原因一致。\n6项重IO/CPU验证已列入needs_jcc(w/h大样本交叉核验、冷热延迟、TarMemberReader真实耗时、全量压缩格式扫描、offset索引原型构建成本、64 shard逐一核数)。3个待Evan拍板的open_questions已列出。"
+}

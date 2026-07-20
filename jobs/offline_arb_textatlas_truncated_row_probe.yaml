@@ -1,0 +1,125 @@
+name: evan-offarb-textatlas-truncated-row-probe
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  /fsx/evan/mot_code/venv-gpu/bin/python - <<'PYEOF'
+  import hashlib
+  import io
+  import json
+  from pathlib import Path
+
+  import numpy as np
+  import pyarrow.parquet as pq
+  from PIL import Image, ImageFile
+
+  row_id = 94_682_834
+  row_base = 16_499_287 + 39_998_248 + 20_000_000 + 13_802_182
+  catalog_path = Path(
+      "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/"
+      "offline_arb_catalog_v1/textatlas.parquet"
+  )
+
+  def locate(parquet_file, index):
+      base = 0
+      for rg in range(parquet_file.num_row_groups):
+          rows = parquet_file.metadata.row_group(rg).num_rows
+          if index < base + rows:
+              return rg, index - base
+          base += rows
+      raise AssertionError((index, base))
+
+  cat = pq.ParquetFile(catalog_path)
+  cat_rg, cat_within = locate(cat, row_id - row_base)
+  columns = [
+      "row_id", "uid", "domain", "bucket_idx", "width", "height", "image_path",
+      "image_parquet_path", "image_row_group", "image_row_in_group",
+  ]
+  catalog = cat.read_row_group(cat_rg, columns=columns, use_threads=False).slice(cat_within, 1).to_pylist()[0]
+  assert catalog["row_id"] == row_id and catalog["domain"] == "textatlas"
+  print("CATALOG " + json.dumps(catalog, sort_keys=True))
+
+  identities = []
+  truncated_pixel_shas = []
+  appended = []
+  for attempt in range(5):
+      source = pq.ParquetFile(catalog["image_parquet_path"])
+      table = source.read_row_group(
+          int(catalog["image_row_group"]), columns=["image", "image_path"], use_threads=False
+      )
+      value = table.slice(int(catalog["image_row_in_group"]), 1).to_pylist()[0]
+      assert value["image_path"] == catalog["image_path"]
+      raw = bytes(value["image"]["bytes"])
+      identity = {
+          "attempt": attempt,
+          "bytes": len(raw),
+          "sha256": hashlib.sha256(raw).hexdigest(),
+          "head_hex": raw[:16].hex(),
+          "tail_hex": raw[-16:].hex(),
+          "has_eoi": raw.endswith(b"\xff\xd9"),
+      }
+      identities.append(identity)
+      try:
+          with Image.open(io.BytesIO(raw)) as image:
+              image.load()
+          identity["strict"] = "PASS"
+      except Exception as exc:
+          identity["strict"] = f"{type(exc).__name__}:{exc}"
+
+      previous = ImageFile.LOAD_TRUNCATED_IMAGES
+      try:
+          ImageFile.LOAD_TRUNCATED_IMAGES = True
+          with Image.open(io.BytesIO(raw)) as image:
+              rgb = image.convert("RGB")
+              pixels = np.asarray(rgb, dtype=np.uint8).copy()
+              identity["truncated_size"] = list(rgb.size)
+              identity["truncated_pixel_sha256"] = hashlib.sha256(pixels.tobytes()).hexdigest()
+              truncated_pixel_shas.append(identity["truncated_pixel_sha256"])
+      finally:
+          ImageFile.LOAD_TRUNCATED_IMAGES = previous
+
+      repaired = raw + b"\xff\xd9"
+      repair = {"bytes": len(repaired), "sha256": hashlib.sha256(repaired).hexdigest()}
+      try:
+          with Image.open(io.BytesIO(repaired)) as image:
+              rgb = image.convert("RGB")
+              pixels = np.asarray(rgb, dtype=np.uint8).copy()
+              repair.update(
+                  status="PASS",
+                  size=list(rgb.size),
+                  pixel_sha256=hashlib.sha256(pixels.tobytes()).hexdigest(),
+              )
+      except Exception as exc:
+          repair.update(status="FAIL", error=f"{type(exc).__name__}:{exc}")
+      appended.append(repair)
+      print("READ " + json.dumps(identity, sort_keys=True))
+      print("APPEND_EOI " + json.dumps(repair, sort_keys=True))
+
+  payload_ids = {(x["bytes"], x["sha256"], x["head_hex"], x["tail_hex"]) for x in identities}
+  assert len(payload_ids) == 1
+  assert len(set(truncated_pixel_shas)) == 1
+  assert all(x["status"] == "PASS" for x in appended)
+  assert len({x["pixel_sha256"] for x in appended}) == 1
+  assert appended[0]["pixel_sha256"] == truncated_pixel_shas[0]
+  print(
+      "TEXTATLAS_TRUNCATED_ROW_PROBE_PASS "
+      + json.dumps(
+          {
+              "row_id": row_id,
+              "payload": identities[0],
+              "append_eoi": appended[0],
+              "pixel_equivalent": True,
+          },
+          sort_keys=True,
+      )
+  )
+  PYEOF

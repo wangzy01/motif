@@ -1,0 +1,57 @@
+# Independent full verification of the Stage256 semantic overlay.
+name: evan-offarb-s256-20260718-overlay-verify-v1
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 160
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=8 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=8
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  ROOT=$BASE/offline_arb_stage256_20260718_semantic_v1
+  OVERLAY=$ROOT/overlay
+  CAT=$BASE/offline_arb_catalog_v1
+  SIDECAR=$BASE/offline_arb_caption_sidecar_v1
+  SOURCE_MANIFEST=$BASE/offline_arb_anime_caption_source_manifest_v1/header.json
+  SAMPLING=/fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json
+  OUT=$ROOT/OVERLAY_VERIFY_SUCCESS.json
+  SCRIPT=scripts/offline_arb/validate_stage256_semantic_overlay.py
+
+  test -f "$OVERLAY/_SUCCESS" && test ! -L "$OVERLAY/_SUCCESS"
+  test -f "$SCRIPT" && test ! -L "$SCRIPT"
+  test ! -e "$OUT" && test ! -L "$OUT" \
+    || { echo "FATAL: create-once overlay verification receipt exists: $OUT"; exit 40; }
+  mkdir -p /local/evan/stage256_20260718_overlay_validate
+  "$PY" -m py_compile "$SCRIPT"
+  "$PY" "$SCRIPT" --self-test
+  timeout --signal=TERM --kill-after=60s 10800s \
+    "$PY" "$SCRIPT" \
+      --overlay-root "$OVERLAY" \
+      --catalog-root "$CAT" \
+      --catalog-header "$CAT/header.json" \
+      --caption-sidecar-root "$SIDECAR" \
+      --caption-sidecar-header "$SIDECAR/header.json" \
+      --anime-source-manifest "$SOURCE_MANIFEST" \
+      --sampling-config "$SAMPLING" \
+      --repo-root /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop \
+      --work-dir /local/evan/stage256_20260718_overlay_validate \
+      --workers 14 \
+      --receipt "$OUT"
+  test -f "$OUT" && test ! -L "$OUT"
+  "$PY" - "$OUT" <<'PYEOF'
+  import json, sys
+  value = json.load(open(sys.argv[1], encoding="utf-8"))
+  assert value.get("status") == "PASS", value
+  assert value.get("format") == "offline_arb_semantic_overlay_validation_v1", value
+  assert value["checks"]["anime_full_sidecar_strict_nl"]["tag_only_selected"] == 0, value
+  assert value.get("overlay_header_sha256"), value
+  print("OVERLAY_VERIFY_PASS", json.dumps(value, sort_keys=True)[:2000])
+  PYEOF

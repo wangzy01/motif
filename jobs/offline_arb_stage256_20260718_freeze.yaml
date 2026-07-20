@@ -1,0 +1,92 @@
+# CPU-only immutable release freeze.  It first re-verifies the complete prior
+# catalog/sidecar/animefreq/source freeze, then hashes the new overlay, W8/W64
+# plans, dataset package and config into a new release manifest.
+name: evan-offarb-s256-20260718-freeze-v1
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 160
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  CACHE_TAG=${JCC_JOB_ID:-${JOB_ID:-manual}}
+  export PYTHONPYCACHEPREFIX="/local/evan/stage256_20260718_pycache/$CACHE_TAG/$(hostname)"
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  ROOT=$BASE/offline_arb_stage256_20260718_semantic_v1
+  CFG=configs/stage256_20260718_causalmlf_offline_exact_v1.yaml
+  PACKAGE=stage256_20260718
+  UPSTREAM_FREEZE=$BASE/offline_arb_plans_v1/FREEZE_MANIFEST.json
+  UPSTREAM_VERIFY=$ROOT/UPSTREAM_FREEZE_VERIFY.json
+  FREEZE=$ROOT/FREEZE_MANIFEST.json
+  CREATE=$ROOT/FREEZE_CREATE_SUCCESS.json
+  VERIFY=$ROOT/FREEZE_VERIFY_SUCCESS.json
+  SCRIPT=scripts/offline_arb/freeze_stage256_20260718_release.py
+  ARTIFACT_BUILDTAG=evan-mot-crop-offlinearb-gpic-s3-production-build-zg8g
+  ARTIFACT_ROOT=$BASE/offline_gpic_blob_v1_release/$ARTIFACT_BUILDTAG
+  MANIFEST_SHA256=a18ba1f1250e3b00abdc1051dc71e08a254b8855d5b61b9975e88d2e6ae2ee05
+
+  test -f "$ROOT/SEMANTIC_VALIDATE_SUCCESS.json" && test ! -L "$ROOT/SEMANTIC_VALIDATE_SUCCESS.json"
+  test -f "$UPSTREAM_FREEZE" && test ! -L "$UPSTREAM_FREEZE"
+  test -f "$SCRIPT" && test ! -L "$SCRIPT"
+  test -d "$PACKAGE" && test ! -L "$PACKAGE"
+  for OUT in "$UPSTREAM_VERIFY" "$FREEZE" "$CREATE" "$VERIFY"; do
+    test ! -e "$OUT" && test ! -L "$OUT" \
+      || { echo "FATAL: create-once freeze output exists: $OUT"; exit 40; }
+  done
+  "$PY" -m py_compile "$SCRIPT"
+
+  # Complete upstream verification is intentionally expensive and belongs here,
+  # never in the smoke/formal GPU jobs.
+  timeout --signal=TERM --kill-after=60s 14400s \
+    "$PY" scripts/offline_arb/make_freeze_manifest.py \
+      --verify-freeze --freeze "$UPSTREAM_FREEZE" \
+      --repo /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop \
+      --plan "$BASE/offline_arb_plans_v1/w64_prod/plan" \
+      --catalog-root "$BASE/offline_arb_catalog_v1" \
+      --sampling /fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json \
+      --animefreq-root "$BASE/offline_arb_animefreq_v1" \
+      --sidecar-root "$BASE/offline_arb_caption_sidecar_v1" \
+      > "$UPSTREAM_VERIFY.tmp"
+  mv "$UPSTREAM_VERIFY.tmp" "$UPSTREAM_VERIFY"
+  "$PY" - "$UPSTREAM_VERIFY" <<'PYEOF'
+  import json, sys
+  value = json.load(open(sys.argv[1], encoding="utf-8"))
+  assert value.get("status") == "PASS" and value.get("mode") == "verify-freeze", value
+  PYEOF
+
+  timeout --signal=TERM --kill-after=60s 14400s \
+    "$PY" "$SCRIPT" --create \
+      --release-root "$ROOT" \
+      --config "$CFG" \
+      --dataset-package "$PACKAGE" \
+      --overlay-root "$ROOT/overlay" \
+      --smoke-plan-root "$ROOT/w8_smoke/plan" \
+      --formal-plan-root "$ROOT/w64_prod/plan" \
+      --upstream-freeze "$UPSTREAM_FREEZE" \
+      --upstream-verify "$UPSTREAM_VERIFY" \
+      --gpic-artifact-root "$ARTIFACT_ROOT" \
+      --gpic-manifest-sha256 "$MANIFEST_SHA256" \
+      --manifest "$FREEZE" --output "$CREATE"
+  timeout --signal=TERM --kill-after=60s 14400s \
+    "$PY" "$SCRIPT" --verify \
+      --release-root "$ROOT" --manifest "$FREEZE" --output "$VERIFY"
+  "$PY" - "$CREATE" "$VERIFY" "$FREEZE" <<'PYEOF'
+  import hashlib, json, pathlib, sys
+  create_path, verify_path, freeze_path = map(pathlib.Path, sys.argv[1:])
+  create = json.load(open(create_path, encoding="utf-8"))
+  verify = json.load(open(verify_path, encoding="utf-8"))
+  assert create.get("status") == verify.get("status") == "PASS", (create, verify)
+  digest = hashlib.sha256(freeze_path.read_bytes()).hexdigest()
+  assert create.get("freeze_sha256") == verify.get("freeze_sha256") == digest, (create, verify, digest)
+  assert int(verify.get("tag_only_exposure", -1)) == 0, verify
+  print("STAGE256_20260718_FREEZE_PASS", digest)
+  PYEOF

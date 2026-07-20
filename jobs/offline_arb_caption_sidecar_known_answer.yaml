@@ -1,0 +1,41 @@
+# Target-image Arrow IPC known-answer and validator self-test.  The first run
+# generated the frozen vector; subsequent runs prove the hardcoded vector plus
+# physical-null casts, illegal-type rejection, list/unicode, and digest checks.
+name: offarb-caption-known-answer
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 32
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  HOST=$(hostname)
+  JOBTAG=${HOST%-*}
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  OUT=$BASE/offline_arb_caption_sidecar_known_answer/$JOBTAG
+  LOCAL_TMP=/local/evan/offarb_caption_known_answer_$JOBTAG
+  mkdir -p "$OUT" "$LOCAL_TMP/pycache"
+  export PYTHONPYCACHEPREFIX=$LOCAL_TMP/pycache
+
+  "$PY" -m py_compile \
+    scripts/offline_arb/caption_sidecar_contract.py \
+    scripts/offline_arb/verify_caption_sidecar.py
+  VALUE=$("$PY" scripts/offline_arb/verify_caption_sidecar.py --print-known-answer)
+  if ! [[ "$VALUE" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "FATAL: malformed known-answer output: $VALUE" >&2
+    exit 42
+  fi
+  printf '%s\n' "$VALUE" | tee "$OUT/known_answer_sha256.txt"
+  if [ "$VALUE" != "9bd23247c702ea0b2f3c104059cb64cbb9cbf15fc8685b67b09b394b1c9dc72d" ]; then
+    echo "FATAL: target-image known-answer drift: $VALUE" >&2
+    exit 43
+  fi
+  "$PY" scripts/offline_arb/verify_caption_sidecar.py --self-test \
+    | tee "$OUT/validator_selftest.json"

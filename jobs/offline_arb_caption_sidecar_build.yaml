@@ -1,0 +1,75 @@
+# OFFLINE_ARB_V1: build the immutable five-domain typed caption sidecar.
+#
+# Five independent CPU workers map 1:1 to domains.  A completed domain is
+# content-addressed by catalog_hash and safely reusable after a retry.  Every
+# worker attempts finalization; the last domain to finish observes all five
+# verified markers, takes the shared finalize lock, and atomically publishes the
+# exact formal root.  Logs live outside that root because runtime requires its
+# entries to be exactly header.json, _SUCCESS, and the five domain directories.
+#
+# Do not submit this template until the bounded diagnostic/self-test JCC gate has
+# passed.  This file is a submission template only; Codex does not submit it.
+name: evan-mot-crop-offlinearb-caption-sidecar-build-v3
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 5
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 256
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  CATALOG=$BASE/offline_arb_catalog_v1
+  OUTPUT=$BASE/offline_arb_caption_sidecar_v1
+  WORK=$BASE/.offline_arb_caption_sidecar_v1.work
+  LOGROOT=$BASE/offline_arb_caption_sidecar_build_logs
+
+  HOST=$(hostname)
+  NODE_RANK=${HOST##*-}
+  JOBTAG=${HOST%-*}
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_caption_sidecar/$JOBTAG/$NODE_RANK
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+  case "$NODE_RANK" in
+    0) DOMAIN=anime ;;
+    1) DOMAIN=monet_real ;;
+    2) DOMAIN=gpic ;;
+    3) DOMAIN=synthetic ;;
+    4) DOMAIN=textatlas ;;
+    *) echo "FATAL: unexpected node rank $NODE_RANK for five-domain build"; exit 21 ;;
+  esac
+  mkdir -p "$LOGROOT/$JOBTAG"
+  test -f "$CATALOG/header.json" || { echo "FATAL: catalog header missing"; exit 34; }
+
+  # Syntax and codec self-test run on JCC only, before this worker reads its
+  # production catalog.  Repeating the tiny test on five nodes is intentional:
+  # it also checks that every image has the same PyArrow IPC implementation.
+  "$PY" -m py_compile \
+    scripts/offline_arb/caption_sidecar_contract.py \
+    scripts/offline_arb/build_caption_sidecar.py
+  "$PY" scripts/offline_arb/build_caption_sidecar.py --self-test
+
+  set +e
+  timeout --signal=TERM --kill-after=120s 172800s \
+    "$PY" scripts/offline_arb/build_caption_sidecar.py \
+      --catalog-root "$CATALOG" \
+      --output-root "$OUTPUT" \
+      --work-root "$WORK" \
+      --domain "$DOMAIN" \
+      --source-workers 14 \
+      --request-partitions 256 \
+    2>&1 | tee "$LOGROOT/$JOBTAG/$DOMAIN.log"
+  PIPE_RC=("${PIPESTATUS[@]}")
+  RC=${PIPE_RC[0]}
+  TEE_RC=${PIPE_RC[1]}
+  set -e
+  if [ "$TEE_RC" -ne 0 ]; then
+    echo "FATAL: evidence tee failed rc=$TEE_RC"; exit "$TEE_RC"
+  fi
+  echo "==== CAPTION SIDECAR domain=$DOMAIN exit_code=$RC ===="
+  exit "$RC"

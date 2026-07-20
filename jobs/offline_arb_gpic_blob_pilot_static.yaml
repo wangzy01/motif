@@ -1,0 +1,176 @@
+# CPU16, no-network synthetic/static gate for offline_gpic_blob_v1 pilot.
+name: evan-mot-crop-offlinearb-gpic-blob-pilot-static
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 32
+maxRetries: 0
+command: |
+  set -euo pipefail
+  umask 077
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1
+  export PYTHONFAULTHANDLER=1
+  export PYTHONHASHSEED=0
+  export PYTHONDONTWRITEBYTECODE=1
+  export OMP_NUM_THREADS=1
+  export MKL_NUM_THREADS=1
+  export OPENBLAS_NUM_THREADS=1
+  export NUMEXPR_NUM_THREADS=1
+  export ARROW_NUM_THREADS=1
+
+  HOST=$(hostname)
+  [ "${HOST##*-}" = 0 ] || { echo "FATAL: static worker identity drift"; exit 2; }
+  JOBTAG=${HOST%-0}
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  RUNNER=$REPO/scripts/offline_arb/run_offline_gpic_blob_pilot.py
+  ANALYZER=$REPO/scripts/offline_arb/analyze_offline_gpic_blob_pilot.py
+  TEST=$REPO/scripts/offline_arb/test_offline_gpic_blob_pilot_static.py
+  SELF=$REPO/jobs/offline_arb_gpic_blob_pilot_static.yaml
+  BUILD=$REPO/jobs/offline_arb_gpic_blob_pilot_build.yaml
+  S3_BUILD=$REPO/jobs/offline_arb_gpic_blob_pilot_s3_build.yaml
+  REPLAY=$REPO/jobs/offline_arb_gpic_blob_pilot_replay.yaml
+  ANALYZE=$REPO/jobs/offline_arb_gpic_blob_pilot_analyze.yaml
+  ROOT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/.offline_gpic_blob_static/$JOBTAG
+
+  for FILE in "$RUNNER" "$ANALYZER" "$TEST" "$SELF" "$BUILD" "$S3_BUILD" "$REPLAY" "$ANALYZE"; do
+    [ -f "$FILE" ] && [ ! -L "$FILE" ] && [ -s "$FILE" ] \
+      || { echo "FATAL: invalid static input"; exit 2; }
+  done
+  [ ! -e "$ROOT" ] && [ ! -L "$ROOT" ] \
+    || { echo "FATAL: static namespace is not fresh"; exit 2; }
+  cleanup() {
+    case "$ROOT" in
+      /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/.offline_gpic_blob_static/*)
+        rm -rf -- "$ROOT"
+        ;;
+      *) echo "FATAL: refusing unsafe static cleanup" >&2; return 1 ;;
+    esac
+  }
+  trap cleanup EXIT
+
+  "$PY" -m py_compile "$RUNNER" "$ANALYZER" "$TEST"
+  "$PY" - "$BUILD" "$S3_BUILD" "$REPLAY" "$ANALYZE" <<'PYEOF'
+  import subprocess
+  import sys
+  from pathlib import Path
+
+  import yaml
+
+  commands = {}
+  for raw in sys.argv[1:]:
+      path = Path(raw)
+      value = yaml.safe_load(path.read_text(encoding="utf-8"))
+      for key, expected in {
+          "numWorkers": 1,
+          "gpuPerWorker": 0,
+          "cpuPerWorker": 16,
+          "maxRetries": 0,
+      }.items():
+          if value.get(key) != expected:
+              raise SystemExit(f"FATAL: {path.name} {key} drift")
+      command = value.get("command")
+      if not isinstance(command, str):
+          raise SystemExit(f"FATAL: {path.name} command missing")
+      subprocess.run(["bash", "-n"], input=command, text=True, check=True)
+      commands[path.name] = command
+      for token in ("pip install", "set -x", "set -eux", "rm -rf /s3"):
+          if token in command:
+              raise SystemExit(f"FATAL: {path.name} forbidden token present: {token}")
+
+  build = commands["offline_arb_gpic_blob_pilot_build.yaml"]
+  for token in (
+      "FSX_FULL_ROWS=100000",
+      "COMPARE_ROWS=20000",
+      "SOURCE_SCAN_ROWS_PER_ARM=4000",
+      "--exclude-sample-rows \"$FSX_FULL_ROWS\"",
+      "--stripe-count 0",
+      "--source-order path",
+      "--max-byte-imbalance 1.10",
+  ):
+      if token not in build:
+          raise SystemExit(f"FATAL: build safety token missing: {token}")
+  if '"$RUNNER" replay' in build:
+      raise SystemExit("FATAL: builder job contains replay")
+  if "receipt_sha256" not in build:
+      raise SystemExit("FATAL: build receipt self-hash missing")
+
+  s3 = commands["offline_arb_gpic_blob_pilot_s3_build.yaml"]
+  for token in (
+      "ENABLE_S3_WRITE=false",
+      "SOURCE_BUILD_JOBTAG=",
+      "--backend mountpoint_s3",
+      "--max-total-source-bytes 4294967296",
+      "--write-authority offline-gpic-blob-v1-pilot-write-authorized",
+  ):
+      if token not in s3:
+          raise SystemExit(f"FATAL: S3 safety token missing: {token}")
+  if "receipt_sha256" not in s3 or "s3_manifest_raw_sha256" not in s3:
+      raise SystemExit("FATAL: S3 receipt closure missing")
+
+  replay = commands["offline_arb_gpic_blob_pilot_replay.yaml"]
+  for token in (
+      "SOURCE_BUILD_JOBTAG=",
+      "INCLUDE_S3=false",
+      '"$RUNNER" replay',
+      "cold_unique_region capacity_authority 0",
+      "full_coverage integrity_warm 1",
+      "--min-cold-regions 64",
+  ):
+      if token not in replay:
+          raise SystemExit(f"FATAL: replay isolation token missing: {token}")
+  if '"$RUNNER" build' in replay:
+      raise SystemExit("FATAL: replay job contains builder")
+  for stem in ("full100k", "fsx_s0b1", "fsx_s0b4", "s3_s0b4"):
+      if replay.index(stem + "_capacity") >= replay.index(stem + "_integrity"):
+          raise SystemExit(f"FATAL: {stem} integrity appears before cold authority")
+  runner_text = Path("scripts/offline_arb/run_offline_gpic_blob_pilot.py").read_text(encoding="utf-8")
+  analyzer_text = Path("scripts/offline_arb/analyze_offline_gpic_blob_pilot.py").read_text(encoding="utf-8")
+  if "/proc/sys/kernel/random/boot_id" not in runner_text:
+      raise SystemExit("FATAL: boot-id source path missing")
+  for token in (
+      "boot_id_sha256",
+      "boot_id_raw_published",
+      "capacity_authority",
+      "INCONCLUSIVE_FOR_PRODUCTION",
+  ):
+      if token not in runner_text or token not in analyzer_text:
+          raise SystemExit(f"FATAL: cache-host identity token missing: {token}")
+  for token in ("REPLAY_COLD_REGION_BYTES", "REPLAY_POTENTIAL_READAHEAD_BYTES"):
+      if token not in runner_text:
+          raise SystemExit(f"FATAL: cold-region token missing: {token}")
+  for token in (
+      "publish_directory_noreplace",
+      "claim_directory_hardlink_files_success_last",
+      "claim_directory_hardlink_files_failed_root_no_success",
+      "_FALLBACK_BEFORE_DIRECTORY_CLAIM_HOOK",
+      "_POST_COMMIT_DURABILITY_HOOK",
+      "CommittedSyncUnconfirmed",
+      "os.link",
+  ):
+      if token not in runner_text:
+          raise SystemExit(f"FATAL: Lustre no-clobber fallback token missing: {token}")
+
+  analyze = commands["offline_arb_gpic_blob_pilot_analyze.yaml"]
+  for token in (
+      "SOURCE_BUILD_JOBTAG=",
+      "SOURCE_REPLAY_JOBTAG=",
+      "--exact-pair fsx_s0b4=s3_s0b4",
+      "--require-distinct-runtime-hosts",
+      "--enforce-pilot-shape",
+      "--build-receipt",
+      "--s3-build-receipt",
+      "--runner \"$RUNNER\"",
+      "--job-spec \"$SELF\"",
+  ):
+      if token not in analyze:
+          raise SystemExit(f"FATAL: analyzer binding token missing: {token}")
+  PYEOF
+  timeout --preserve-status --signal=TERM --kill-after=30s 900s \
+    "$PY" "$TEST" --root "$ROOT" --job-spec "$SELF"
+  echo "OFFLINE_GPIC_BLOB_PILOT_STATIC_JCC_PASS"

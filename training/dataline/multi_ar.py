@@ -77,6 +77,30 @@ def build_adaptive_buckets(target_area: int = 262144, divisor: int = 16,
     return sorted(seen.keys(), key=lambda hw: (hw[1] / hw[0], hw[0] * hw[1], hw[0], hw[1]))
 
 
+def nearest_allowed_bucket(bidx: int, buckets: list[tuple[int, int]], allowed) -> int:
+    """bidx 不在 allowed（剪枝后的保留桶集）时 → 折到最近保留桶（主序 |Δlog-AR|,次序 |Δ面积|）。
+    调度剪枝（bucket_prob_floor）配套：producer 侧把本会落进稀有桶的图直接指派到最近保留桶,
+    一次 resize 到位,不产生调度不到的死库存。"""
+    if allowed is None or bidx in allowed:
+        return bidx
+    h0, w0 = buckets[bidx]
+    lar0 = math.log(w0 / h0)
+    a0 = h0 * w0
+    return min(allowed, key=lambda i: (abs(math.log(buckets[i][1] / buckets[i][0]) - lar0),
+                                       abs(buckets[i][0] * buckets[i][1] - a0)))
+
+
+def buckets_by_ar_distance(bidx: int, buckets: list[tuple[int, int]]) -> list[int]:
+    """全桶按到 bidx 的距离升序（主序 |Δlog-AR|,次序 |Δ面积|;与 nearest_allowed_bucket 同度量）。
+    item_queue re-resize 兜底取样用：AR 最近桶优先,裁剪幅度收敛到相邻桶级,首元素恒为 bidx 自身。"""
+    h0, w0 = buckets[bidx]
+    lar0 = math.log(w0 / h0)
+    a0 = h0 * w0
+    return sorted(range(len(buckets)),
+                  key=lambda i: (abs(math.log(buckets[i][1] / buckets[i][0]) - lar0),
+                                 abs(buckets[i][0] * buckets[i][1] - a0)))
+
+
 def square_index(buckets: list[tuple[int, int]]) -> int:
     """方图桶（H==W）下标；adaptive 表可能有多个方桶，取面积最大的。"""
     square = [(i, h * w) for i, (h, w) in enumerate(buckets) if h == w]
@@ -192,9 +216,11 @@ class BucketSchedule:
         return [0.40 if i == square_idx else rest for i in range(n)]
 
     def pick(self, step: int) -> int:
-        """确定性选桶：同 (base_seed, step) → 同结果（跨 rank 一致）。"""
+        """确定性选桶：同 (base_seed, step) → 同结果（跨 rank 一致）。
+        min() 防御 cum[-1] 因浮点 ulp 略小于 1.0 而 rng.random() 落在其右侧 → 越界（~1e-16/步,
+        但代价一行;越界会 IndexError 杀 rank + 挂死 peers）。"""
         rng = np.random.default_rng(self.base_seed * 1_000_003 + int(step))
-        return int(np.searchsorted(self.cum, rng.random(), side="right"))
+        return int(min(np.searchsorted(self.cum, rng.random(), side="right"), self.n - 1))
 
 
 class Bucketer:
@@ -204,7 +230,7 @@ class Bucketer:
     def __init__(self, buckets: list[tuple[int, int]], square_idx: int, ds,
                  adaptive: bool = False, target_area: int = 262144,
                  divisor: int = 16, no_upscale: bool = True,
-                 max_aspect: float = 4.0):
+                 max_aspect: float = 4.0, allowed=None):
         self.buckets = buckets
         self.square_idx = int(square_idx)
         self.ds = ds
@@ -213,6 +239,8 @@ class Bucketer:
         self.divisor = int(divisor)
         self.no_upscale = bool(no_upscale)
         self.max_aspect = float(max_aspect)
+        # 调度剪枝（bucket_prob_floor）配套：None=不剪（旧行为）;否则 native 指派被折进保留桶集
+        self.allowed = frozenset(allowed) if allowed is not None else None
 
     def resize(self, img: Image.Image, image_size: int, v_anchor: float = 0.5):
         """→ (u8 HWC, bucket_idx)。v_anchor 透传给竖直裁剪锚点（默认 0.5 逐字节不变；缺头修复走该域 anchor 保头）。
@@ -230,6 +258,7 @@ class Bucketer:
                                               self.no_upscale, self.max_aspect)
             else:
                 bidx = assign_bucket(img.width, img.height, self.buckets)
+            bidx = nearest_allowed_bucket(bidx, self.buckets, self.allowed)   # 剪枝折算（allowed=None 时恒等）
             H, W = self.buckets[bidx]
             return resize_crop_to_bucket(img, H, W, v_anchor), bidx
         return resize_crop_uint8(img, image_size, v_anchor), self.square_idx

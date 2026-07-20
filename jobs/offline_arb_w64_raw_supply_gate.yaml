@@ -1,0 +1,1094 @@
+# W64 production-width raw-supply diagnostic: 8 CPU nodes x 8 gloo ranks.
+#
+# This job consumes plan steps 0..191 through the loader's raw publication
+# boundary and never decodes an image.  It requires and fully verifies the
+# externally rebuilt formal freeze, then preserves dataset telemetry byte-for-
+# byte.  It has no performance analyzer and cannot authorize FORMAL by itself.
+name: evan-mot-crop-offlinearb-w64-raw-supply-gate
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 8
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 128
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_arb_w64_raw.$(hostname)
+  export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 NUMEXPR_NUM_THREADS=2 ARROW_NUM_THREADS=2
+  export OFFLINE_ARB_STEP_TIMEOUT_S=1800
+  export OFFLINE_ARB_GPIC_THREADS_PER_NODE=16
+  export OFFLINE_ARB_PREFETCH_STEPS=4
+  export OFFLINE_ARB_PROFILE_WINDOWS=0
+  export OFFLINE_ARB_WAIT_LOG_THRESHOLD_S=0.000001
+  export OFFLINE_ARB_IO_STATE_EVERY_STEPS=1
+  unset OFFLINE_ARB_IO_TELEMETRY_DIR OFFLINE_ARB_ATTEMPT_JOBTAG OFFLINE_ARB_ATTEMPT_NONCE OFFLINE_ARB_ATTEMPT_HOST
+  unset OFFLINE_ARB_SIDECAR_HEADER_SHA256 OFFLINE_ARB_SIDECAR_RELEASE_DIGEST OFFLINE_ARB_SMOKE_DATASET_CONFIG
+  unset MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_ ARROW_DEFAULT_MEMORY_POOL LD_PRELOAD TCMALLOC_RELEASE_RATE
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/anime_img_cache "$PYTHONPYCACHEPREFIX"
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  RUN_ID=stage256_offline_exact_w64_raw_supply_gate_20260712
+  CFG=$REPO/configs/stage256_offline_exact_v1.yaml
+  PLAN=$BASE/offline_arb_plans_v1/w64_prod/plan
+  CAT=$BASE/offline_arb_catalog_v1
+  ANIME_FREQ=$BASE/offline_arb_animefreq_v1
+  SIDECAR=$BASE/offline_arb_caption_sidecar_v1
+  SAMPLING=/fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json
+  FREEZE=$BASE/offline_arb_plans_v1/FREEZE_MANIFEST.json
+  RUNNER_SELF=$REPO/scripts/offline_arb/run_w64_raw_supply_gate.py
+  YAML_SELF=$REPO/jobs/offline_arb_w64_raw_supply_gate.yaml
+  SOURCE_SELF=$REPO/training/dataline_offline/offline_dataset.py
+  NNODES=8
+  LOCAL_RANKS=8
+  PORT=29773
+
+  test -f "$CFG" && test ! -L "$CFG" || { echo "FATAL: config missing/non-regular"; exit 34; }
+  test -f "$PLAN/header.json" || { echo "FATAL: w64_prod plan missing"; exit 34; }
+  test -f "$CAT/header.json" || { echo "FATAL: catalog header missing"; exit 34; }
+  test -f "$ANIME_FREQ/header.json" || { echo "FATAL: anime frequency header missing"; exit 34; }
+  test -f "$SIDECAR/header.json" || { echo "FATAL: caption sidecar header missing"; exit 34; }
+  test -f "$FREEZE" && test ! -L "$FREEZE" || { echo "FATAL: external formal freeze missing/non-regular"; exit 34; }
+  test -f "$RUNNER_SELF" && test ! -L "$RUNNER_SELF" || { echo "FATAL: raw runner missing/non-regular"; exit 34; }
+  test -f "$YAML_SELF" && test ! -L "$YAML_SELF" || { echo "FATAL: job YAML missing/non-regular"; exit 34; }
+  test -f "$SOURCE_SELF" && test ! -L "$SOURCE_SELF" || { echo "FATAL: dataset source missing/non-regular"; exit 34; }
+  NW_DECL=$(grep -m1 '^numWorkers:' "$YAML_SELF" | awk '{print $2}')
+  GPU_DECL=$(grep -m1 '^gpuPerWorker:' "$YAML_SELF" | awk '{print $2}')
+  CPU_DECL=$(grep -m1 '^cpuPerWorker:' "$YAML_SELF" | awk '{print $2}')
+  [ "$NW_DECL" = "$NNODES" ] && [ "$GPU_DECL" = 0 ] && [ "$CPU_DECL" = 16 ] \
+    || { echo "FATAL: YAML topology drift workers=$NW_DECL gpu=$GPU_DECL cpu=$CPU_DECL"; exit 21; }
+
+  HOST=$(hostname)
+  NODE_RANK=${HOST##*-}
+  JOBTAG=${HOST%-*}
+  case "$NODE_RANK" in (0|1|2|3|4|5|6|7) ;; (*) echo "FATAL: invalid node rank $NODE_RANK"; exit 21;; esac
+  [ "$HOST" = "$JOBTAG-$NODE_RANK" ] || { echo "FATAL: hostname/jobtag mapping drift"; exit 21; }
+  RES=$BASE/$RUN_ID/$JOBTAG
+  mkdir -p "$RES"
+
+  # Every node first publishes an attempt-bound freshness boundary.  Node 0
+  # then runs the complete live-versus-freeze verifier against the externally
+  # rebuilt formal freeze.  A stale freeze is an intentional hard blocker.
+  PREFLIGHT_JSON=$RES/freezepreflight.$JOBTAG.json
+  PREFLIGHT_PASS=$RES/freezepreflight.$JOBTAG.pass
+  RUNTIME_CONTRACT=$RES/runtime_contract.$JOBTAG.json
+  FRESH_MARKER=$RES/freezepreflight.$JOBTAG.n$NODE_RANK.fresh
+  rm -f "$FRESH_MARKER" "$FRESH_MARKER.tmp"
+  MARK_TS=$(date +%s)
+  MARK_TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  printf 'READY|%s|%s|%s|%s|%s\n' \
+    "$JOBTAG" "$NODE_RANK" "$MARK_TS" "$HOST" "$MARK_TOKEN" > "$FRESH_MARKER.tmp"
+  mv "$FRESH_MARKER.tmp" "$FRESH_MARKER"
+  if [ "$NODE_RANK" = 0 ]; then
+    rm -f "$PREFLIGHT_JSON" "$PREFLIGHT_JSON.tmp" "$PREFLIGHT_PASS" "$PREFLIGHT_PASS.tmp" \
+      "$RUNTIME_CONTRACT" "$RUNTIME_CONTRACT.tmp"
+    MARKERS_READY=0
+    for _ in $(seq 1 900); do
+      READY=1
+      NOW=$(date +%s)
+      for RANK in $(seq 0 $((NNODES - 1))); do
+        MARKER=$RES/freezepreflight.$JOBTAG.n$RANK.fresh
+        M_STATUS=""; M_JOBTAG=""; M_RANK=""; M_TS=""; M_HOST=""; M_TOKEN=""
+        if [ -f "$MARKER" ] && [ ! -L "$MARKER" ]; then
+          IFS='|' read -r M_STATUS M_JOBTAG M_RANK M_TS M_HOST M_TOKEN < "$MARKER" || true
+        fi
+        case "$M_TS" in (*[!0-9]*|'') READY=0 ;; esac
+        case "$M_TOKEN" in (*[!0-9a-f]*|'') READY=0 ;; esac
+        if [ "$M_STATUS" != READY ] || [ "$M_JOBTAG" != "$JOBTAG" ] \
+           || [ "$M_RANK" != "$RANK" ] || [ "$M_HOST" != "$JOBTAG-$RANK" ] \
+           || [ "${#M_TOKEN}" -ne 64 ] || [ "$READY" -ne 1 ] || [ "$M_TS" -gt $((NOW + 60)) ] \
+           || [ $((NOW - M_TS)) -ge 2700 ]; then
+          READY=0
+        fi
+      done
+      if [ "$READY" -eq 1 ]; then MARKERS_READY=1; break; fi
+      sleep 2
+    done
+    [ "$MARKERS_READY" -eq 1 ] \
+      || { echo "FATAL: all-node fresh marker barrier timed out"; exit 35; }
+
+    timeout --signal=TERM --kill-after=30s 14400s \
+      "$PY" scripts/offline_arb/make_freeze_manifest.py --verify-freeze \
+        --freeze "$FREEZE" --repo "$REPO" --plan "$PLAN" \
+        --catalog-root "$CAT" --sampling "$SAMPLING" \
+        --animefreq-root "$ANIME_FREQ" --sidecar-root "$SIDECAR" \
+        > "$PREFLIGHT_JSON.tmp"
+    mv "$PREFLIGHT_JSON.tmp" "$PREFLIGHT_JSON"
+    PREFLIGHT_JSON_SHA=$(sha256sum "$PREFLIGHT_JSON" | awk '{print $1}')
+    GATE_RUNNER_SHA=$(sha256sum "$RUNNER_SELF" | awk '{print $1}')
+    GATE_YAML_SHA=$(sha256sum "$YAML_SELF" | awk '{print $1}')
+    read -r SIDE_HEADER SIDE_HEADER_FILE SIDE_SUCCESS_FILE SIDE_CATALOG_HEADER SIDE_RELEASE RELEASE_DIGEST FREEZE_SHA < <(
+      "$PY" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x.get("status")=="PASS" and x.get("mode")=="verify-freeze"; print(x["header_sha256"],x["header_file_sha256"],x["success_file_sha256"],x["catalog_header_sha256"],x["sidecar_release_digest"],x["release_digest"],x["freeze_sha256"])' "$PREFLIGHT_JSON"
+    )
+    NONCE=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+    read -r GPIC_MODE GPIC_THREADS < <("$PY" -c 'from omegaconf import OmegaConf; import sys; x=OmegaConf.load(sys.argv[1]); mode=str(x.dataset.gpic_source_consistency_mode); threads=int(x.dataset.gpic_threads_per_node); assert mode in {"strict_path","fd_stable"} and threads == 16; print(mode, threads)' "$CFG")
+    [ "$OFFLINE_ARB_GPIC_THREADS_PER_NODE" = "$GPIC_THREADS" ] \
+      || { echo "FATAL: wrapper/config GPIC threads-per-node mismatch"; exit 35; }
+    "$PY" - "$RUNTIME_CONTRACT.tmp" "$REPO" "$RUN_ID" "$JOBTAG" "$NONCE" \
+      "$GPIC_MODE" "$GPIC_THREADS" "$RELEASE_DIGEST" "$FREEZE" "$PREFLIGHT_JSON" "$CFG" \
+      "$PLAN" "$CAT" "$ANIME_FREQ" "$SIDECAR" "$SAMPLING" "$RES" <<'PYEOF'
+  import hashlib
+  import json
+  import os
+  import stat
+  import sys
+  from pathlib import Path
+
+  (
+      output_raw, repo_raw, run_id, jobtag, nonce, mode, threads_raw, release_digest,
+      freeze_raw, preflight_raw, config_raw, plan_raw, catalog_raw,
+      animefreq_raw, sidecar_raw, sampling_raw, result_root_raw,
+  ) = sys.argv[1:]
+  output = Path(output_raw)
+  repo = Path(repo_raw).resolve(strict=True)
+  freeze = Path(freeze_raw)
+  preflight = Path(preflight_raw)
+  result_root = Path(result_root_raw).resolve(strict=True)
+  empty_artifact_keys = {"training_package_source", "dataline_package_source"}
+  threads = int(threads_raw)
+  if threads != 16:
+      raise SystemExit("FATAL runtime contract requires GPIC threads-per-node=16")
+
+  def artifact(path_raw, *, allow_empty=False):
+      path = Path(path_raw)
+      if path.is_symlink():
+          raise SystemExit(f"FATAL runtime artifact is symlinked: {path}")
+      canonical = path.resolve(strict=True)
+      before = path.lstat()
+      identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+      if (
+          not stat.S_ISREG(before.st_mode)
+          or before.st_size < 0
+          or (before.st_size == 0 and not allow_empty)
+      ):
+          raise SystemExit(f"FATAL runtime artifact has invalid file/size contract: {path}")
+      digest = hashlib.sha256()
+      with canonical.open("rb", buffering=0) as handle:
+          opened = os.fstat(handle.fileno())
+          if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != identity:
+              raise SystemExit(f"FATAL runtime artifact changed while opening: {path}")
+          for chunk in iter(lambda: handle.read(1 << 20), b""):
+              digest.update(chunk)
+          closed = os.fstat(handle.fileno())
+      after = path.lstat()
+      for value in (closed, after):
+          if (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns) != identity:
+              raise SystemExit(f"FATAL runtime artifact changed while hashing: {path}")
+      return {"path": str(canonical), "bytes": before.st_size, "sha256": digest.hexdigest()}
+
+  def bound_json(path, expected_sha):
+      before = path.lstat()
+      identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+      with path.open("rb", buffering=0) as handle:
+          opened = os.fstat(handle.fileno())
+          if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != identity:
+              raise SystemExit(f"FATAL bound JSON changed while opening: {path}")
+          payload = handle.read()
+          closed = os.fstat(handle.fileno())
+      after = path.lstat()
+      if any((value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns) != identity for value in (closed, after)):
+          raise SystemExit(f"FATAL bound JSON changed while reading: {path}")
+      if hashlib.sha256(payload).hexdigest() != expected_sha:
+          raise SystemExit(f"FATAL bound JSON differs from artifact SHA: {path}")
+      return json.loads(payload.decode("utf-8"))
+
+  paths = {
+      "runner": repo / "scripts/offline_arb/run_w64_raw_supply_gate.py",
+      "capture_yaml": repo / "jobs/offline_arb_w64_raw_supply_gate.yaml",
+      "config": Path(config_raw),
+      "freeze_manifest": freeze,
+      "preflight_verify": preflight,
+      "plan_header": Path(plan_raw) / "header.json",
+      "plan_checksums": Path(plan_raw) / "checksums.json",
+      "catalog_header": Path(catalog_raw) / "header.json",
+      "animefreq_header": Path(animefreq_raw) / "header.json",
+      "sidecar_header": Path(sidecar_raw) / "header.json",
+      "sampling": Path(sampling_raw),
+      "freeze_builder_source": repo / "scripts/offline_arb/make_freeze_manifest.py",
+      "caption_contract_source": repo / "scripts/offline_arb/caption_sidecar_contract.py",
+      "training_package_source": repo / "training/__init__.py",
+      "dataline_package_source": repo / "training/dataline/__init__.py",
+      "offline_package_source": repo / "training/dataline_offline/__init__.py",
+      "dataset_source": repo / "training/dataline_offline/offline_dataset.py",
+      "planner_source": repo / "training/dataline_offline/planner_v1.py",
+      "sidecar_runtime_source": repo / "training/dataline_offline/caption_sidecar.py",
+      "complete_dataset_source": repo / "training/dataline/complete_dataset.py",
+      "dataline_config_source": repo / "training/dataline/config.py",
+      "image_fetch_source": repo / "training/dataline/image_fetch.py",
+      "manifest_index_source": repo / "training/dataline/manifest_index.py",
+      "multi_ar_source": repo / "training/dataline/multi_ar.py",
+      "native_safety_source": repo / "training/dataline/native_safety.py",
+      "pil_safety_source": repo / "training/dataline/pil_safety.py",
+      "caption_build_source": repo / "training/dataline/caption_build.py",
+      "sampler_source": repo / "training/dataline/sampler.py",
+  }
+  artifacts = {
+      name: artifact(path, allow_empty=name in empty_artifact_keys)
+      for name, path in paths.items()
+  }
+  frozen = bound_json(freeze, artifacts["freeze_manifest"]["sha256"])
+  source_files = frozen.get("training_sources", {}).get("files")
+  if not isinstance(source_files, dict):
+      raise SystemExit("FATAL freeze training-source section is malformed")
+  for name, entry in artifacts.items():
+      path = Path(entry["path"])
+      try:
+          relative = path.relative_to(repo).as_posix()
+      except ValueError:
+          continue
+      frozen_entry = source_files.get(relative)
+      if not isinstance(frozen_entry, dict):
+          raise SystemExit(f"FATAL freeze does not bind runtime source {relative}")
+      if any(frozen_entry.get(key) != entry[key] for key in ("path", "bytes", "sha256")):
+          raise SystemExit(f"FATAL live runtime source differs from freeze: {relative}")
+  verify = bound_json(preflight, artifacts["preflight_verify"]["sha256"])
+  if (
+      verify.get("status") != "PASS"
+      or verify.get("mode") != "verify-freeze"
+      or verify.get("release_digest") != release_digest
+      or verify.get("freeze_sha256") != artifacts["freeze_manifest"]["sha256"]
+  ):
+      raise SystemExit("FATAL preflight verify result does not close runtime contract")
+  markers = {
+      str(node): artifact(result_root / f"freezepreflight.{jobtag}.n{node}.fresh")
+      for node in range(8)
+  }
+  value = {
+      "schema_version": "offline_arb_w64_runtime_contract_v1",
+      "run_id": run_id,
+      "jobtag": jobtag,
+      "attempt_nonce": nonce,
+      "gpic_source_consistency_mode": mode,
+      "gpic_threads_per_node": threads,
+      "freeze_release_digest": release_digest,
+      "freeze_sha256": artifacts["freeze_manifest"]["sha256"],
+      "preflight_verify_sha256": artifacts["preflight_verify"]["sha256"],
+      "artifacts": artifacts,
+      "fresh_markers": markers,
+      "namespace_packages": {
+          "scripts": str((repo / "scripts").resolve(strict=True)),
+          "scripts.offline_arb": str((repo / "scripts/offline_arb").resolve(strict=True)),
+      },
+  }
+  payload = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+  with output.open("x", encoding="utf-8") as handle:
+      handle.write(payload)
+      handle.flush()
+      os.fsync(handle.fileno())
+  PYEOF
+    mv "$RUNTIME_CONTRACT.tmp" "$RUNTIME_CONTRACT"
+    RUNTIME_CONTRACT_SHA=$(sha256sum "$RUNTIME_CONTRACT" | awk '{print $1}')
+    NOW=$(date +%s)
+    printf 'PASS|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+      "$JOBTAG" "$NONCE" "$NOW" "$SIDE_HEADER" "$SIDE_HEADER_FILE" \
+      "$SIDE_SUCCESS_FILE" "$SIDE_CATALOG_HEADER" "$SIDE_RELEASE" \
+      "$RELEASE_DIGEST" "$PREFLIGHT_JSON_SHA" "$FREEZE_SHA" \
+      "$GATE_RUNNER_SHA" "$GATE_YAML_SHA" "$RUNTIME_CONTRACT_SHA" \
+      "$GPIC_MODE" > "$PREFLIGHT_PASS.tmp"
+    mv "$PREFLIGHT_PASS.tmp" "$PREFLIGHT_PASS"
+  fi
+
+  for _ in $(seq 1 4500); do
+    [ -f "$PREFLIGHT_PASS" ] && [ ! -L "$PREFLIGHT_PASS" ] && break
+    sleep 4
+  done
+  [ -f "$PREFLIGHT_PASS" ] && [ ! -L "$PREFLIGHT_PASS" ] \
+    || { echo "FATAL: fresh freeze PASS missing"; exit 35; }
+  IFS='|' read -r PASS_STATUS PASS_JOBTAG PASS_NONCE PASS_TS PASS_HEADER PASS_HEADER_FILE PASS_SUCCESS_FILE PASS_CATALOG_HEADER PASS_SIDECAR_RELEASE PASS_RELEASE PASS_JSON_SHA PASS_FREEZE_SHA PASS_RUNNER_SHA PASS_YAML_SHA PASS_CONTRACT_SHA PASS_GPIC_MODE < "$PREFLIGHT_PASS"
+  [ "$PASS_STATUS" = PASS ] && [ "$PASS_JOBTAG" = "$JOBTAG" ] \
+    || { echo "FATAL: fresh freeze PASS identity mismatch"; exit 35; }
+  case "$PASS_NONCE" in (*[!0-9a-f]*|'') echo "FATAL: malformed nonce"; exit 35;; esac
+  [ "${#PASS_NONCE}" -eq 64 ] || { echo "FATAL: malformed nonce length"; exit 35; }
+  case "$PASS_TS" in (*[!0-9]*|'') echo "FATAL: malformed PASS timestamp"; exit 35;; esac
+  NOW=$(date +%s)
+  [ "$PASS_TS" -le $((NOW + 60)) ] && [ $((NOW - PASS_TS)) -lt 21600 ] \
+    || { echo "FATAL: stale/future fresh freeze PASS"; exit 35; }
+  for VALUE in "$PASS_HEADER" "$PASS_HEADER_FILE" "$PASS_SUCCESS_FILE" "$PASS_CATALOG_HEADER" \
+               "$PASS_SIDECAR_RELEASE" "$PASS_RELEASE" "$PASS_JSON_SHA" "$PASS_FREEZE_SHA" \
+               "$PASS_RUNNER_SHA" "$PASS_YAML_SHA" "$PASS_CONTRACT_SHA"; do
+    case "$VALUE" in (*[!0-9a-f]*|'') echo "FATAL: malformed freeze-bound hash"; exit 35;; esac
+    [ "${#VALUE}" -eq 64 ] || { echo "FATAL: malformed freeze-bound hash length"; exit 35; }
+  done
+  case "$PASS_GPIC_MODE" in (strict_path|fd_stable) ;; (*) echo "FATAL: unsupported GPIC consistency mode"; exit 35;; esac
+  [ -f "$PREFLIGHT_JSON" ] && [ ! -L "$PREFLIGHT_JSON" ] \
+    && [ -f "$FREEZE" ] && [ ! -L "$FREEZE" ] \
+    && [ -f "$RUNTIME_CONTRACT" ] && [ ! -L "$RUNTIME_CONTRACT" ] \
+    || { echo "FATAL: shared preflight/freeze/runtime contract missing or symlinked"; exit 35; }
+  LIVE_JSON_SHA=$(sha256sum "$PREFLIGHT_JSON" | awk '{print $1}')
+  LIVE_FREEZE_SHA=$(sha256sum "$FREEZE" | awk '{print $1}')
+  LIVE_RUNNER_SHA=$(sha256sum "$RUNNER_SELF" | awk '{print $1}')
+  LIVE_YAML_SHA=$(sha256sum "$YAML_SELF" | awk '{print $1}')
+  LIVE_CONTRACT_SHA=$(sha256sum "$RUNTIME_CONTRACT" | awk '{print $1}')
+  [ "$LIVE_JSON_SHA" = "$PASS_JSON_SHA" ] && [ "$LIVE_FREEZE_SHA" = "$PASS_FREEZE_SHA" ] \
+    && [ "$LIVE_RUNNER_SHA" = "$PASS_RUNNER_SHA" ] && [ "$LIVE_YAML_SHA" = "$PASS_YAML_SHA" ] \
+    && [ "$LIVE_CONTRACT_SHA" = "$PASS_CONTRACT_SHA" ] \
+    || { echo "FATAL: preflight/freeze/gate artifact SHA mismatch"; exit 35; }
+  read -r JSON_STATUS JSON_MODE JSON_HEADER JSON_HEADER_FILE JSON_SUCCESS_FILE JSON_CATALOG_HEADER JSON_SIDECAR_RELEASE JSON_RELEASE JSON_FREEZE_SHA < <(
+    "$PY" -c 'import json,sys; x=json.load(open(sys.argv[1])); print(x.get("status"),x.get("mode"),x.get("header_sha256"),x.get("header_file_sha256"),x.get("success_file_sha256"),x.get("catalog_header_sha256"),x.get("sidecar_release_digest"),x.get("release_digest"),x.get("freeze_sha256"))' "$PREFLIGHT_JSON"
+  )
+  [ "$JSON_STATUS" = PASS ] && [ "$JSON_MODE" = verify-freeze ] \
+    && [ "$JSON_HEADER" = "$PASS_HEADER" ] && [ "$JSON_HEADER_FILE" = "$PASS_HEADER_FILE" ] \
+    && [ "$JSON_SUCCESS_FILE" = "$PASS_SUCCESS_FILE" ] \
+    && [ "$JSON_CATALOG_HEADER" = "$PASS_CATALOG_HEADER" ] \
+    && [ "$JSON_SIDECAR_RELEASE" = "$PASS_SIDECAR_RELEASE" ] \
+    && [ "$JSON_RELEASE" = "$PASS_RELEASE" ] && [ "$JSON_FREEZE_SHA" = "$PASS_FREEZE_SHA" ] \
+    || { echo "FATAL: preflight JSON/PASS binding mismatch"; exit 35; }
+
+  export OFFLINE_ARB_ATTEMPT_JOBTAG=$JOBTAG
+  export OFFLINE_ARB_ATTEMPT_NONCE=$PASS_NONCE
+  export OFFLINE_ARB_ATTEMPT_HOST=$HOST
+  export OFFLINE_ARB_SIDECAR_HEADER_SHA256=$PASS_HEADER
+  export OFFLINE_ARB_SIDECAR_RELEASE_DIGEST=$PASS_SIDECAR_RELEASE
+  export OFFLINE_ARB_NODE_RANK=$NODE_RANK
+  RUNNER_ARGS=(
+    --config "$CFG" --plan-root "$PLAN" --catalog-root "$CAT"
+    --anime-freq-root "$ANIME_FREQ" --sidecar-root "$SIDECAR"
+    --sampling "$SAMPLING" --freeze "$FREEZE"
+    --runtime-contract "$RUNTIME_CONTRACT"
+    --expected-runtime-contract-sha256 "$PASS_CONTRACT_SHA"
+    --expected-runner-sha256 "$PASS_RUNNER_SHA"
+    --expected-gpic-source-consistency-mode "$PASS_GPIC_MODE"
+    --expected-gpic-threads-per-node "$OFFLINE_ARB_GPIC_THREADS_PER_NODE"
+    --process-group-timeout-s 3600
+  )
+  "$PY" "$RUNNER_SELF" "${RUNNER_ARGS[@]}" --verify-runtime-contract-only
+
+  CONTROL_JSON=$RES/sidecarcontrol.$JOBTAG.n$NODE_RANK.json
+  rm -f "$CONTROL_JSON" "$CONTROL_JSON.tmp"
+  "$PY" scripts/offline_arb/make_freeze_manifest.py \
+    --verify-sidecar-control --sidecar-root "$SIDECAR" --catalog-root "$CAT" \
+    > "$CONTROL_JSON.tmp"
+  mv "$CONTROL_JSON.tmp" "$CONTROL_JSON"
+  read -r LIVE_HEADER LIVE_HEADER_FILE LIVE_SUCCESS_FILE LIVE_CATALOG_HEADER LIVE_SIDECAR_RELEASE < <(
+    "$PY" -c 'import json,sys; x=json.load(open(sys.argv[1])); assert x.get("status")=="PASS" and x.get("mode")=="verify-sidecar-control"; print(x["header_sha256"],x["header_file_sha256"],x["success_file_sha256"],x["catalog_header_sha256"],x["release_digest"])' "$CONTROL_JSON"
+  )
+  [ "$LIVE_HEADER" = "$PASS_HEADER" ] && [ "$LIVE_HEADER_FILE" = "$PASS_HEADER_FILE" ] \
+    && [ "$LIVE_SUCCESS_FILE" = "$PASS_SUCCESS_FILE" ] \
+    && [ "$LIVE_CATALOG_HEADER" = "$PASS_CATALOG_HEADER" ] \
+    && [ "$LIVE_SIDECAR_RELEASE" = "$PASS_SIDECAR_RELEASE" ] \
+    || { echo "FATAL: sidecar controls changed after fresh freeze"; exit 35; }
+  POST_JSON_SHA=$(sha256sum "$PREFLIGHT_JSON" | awk '{print $1}')
+  POST_FREEZE_SHA=$(sha256sum "$FREEZE" | awk '{print $1}')
+  POST_RUNNER_SHA=$(sha256sum "$RUNNER_SELF" | awk '{print $1}')
+  POST_YAML_SHA=$(sha256sum "$YAML_SELF" | awk '{print $1}')
+  POST_CONTRACT_SHA=$(sha256sum "$RUNTIME_CONTRACT" | awk '{print $1}')
+  [ "$POST_JSON_SHA" = "$PASS_JSON_SHA" ] && [ "$POST_FREEZE_SHA" = "$PASS_FREEZE_SHA" ] \
+    && [ "$POST_RUNNER_SHA" = "$PASS_RUNNER_SHA" ] && [ "$POST_YAML_SHA" = "$PASS_YAML_SHA" ] \
+    && [ "$POST_CONTRACT_SHA" = "$PASS_CONTRACT_SHA" ] \
+    || { echo "FATAL: freeze/gate artifacts changed during per-node control close"; exit 35; }
+  echo "W64 fresh freeze PASS jobtag=$JOBTAG nonce=$PASS_NONCE release=$PASS_RELEASE freeze_sha=$PASS_FREEZE_SHA runner_sha=$PASS_RUNNER_SHA yaml_sha=$PASS_YAML_SHA contract_sha=$PASS_CONTRACT_SHA gpic_mode=$PASS_GPIC_MODE"
+
+  # Attempt- and nonce-bound rendezvous for the 64-rank gloo group.
+  RDZV=$RES/rdzv.$JOBTAG.w64.addr
+  if [ "$NODE_RANK" = 0 ]; then
+    rm -f "$RDZV" "$RDZV.tmp"
+    MYIP=$(hostname -i | awk '{print $1}')
+    printf '%s %s %s %s\n' "$MYIP" "$(date +%s)" "$JOBTAG" "$PASS_NONCE" > "$RDZV.tmp"
+    mv "$RDZV.tmp" "$RDZV"
+    MASTER_ADDR=$MYIP
+  else
+    MASTER_ADDR=""
+    for _ in $(seq 1 2100); do
+      if [ -s "$RDZV" ] && [ ! -L "$RDZV" ]; then
+        TS=$(awk '{print $2}' "$RDZV" 2>/dev/null || true)
+        TOKEN=$(awk '{print $3}' "$RDZV" 2>/dev/null || true)
+        TOKEN_NONCE=$(awk '{print $4}' "$RDZV" 2>/dev/null || true)
+        case "$TS" in (*[!0-9]*|'') TS="" ;; esac
+        NOW_R=$(date +%s)
+        if [ -n "$TS" ] && [ "$TOKEN" = "$JOBTAG" ] && [ "$TOKEN_NONCE" = "$PASS_NONCE" ] \
+           && [ $((NOW_R - TS)) -lt 7200 ] && [ "$TS" -le $((NOW_R + 60)) ]; then
+          MASTER_ADDR=$(awk '{print $1}' "$RDZV")
+          break
+        fi
+      fi
+      sleep 2
+    done
+    [ -n "$MASTER_ADDR" ] || { echo "FATAL: fresh w64 rendezvous missing"; exit 20; }
+  fi
+
+  TELEM_LOCAL=/local/evan/offline_arb_w64_raw/$JOBTAG/$PASS_NONCE/node$NODE_RANK
+  case "$TELEM_LOCAL" in (/local/*) ;; (*) echo "FATAL: telemetry path not under /local"; exit 42;; esac
+  [ ! -e "$TELEM_LOCAL" ] && [ ! -L "$TELEM_LOCAL" ] \
+    || { echo "FATAL: telemetry path already exists: $TELEM_LOCAL"; exit 42; }
+  mkdir -p -m 0700 "$TELEM_LOCAL"
+  TELEM_REAL=$(realpath -e "$TELEM_LOCAL")
+  case "$TELEM_REAL" in (/local/*) ;; (*) echo "FATAL: telemetry path escaped /local"; exit 42;; esac
+  [ "$TELEM_REAL" = "$TELEM_LOCAL" ] \
+    || { echo "FATAL: telemetry path resolution drift"; exit 42; }
+  export OFFLINE_ARB_IO_TELEMETRY_DIR=$TELEM_LOCAL
+
+  PROBE=$RES/probe.$JOBTAG.n$NODE_RANK.log
+  {
+    echo "RUN_ID=$RUN_ID jobtag=$JOBTAG node_rank=$NODE_RANK world=64 range=0..191"
+    echo "cfg=$CFG plan=$PLAN catalog=$CAT anime_freq=$ANIME_FREQ sidecar=$SIDECAR"
+    echo "freeze_release_digest=$PASS_RELEASE freeze_sha256=$PASS_FREEZE_SHA"
+    echo "sidecar_header_sha256=$PASS_HEADER sidecar_release_digest=$PASS_SIDECAR_RELEASE nonce=$PASS_NONCE"
+    echo "runner_sha256=$PASS_RUNNER_SHA yaml_sha256=$PASS_YAML_SHA runtime_contract_sha256=$PASS_CONTRACT_SHA"
+    echo "gloo local_ranks=$LOCAL_RANKS cpu_per_node=16 OMP_NUM_THREADS=$OMP_NUM_THREADS"
+    echo "gpic_threads_per_node=$OFFLINE_ARB_GPIC_THREADS_PER_NODE prefetch_steps=$OFFLINE_ARB_PREFETCH_STEPS gpic_source_consistency_mode=$PASS_GPIC_MODE"
+    echo "telemetry_dir=$OFFLINE_ARB_IO_TELEMETRY_DIR state_every=$OFFLINE_ARB_IO_STATE_EVERY_STEPS wait_threshold=$OFFLINE_ARB_WAIT_LOG_THRESHOLD_S"
+    hostname
+    df -h /local | tail -1
+    sha256sum "$SOURCE_SELF" "$RUNNER_SELF" "$YAML_SELF" "$CFG" \
+      "$PLAN/header.json" "$CAT/header.json" "$ANIME_FREQ/header.json" \
+      "$SIDECAR/header.json" "$FREEZE" "$RUNTIME_CONTRACT"
+  } 2>&1 | tee "$PROBE"
+
+  "$PY" "$RUNNER_SELF" "${RUNNER_ARGS[@]}" --verify-runtime-contract-only
+
+  RUN_LOG=$RES/rawgate.$JOBTAG.n$NODE_RANK.log
+  echo "===== W64 RAW SUPPLY 8x8 CPU node=$NODE_RANK master=$MASTER_ADDR $(date -u) ====="
+  set +e
+  timeout --signal=TERM --kill-after=60s 21600s \
+    "$PY" -m torch.distributed.run \
+      --nnodes "$NNODES" --nproc-per-node "$LOCAL_RANKS" --node-rank "$NODE_RANK" \
+      --master-addr "$MASTER_ADDR" --master-port "$PORT" \
+      "$RUNNER_SELF" \
+        "${RUNNER_ARGS[@]}" \
+    2>&1 | tee "$RUN_LOG"
+  RUN_PIPE=("${PIPESTATUS[@]}")
+  set -e
+  RUN_RC=${RUN_PIPE[0]}
+  RUN_TEE_RC=${RUN_PIPE[1]}
+  echo "===== W64 RAW node=$NODE_RANK run_rc=$RUN_RC tee_rc=$RUN_TEE_RC $(date -u) ====="
+  set +e
+  "$PY" "$RUNNER_SELF" "${RUNNER_ARGS[@]}" --verify-runtime-contract-only
+  RUNTIME_POST_RC=$?
+  set -e
+
+  # Preserve whatever the dataset produced before returning a runner failure.
+  # The hot directory must contain exactly the eight dataset-owned global-rank
+  # JSONLs and no runner-defined telemetry schema.
+  shopt -s nullglob dotglob
+  ALL_LOCAL_ENTRIES=("$TELEM_LOCAL"/*)
+  JSONL_FILES=("$TELEM_LOCAL"/*.jsonl)
+  shopt -u nullglob dotglob
+  COLLECT_STATUS=PASS
+  COLLECT_ERROR=""
+  if [ "$RUNTIME_POST_RC" -ne 0 ]; then
+    COLLECT_STATUS=FAIL
+    COLLECT_ERROR="runtime_contract_post_close_failed;rc=$RUNTIME_POST_RC"
+  fi
+  if [ "${#ALL_LOCAL_ENTRIES[@]}" -ne 8 ] || [ "${#JSONL_FILES[@]}" -ne 8 ]; then
+    COLLECT_STATUS=FAIL
+    COLLECT_ERROR="${COLLECT_ERROR:+$COLLECT_ERROR;}expected_exactly_8_dataset_jsonl;entries=${#ALL_LOCAL_ENTRIES[@]};jsonl=${#JSONL_FILES[@]}"
+  fi
+  VALID_JSONL=()
+  EXPECTED_RANK_START=$((NODE_RANK * LOCAL_RANKS))
+  EXPECTED_RANK_STOP=$((EXPECTED_RANK_START + LOCAL_RANKS))
+  for GLOBAL_RANK in $(seq "$EXPECTED_RANK_START" $((EXPECTED_RANK_STOP - 1))); do
+    EXPECTED_FILE=$(printf '%s/io_profile.rank%04d.jsonl' "$TELEM_LOCAL" "$GLOBAL_RANK")
+    if [ -f "$EXPECTED_FILE" ] && [ ! -L "$EXPECTED_FILE" ] && [ -s "$EXPECTED_FILE" ]; then
+      VALID_JSONL+=("$EXPECTED_FILE")
+    else
+      COLLECT_STATUS=FAIL
+      COLLECT_ERROR="${COLLECT_ERROR};missing_or_invalid=$(basename "$EXPECTED_FILE")"
+    fi
+  done
+  if [ "${#VALID_JSONL[@]}" -ne 8 ]; then
+    COLLECT_STATUS=FAIL
+    COLLECT_ERROR="${COLLECT_ERROR};valid_expected_jsonl=${#VALID_JSONL[@]}"
+  fi
+  RUN_LOG_ARCHIVE=""
+  if [ -f "$RUN_LOG" ] && [ ! -L "$RUN_LOG" ] && [ -s "$RUN_LOG" ]; then
+    RUN_LOG_ARCHIVE=$RUN_LOG
+  else
+    COLLECT_STATUS=FAIL
+    COLLECT_ERROR="${COLLECT_ERROR};runner_log_missing_invalid_or_empty"
+  fi
+  if [ "$COLLECT_STATUS" = PASS ]; then COLLECT_RC=0; else COLLECT_RC=46; fi
+
+  LOCAL_MANIFEST=$TELEM_LOCAL/node_manifest.json
+  export W64_JOBTAG=$JOBTAG W64_NONCE=$PASS_NONCE W64_NODE_RANK=$NODE_RANK W64_HOST=$HOST
+  export W64_RUN_RC=$RUN_RC W64_TEE_RC=$RUN_TEE_RC W64_RUNTIME_POST_RC=$RUNTIME_POST_RC
+  export W64_COLLECT_RC=$COLLECT_RC
+  export W64_COLLECT_STATUS=$COLLECT_STATUS W64_COLLECT_ERROR=$COLLECT_ERROR
+  export W64_FREEZE_RELEASE=$PASS_RELEASE W64_FREEZE_SHA=$PASS_FREEZE_SHA
+  export W64_SIDECAR_HEADER=$PASS_HEADER W64_SIDECAR_RELEASE=$PASS_SIDECAR_RELEASE
+  export W64_RUNNER_SHA=$PASS_RUNNER_SHA W64_YAML_SHA=$PASS_YAML_SHA
+  export W64_RUNTIME_CONTRACT_SHA=$PASS_CONTRACT_SHA W64_GPIC_MODE=$PASS_GPIC_MODE
+  export W64_GPIC_THREADS=$OFFLINE_ARB_GPIC_THREADS_PER_NODE
+  "$PY" - "$LOCAL_MANIFEST.tmp" "$RUN_LOG_ARCHIVE" "${VALID_JSONL[@]}" <<'PYEOF'
+  import hashlib
+  import json
+  import os
+  import stat
+  import sys
+  from pathlib import Path
+
+  output = Path(sys.argv[1])
+  def artifact(path, name):
+      path = Path(path)
+      before = path.lstat()
+      identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+      if not stat.S_ISREG(before.st_mode) or path.is_symlink() or before.st_size <= 0:
+          raise SystemExit(f"FATAL invalid evidence file during manifest close: {path}")
+      digest = hashlib.sha256()
+      with path.open("rb", buffering=0) as handle:
+          opened = os.fstat(handle.fileno())
+          if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != identity:
+              raise SystemExit(f"FATAL evidence changed while opening: {path}")
+          for chunk in iter(lambda: handle.read(1 << 20), b""):
+              digest.update(chunk)
+          closed = os.fstat(handle.fileno())
+      after = path.lstat()
+      for value in (closed, after):
+          if (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns) != identity:
+              raise SystemExit(f"FATAL evidence changed while hashing: {path}")
+      return {"name": name, "bytes": before.st_size, "sha256": digest.hexdigest()}
+
+  run_log_raw = sys.argv[2]
+  runner_log = artifact(Path(run_log_raw), "runner.log") if run_log_raw else None
+  files = []
+  for raw in sys.argv[3:]:
+      path = Path(raw)
+      files.append(artifact(path, path.name))
+  files.sort(key=lambda item: item["name"])
+  node_rank = int(os.environ["W64_NODE_RANK"])
+  rank_start = node_rank * 8
+  value = {
+      "schema_version": "offline_arb_w64_raw_supply_node_manifest_v1",
+      "status": os.environ["W64_COLLECT_STATUS"],
+      "error": os.environ["W64_COLLECT_ERROR"],
+      "jobtag": os.environ["W64_JOBTAG"],
+      "nonce": os.environ["W64_NONCE"],
+      "node_rank": node_rank,
+      "host": os.environ["W64_HOST"],
+      "run_rc": int(os.environ["W64_RUN_RC"]),
+      "tee_rc": int(os.environ["W64_TEE_RC"]),
+      "runtime_post_rc": int(os.environ["W64_RUNTIME_POST_RC"]),
+      "collect_rc": int(os.environ["W64_COLLECT_RC"]),
+      "world_size": 64,
+      "local_world_size": 8,
+      "start_step": 0,
+      "stop_step": 192,
+      "expected_global_ranks": list(range(rank_start, rank_start + 8)),
+      "freeze_release_digest": os.environ["W64_FREEZE_RELEASE"],
+      "freeze_sha256": os.environ["W64_FREEZE_SHA"],
+      "sidecar_header_sha256": os.environ["W64_SIDECAR_HEADER"],
+      "sidecar_release_digest": os.environ["W64_SIDECAR_RELEASE"],
+      "runner_sha256": os.environ["W64_RUNNER_SHA"],
+      "yaml_sha256": os.environ["W64_YAML_SHA"],
+      "runtime_contract_sha256": os.environ["W64_RUNTIME_CONTRACT_SHA"],
+      "gpic_source_consistency_mode": os.environ["W64_GPIC_MODE"],
+      "gpic_threads_per_node": int(os.environ["W64_GPIC_THREADS"]),
+      "runner_log": runner_log,
+      "files": files,
+  }
+  payload = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+  with output.open("x", encoding="utf-8") as handle:
+      handle.write(payload)
+      handle.flush()
+      os.fsync(handle.fileno())
+  PYEOF
+  mv "$LOCAL_MANIFEST.tmp" "$LOCAL_MANIFEST"
+
+  EVIDENCE_ROOT=$RES/telemetry.$JOBTAG
+  FINAL_NODE=$EVIDENCE_ROOT/node$NODE_RANK
+  STAGE_NODE=$EVIDENCE_ROOT/.node$NODE_RANK.$HOST.tmp
+  mkdir -p "$EVIDENCE_ROOT"
+  [ ! -e "$FINAL_NODE" ] && [ ! -L "$FINAL_NODE" ] \
+    || { echo "FATAL: final node evidence already exists: $FINAL_NODE"; exit 46; }
+  rm -rf "$STAGE_NODE"
+  mkdir -m 0700 "$STAGE_NODE"
+  for FILE in "${VALID_JSONL[@]}"; do
+    cp -- "$FILE" "$STAGE_NODE/$(basename "$FILE")"
+  done
+  if [ -n "$RUN_LOG_ARCHIVE" ]; then
+    cp -- "$RUN_LOG_ARCHIVE" "$STAGE_NODE/runner.log"
+  fi
+  cp -- "$LOCAL_MANIFEST" "$STAGE_NODE/node_manifest.json"
+
+  # Re-open every FSX copy, enforce the exact manifest set/SHA/size, and fsync
+  # files plus staging directory before the same-filesystem atomic rename.
+  "$PY" - "$STAGE_NODE" "$JOBTAG" "$PASS_NONCE" "$NODE_RANK" "$PASS_RELEASE" \
+    "$PASS_FREEZE_SHA" "$PASS_CONTRACT_SHA" "$PASS_GPIC_MODE" \
+    "$OFFLINE_ARB_GPIC_THREADS_PER_NODE" <<'PYEOF'
+  import hashlib
+  import json
+  import os
+  import stat
+  import sys
+  from pathlib import Path
+
+  root = Path(sys.argv[1])
+  jobtag, nonce, node_raw, release, freeze_sha, contract_sha, gpic_mode, gpic_threads_raw = sys.argv[2:]
+  node_rank = int(node_raw)
+  gpic_threads = int(gpic_threads_raw)
+  manifest_path = root / "node_manifest.json"
+  if manifest_path.is_symlink() or not manifest_path.is_file():
+      raise SystemExit("FATAL copied node manifest missing/non-regular")
+  manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+  if (
+      manifest.get("schema_version") != "offline_arb_w64_raw_supply_node_manifest_v1"
+      or manifest.get("jobtag") != jobtag
+      or manifest.get("nonce") != nonce
+      or manifest.get("node_rank") != node_rank
+      or manifest.get("freeze_release_digest") != release
+      or manifest.get("freeze_sha256") != freeze_sha
+      or manifest.get("runtime_contract_sha256") != contract_sha
+      or manifest.get("gpic_source_consistency_mode") != gpic_mode
+      or manifest.get("gpic_threads_per_node") != gpic_threads
+      or manifest.get("expected_global_ranks") != list(range(node_rank * 8, node_rank * 8 + 8))
+  ):
+      raise SystemExit("FATAL copied node manifest identity mismatch")
+  declared = manifest.get("files")
+  if not isinstance(declared, list):
+      raise SystemExit("FATAL copied node manifest files malformed")
+  declared_names = {item.get("name") for item in declared if isinstance(item, dict)}
+  runner_log = manifest.get("runner_log")
+  runner_name = runner_log.get("name") if isinstance(runner_log, dict) else None
+  expected_names = {
+      f"io_profile.rank{rank:04d}.jsonl"
+      for rank in range(node_rank * 8, node_rank * 8 + 8)
+  }
+  if manifest.get("status") == "PASS" and declared_names != expected_names:
+      raise SystemExit(
+          f"FATAL PASS manifest rank-file set mismatch {declared_names} != {expected_names}"
+      )
+  if manifest.get("status") == "PASS" and runner_name != "runner.log":
+      raise SystemExit("FATAL PASS manifest has no bound runner.log")
+  expected = {"node_manifest.json"} | declared_names
+  if runner_name is not None:
+      expected.add(runner_name)
+  observed = {path.name for path in root.iterdir()}
+  if None in expected or observed != expected:
+      raise SystemExit(f"FATAL copied telemetry set mismatch observed={observed} expected={expected}")
+  for item in declared:
+      path = root / item["name"]
+      before = path.lstat()
+      identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+      if not stat.S_ISREG(before.st_mode) or path.is_symlink() or before.st_size != item["bytes"]:
+          raise SystemExit(f"FATAL copied telemetry metadata mismatch: {path}")
+      digest = hashlib.sha256()
+      with path.open("rb", buffering=0) as handle:
+          opened = os.fstat(handle.fileno())
+          if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != identity:
+              raise SystemExit(f"FATAL copied telemetry changed while opening: {path}")
+          for chunk in iter(lambda: handle.read(1 << 20), b""):
+              digest.update(chunk)
+          closed = os.fstat(handle.fileno())
+          os.fsync(handle.fileno())
+      after = path.lstat()
+      if any((value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns) != identity for value in (closed, after)):
+          raise SystemExit(f"FATAL copied telemetry changed while hashing: {path}")
+      if digest.hexdigest() != item["sha256"]:
+          raise SystemExit(f"FATAL copied telemetry SHA mismatch: {path}")
+  if runner_name is not None:
+      path = root / runner_name
+      before = path.lstat()
+      identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+      if (
+          runner_name != "runner.log"
+          or not stat.S_ISREG(before.st_mode)
+          or path.is_symlink()
+          or before.st_size != runner_log.get("bytes")
+      ):
+          raise SystemExit("FATAL copied runner log metadata mismatch")
+      digest = hashlib.sha256()
+      with path.open("rb", buffering=0) as handle:
+          opened = os.fstat(handle.fileno())
+          if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != identity:
+              raise SystemExit("FATAL copied runner log changed while opening")
+          for chunk in iter(lambda: handle.read(1 << 20), b""):
+              digest.update(chunk)
+          closed = os.fstat(handle.fileno())
+          os.fsync(handle.fileno())
+      after = path.lstat()
+      if any((value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns) != identity for value in (closed, after)):
+          raise SystemExit("FATAL copied runner log changed while hashing")
+      if digest.hexdigest() != runner_log.get("sha256"):
+          raise SystemExit("FATAL copied runner log SHA mismatch")
+  with manifest_path.open("rb", buffering=0) as handle:
+      os.fsync(handle.fileno())
+  directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+  try:
+      os.fsync(directory_fd)
+  finally:
+      os.close(directory_fd)
+  PYEOF
+  mv "$STAGE_NODE" "$FINAL_NODE"
+  "$PY" -c 'import os,sys; descriptor=os.open(sys.argv[1],os.O_RDONLY|os.O_DIRECTORY); os.fsync(descriptor); os.close(descriptor)' "$EVIDENCE_ROOT"
+  FINAL_MANIFEST_SHA=$(sha256sum "$FINAL_NODE/node_manifest.json" | awk '{print $1}')
+
+  READY_FILE=$RES/telemetry.$JOBTAG.n$NODE_RANK.ready
+  rm -f "$READY_FILE" "$READY_FILE.tmp"
+  printf 'PRESERVED|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$JOBTAG" "$PASS_NONCE" "$NODE_RANK" "$FINAL_MANIFEST_SHA" \
+    "$PASS_CONTRACT_SHA" "$RUN_RC" "$RUN_TEE_RC" "$COLLECT_RC" \
+    "$RUNTIME_POST_RC" > "$READY_FILE.tmp"
+  mv "$READY_FILE.tmp" "$READY_FILE"
+
+  # All eight wrappers wait for and re-hash all eight immutable node manifests,
+  # even when torchrun failed, so partial diagnostic evidence is retained.
+  ALL_READY=0
+  for _ in $(seq 1 1200); do
+    READY=1
+    for RANK in $(seq 0 $((NNODES - 1))); do
+      PEER=$RES/telemetry.$JOBTAG.n$RANK.ready
+      P_STATUS=""; P_JOBTAG=""; P_NONCE=""; P_RANK=""; P_SHA=""; P_CONTRACT=""; P_RUN=""; P_TEE=""; P_COLLECT=""; P_RUNTIME=""
+      if [ -f "$PEER" ] && [ ! -L "$PEER" ]; then
+        IFS='|' read -r P_STATUS P_JOBTAG P_NONCE P_RANK P_SHA P_CONTRACT P_RUN P_TEE P_COLLECT P_RUNTIME < "$PEER" || true
+      fi
+      case "$P_SHA" in (*[!0-9a-f]*|'') READY=0 ;; esac
+      if [ "$P_STATUS" != PRESERVED ] || [ "$P_JOBTAG" != "$JOBTAG" ] \
+         || [ "$P_NONCE" != "$PASS_NONCE" ] || [ "$P_RANK" != "$RANK" ] \
+         || [ "${#P_SHA}" -ne 64 ] || [ "$P_CONTRACT" != "$PASS_CONTRACT_SHA" ] \
+         || [ ! -f "$EVIDENCE_ROOT/node$RANK/node_manifest.json" ] \
+         || [ -L "$EVIDENCE_ROOT/node$RANK/node_manifest.json" ]; then
+        READY=0
+      fi
+    done
+    if [ "$READY" -eq 1 ]; then ALL_READY=1; break; fi
+    sleep 2
+  done
+  [ "$ALL_READY" -eq 1 ] \
+    || { echo "FATAL: eight-node telemetry manifest barrier timed out"; exit 47; }
+  for RANK in $(seq 0 $((NNODES - 1))); do
+    PEER=$RES/telemetry.$JOBTAG.n$RANK.ready
+    IFS='|' read -r _ _ _ _ PEER_SHA _ _ _ _ _ < "$PEER"
+    LIVE_SHA=$(sha256sum "$EVIDENCE_ROOT/node$RANK/node_manifest.json" | awk '{print $1}')
+    [ "$LIVE_SHA" = "$PEER_SHA" ] \
+      || { echo "FATAL: peer node manifest SHA drift rank=$RANK"; exit 47; }
+  done
+
+  POSTFLIGHT_JSON=$RES/freezepost.$JOBTAG.json
+  if [ "$NODE_RANK" = 0 ]; then
+    rm -f "$POSTFLIGHT_JSON" "$POSTFLIGHT_JSON.tmp"
+    "$PY" "$RUNNER_SELF" "${RUNNER_ARGS[@]}" --verify-runtime-contract-only
+    timeout --signal=TERM --kill-after=30s 14400s \
+      "$PY" scripts/offline_arb/make_freeze_manifest.py --verify-freeze \
+        --freeze "$FREEZE" --repo "$REPO" --plan "$PLAN" \
+        --catalog-root "$CAT" --sampling "$SAMPLING" \
+        --animefreq-root "$ANIME_FREQ" --sidecar-root "$SIDECAR" \
+        > "$POSTFLIGHT_JSON.tmp"
+    cmp -s "$PREFLIGHT_JSON" "$POSTFLIGHT_JSON.tmp" \
+      || { echo "FATAL: complete freeze verification changed across W64 capture"; exit 35; }
+    mv "$POSTFLIGHT_JSON.tmp" "$POSTFLIGHT_JSON"
+  else
+    for _ in $(seq 1 4500); do
+      [ -f "$POSTFLIGHT_JSON" ] && [ ! -L "$POSTFLIGHT_JSON" ] && break
+      sleep 4
+    done
+  fi
+  [ -f "$POSTFLIGHT_JSON" ] && [ ! -L "$POSTFLIGHT_JSON" ] \
+    || { echo "FATAL: complete post-capture freeze verification missing"; exit 35; }
+  POSTFLIGHT_SHA=$(sha256sum "$POSTFLIGHT_JSON" | awk '{print $1}')
+  [ "$POSTFLIGHT_SHA" = "$PASS_JSON_SHA" ] \
+    || { echo "FATAL: pre/post complete freeze verification SHA mismatch"; exit 35; }
+  "$PY" "$RUNNER_SELF" "${RUNNER_ARGS[@]}" --verify-runtime-contract-only
+  CLOSURE_READY=$RES/closure.$JOBTAG.n$NODE_RANK.ready
+  rm -f "$CLOSURE_READY" "$CLOSURE_READY.tmp"
+  printf 'CLOSED|%s|%s|%s|%s|%s\n' \
+    "$JOBTAG" "$PASS_NONCE" "$NODE_RANK" "$PASS_CONTRACT_SHA" \
+    "$POSTFLIGHT_SHA" > "$CLOSURE_READY.tmp"
+  mv "$CLOSURE_READY.tmp" "$CLOSURE_READY"
+  ALL_CLOSED=0
+  for _ in $(seq 1 1200); do
+    CLOSED=1
+    for RANK in $(seq 0 $((NNODES - 1))); do
+      PEER=$RES/closure.$JOBTAG.n$RANK.ready
+      C_STATUS=""; C_JOBTAG=""; C_NONCE=""; C_RANK=""; C_CONTRACT=""; C_POST=""
+      if [ -f "$PEER" ] && [ ! -L "$PEER" ]; then
+        IFS='|' read -r C_STATUS C_JOBTAG C_NONCE C_RANK C_CONTRACT C_POST < "$PEER" || true
+      fi
+      if [ "$C_STATUS" != CLOSED ] || [ "$C_JOBTAG" != "$JOBTAG" ] \
+         || [ "$C_NONCE" != "$PASS_NONCE" ] || [ "$C_RANK" != "$RANK" ] \
+         || [ "$C_CONTRACT" != "$PASS_CONTRACT_SHA" ] \
+         || [ "$C_POST" != "$POSTFLIGHT_SHA" ]; then
+        CLOSED=0
+      fi
+    done
+    if [ "$CLOSED" -eq 1 ]; then ALL_CLOSED=1; break; fi
+    sleep 2
+  done
+  [ "$ALL_CLOSED" -eq 1 ] \
+    || { echo "FATAL: all-node final runtime/freeze closure barrier timed out"; exit 47; }
+
+  AGGREGATE=$RES/telemetry.$JOBTAG.aggregate.json
+  if [ "$NODE_RANK" = 0 ]; then
+    rm -f "$AGGREGATE" "$AGGREGATE.tmp"
+    "$PY" - "$AGGREGATE.tmp" "$RES" "$EVIDENCE_ROOT" "$JOBTAG" "$PASS_NONCE" \
+      "$PASS_RELEASE" "$PASS_FREEZE_SHA" "$PASS_HEADER" "$PASS_SIDECAR_RELEASE" \
+      "$PASS_RUNNER_SHA" "$PASS_YAML_SHA" "$RUNTIME_CONTRACT" \
+      "$PASS_CONTRACT_SHA" "$PASS_GPIC_MODE" "$OFFLINE_ARB_GPIC_THREADS_PER_NODE" "$PREFLIGHT_JSON" \
+      "$POSTFLIGHT_JSON" <<'PYEOF'
+  import hashlib
+  import json
+  import os
+  import sys
+  from pathlib import Path
+
+  output, result_root, evidence_root = map(Path, sys.argv[1:4])
+  (
+      jobtag, nonce, release, freeze_sha, sidecar_header, sidecar_release,
+      runner_sha, yaml_sha, runtime_contract_raw, runtime_contract_sha,
+      gpic_mode, gpic_threads_raw, preflight_raw, postflight_raw,
+  ) = sys.argv[4:]
+  gpic_threads = int(gpic_threads_raw)
+  if gpic_threads != 16:
+      raise SystemExit("FATAL aggregate GPIC threads-per-node identity drift")
+  def is_sha256(value):
+      return (
+          isinstance(value, str)
+          and len(value) == 64
+          and all(character in "0123456789abcdef" for character in value)
+      )
+
+  nodes = []
+  for rank in range(8):
+      ready_path = result_root / f"telemetry.{jobtag}.n{rank}.ready"
+      parts = ready_path.read_text(encoding="ascii").strip().split("|")
+      if (
+          len(parts) != 10
+          or parts[:4] != ["PRESERVED", jobtag, nonce, str(rank)]
+          or parts[5] != runtime_contract_sha
+      ):
+          raise SystemExit(f"FATAL malformed node ready marker rank={rank}")
+      manifest_path = evidence_root / f"node{rank}" / "node_manifest.json"
+      raw = manifest_path.read_bytes()
+      digest = hashlib.sha256(raw).hexdigest()
+      if digest != parts[4]:
+          raise SystemExit(f"FATAL node manifest/ready SHA mismatch rank={rank}")
+      value = json.loads(raw)
+      ready_run = int(parts[6])
+      ready_tee = int(parts[7])
+      ready_collect = int(parts[8])
+      ready_runtime = int(parts[9])
+      if (
+          value.get("schema_version") != "offline_arb_w64_raw_supply_node_manifest_v1"
+          or value.get("jobtag") != jobtag
+          or value.get("nonce") != nonce
+          or value.get("node_rank") != rank
+          or value.get("host") != f"{jobtag}-{rank}"
+          or value.get("world_size") != 64
+          or value.get("local_world_size") != 8
+          or value.get("start_step") != 0
+          or value.get("stop_step") != 192
+          or value.get("freeze_release_digest") != release
+          or value.get("freeze_sha256") != freeze_sha
+          or value.get("sidecar_header_sha256") != sidecar_header
+          or value.get("sidecar_release_digest") != sidecar_release
+          or value.get("runner_sha256") != runner_sha
+          or value.get("yaml_sha256") != yaml_sha
+          or value.get("runtime_contract_sha256") != runtime_contract_sha
+          or value.get("gpic_source_consistency_mode") != gpic_mode
+          or value.get("gpic_threads_per_node") != gpic_threads
+          or value.get("expected_global_ranks") != list(range(rank * 8, rank * 8 + 8))
+          or value.get("run_rc") != ready_run
+          or value.get("tee_rc") != ready_tee
+          or value.get("collect_rc") != ready_collect
+          or value.get("runtime_post_rc") != ready_runtime
+      ):
+          raise SystemExit(f"FATAL node manifest identity mismatch rank={rank}")
+      manifest_status = value.get("status")
+      if manifest_status not in {"PASS", "FAIL"}:
+          raise SystemExit(f"FATAL node manifest status malformed rank={rank}")
+      expected_collect = 0 if manifest_status == "PASS" else 46
+      if ready_collect != expected_collect:
+          raise SystemExit(f"FATAL node collect status/rc mismatch rank={rank}")
+      if manifest_status == "PASS" and value.get("error") != "":
+          raise SystemExit(f"FATAL PASS node has collection error rank={rank}")
+      files = value.get("files")
+      expected_names = {
+          f"io_profile.rank{global_rank:04d}.jsonl"
+          for global_rank in range(rank * 8, rank * 8 + 8)
+      }
+      if not isinstance(files, list):
+          raise SystemExit(f"FATAL node files malformed rank={rank}")
+      observed_names = {
+          item.get("name") for item in files if isinstance(item, dict)
+      }
+      if manifest_status == "PASS" and (
+          len(files) != 8
+          or observed_names != expected_names
+          or any(
+              not isinstance(item, dict)
+              or type(item.get("bytes")) is not int
+              or item["bytes"] <= 0
+              or not is_sha256(item.get("sha256"))
+              for item in files
+          )
+      ):
+          raise SystemExit(f"FATAL PASS node rank-file declaration mismatch rank={rank}")
+      runner_log = value.get("runner_log")
+      if manifest_status == "PASS" and (
+          not isinstance(runner_log, dict)
+          or runner_log.get("name") != "runner.log"
+          or type(runner_log.get("bytes")) is not int
+          or runner_log["bytes"] <= 0
+          or not is_sha256(runner_log.get("sha256"))
+      ):
+          raise SystemExit(f"FATAL PASS node runner-log declaration mismatch rank={rank}")
+      nodes.append(
+          {
+              "node_rank": rank,
+              "manifest": str(manifest_path),
+              "manifest_sha256": digest,
+              "status": manifest_status,
+              "run_rc": ready_run,
+              "tee_rc": ready_tee,
+              "collect_rc": ready_collect,
+              "runtime_post_rc": ready_runtime,
+              "rank_files": len(files),
+              "runner_log_sha256": (
+                  runner_log.get("sha256") if isinstance(runner_log, dict) else None
+              ),
+          }
+      )
+  status = "PASS" if all(
+      node["status"] == "PASS"
+      and node["run_rc"] == 0
+      and node["tee_rc"] == 0
+      and node["collect_rc"] == 0
+      and node["runtime_post_rc"] == 0
+      and node["rank_files"] == 8
+      for node in nodes
+  ) else "FAIL"
+  def artifact(path_raw):
+      path = Path(path_raw)
+      if path.is_symlink() or not path.is_file():
+          raise SystemExit(f"FATAL aggregate artifact missing/non-regular: {path}")
+      before = path.lstat()
+      identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+      with path.open("rb", buffering=0) as handle:
+          opened = os.fstat(handle.fileno())
+          if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != identity:
+              raise SystemExit(f"FATAL aggregate artifact changed while opening: {path}")
+          raw = handle.read()
+          closed = os.fstat(handle.fileno())
+      after = path.lstat()
+      if any((value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns) != identity for value in (closed, after)):
+          raise SystemExit(f"FATAL aggregate artifact changed while reading: {path}")
+      if not raw:
+          raise SystemExit(f"FATAL aggregate artifact is empty: {path}")
+      return {"path": str(path.resolve(strict=True)), "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+  runtime_contract = artifact(runtime_contract_raw)
+  preflight_verify = artifact(preflight_raw)
+  postflight_verify = artifact(postflight_raw)
+  if (
+      runtime_contract["sha256"] != runtime_contract_sha
+      or preflight_verify["sha256"] != postflight_verify["sha256"]
+  ):
+      raise SystemExit("FATAL aggregate runtime/freeze closure SHA mismatch")
+  closure_markers = []
+  for rank in range(8):
+      path = result_root / f"closure.{jobtag}.n{rank}.ready"
+      parts = path.read_text(encoding="ascii").strip().split("|")
+      if parts != ["CLOSED", jobtag, nonce, str(rank), runtime_contract_sha, postflight_verify["sha256"]]:
+          raise SystemExit(f"FATAL final closure marker mismatch rank={rank}")
+      closure_markers.append(artifact(path))
+  preflight_pass = artifact(result_root / f"freezepreflight.{jobtag}.pass")
+  sidecar_controls = [
+      artifact(result_root / f"sidecarcontrol.{jobtag}.n{rank}.json")
+      for rank in range(8)
+  ]
+  preservation_markers = [
+      artifact(result_root / f"telemetry.{jobtag}.n{rank}.ready")
+      for rank in range(8)
+  ]
+  aggregate = {
+      "schema_version": "offline_arb_w64_raw_supply_aggregate_v1",
+      "status": status,
+      "jobtag": jobtag,
+      "nonce": nonce,
+      "freeze_release_digest": release,
+      "freeze_sha256": freeze_sha,
+      "sidecar_header_sha256": sidecar_header,
+      "sidecar_release_digest": sidecar_release,
+      "runner_sha256": runner_sha,
+      "yaml_sha256": yaml_sha,
+      "runtime_contract": runtime_contract,
+      "runtime_contract_sha256": runtime_contract_sha,
+      "gpic_source_consistency_mode": gpic_mode,
+      "gpic_threads_per_node": gpic_threads,
+      "preflight_verify": preflight_verify,
+      "postflight_verify": postflight_verify,
+      "closure_markers": closure_markers,
+      "preflight_pass": preflight_pass,
+      "sidecar_controls": sidecar_controls,
+      "preservation_markers": preservation_markers,
+      "expected_nodes": 8,
+      "expected_ranks": 64,
+      "start_step": 0,
+      "stop_step": 192,
+      "nodes": nodes,
+  }
+  with output.open("x", encoding="utf-8") as handle:
+      json.dump(aggregate, handle, ensure_ascii=False, indent=2, sort_keys=True)
+      handle.write("\n")
+      handle.flush()
+      os.fsync(handle.fileno())
+  PYEOF
+    mv "$AGGREGATE.tmp" "$AGGREGATE"
+    "$PY" - "$RES" <<'PYEOF'
+  import os
+  import sys
+  descriptor = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
+  try:
+      os.fsync(descriptor)
+  finally:
+      os.close(descriptor)
+  PYEOF
+  else
+    for _ in $(seq 1 600); do
+      [ -f "$AGGREGATE" ] && [ ! -L "$AGGREGATE" ] && break
+      sleep 2
+    done
+  fi
+  [ -f "$AGGREGATE" ] && [ ! -L "$AGGREGATE" ] \
+    || { echo "FATAL: w64 telemetry aggregate missing"; exit 47; }
+  AGGREGATE_SHA=$(sha256sum "$AGGREGATE" | awk '{print $1}')
+  echo "W64_RAW_TELEMETRY_PRESERVED jobtag=$JOBTAG node=$NODE_RANK aggregate_sha256=$AGGREGATE_SHA run_rc=$RUN_RC tee_rc=$RUN_TEE_RC collect_rc=$COLLECT_RC runtime_post_rc=$RUNTIME_POST_RC contract_sha=$PASS_CONTRACT_SHA gpic_mode=$PASS_GPIC_MODE gpic_threads=$OFFLINE_ARB_GPIC_THREADS_PER_NODE"
+
+  [ "$RUN_TEE_RC" -eq 0 ] || exit "$RUN_TEE_RC"
+  [ "$RUN_RC" -eq 0 ] || exit "$RUN_RC"
+  [ "$RUNTIME_POST_RC" -eq 0 ] || exit "$RUNTIME_POST_RC"
+  [ "$COLLECT_RC" -eq 0 ] || exit "$COLLECT_RC"
+  "$PY" - "$AGGREGATE" "$JOBTAG" "$PASS_NONCE" "$PASS_RELEASE" "$PASS_FREEZE_SHA" \
+    "$PASS_HEADER" "$PASS_SIDECAR_RELEASE" "$PASS_RUNNER_SHA" "$PASS_YAML_SHA" \
+    "$PASS_CONTRACT_SHA" "$PASS_GPIC_MODE" "$OFFLINE_ARB_GPIC_THREADS_PER_NODE" \
+    "$PASS_JSON_SHA" <<'PYEOF'
+  import json
+  import sys
+  value = json.load(open(sys.argv[1], encoding="utf-8"))
+  if (
+      value.get("schema_version") != "offline_arb_w64_raw_supply_aggregate_v1"
+      or value.get("status") != "PASS"
+      or value.get("jobtag") != sys.argv[2]
+      or value.get("nonce") != sys.argv[3]
+      or value.get("freeze_release_digest") != sys.argv[4]
+      or value.get("freeze_sha256") != sys.argv[5]
+      or value.get("sidecar_header_sha256") != sys.argv[6]
+      or value.get("sidecar_release_digest") != sys.argv[7]
+      or value.get("runner_sha256") != sys.argv[8]
+      or value.get("yaml_sha256") != sys.argv[9]
+      or value.get("runtime_contract_sha256") != sys.argv[10]
+      or value.get("runtime_contract", {}).get("sha256") != sys.argv[10]
+      or value.get("gpic_source_consistency_mode") != sys.argv[11]
+      or value.get("gpic_threads_per_node") != int(sys.argv[12])
+      or value.get("preflight_verify", {}).get("sha256") != sys.argv[13]
+      or value.get("postflight_verify", {}).get("sha256") != sys.argv[13]
+      or not isinstance(value.get("closure_markers"), list)
+      or len(value["closure_markers"]) != 8
+      or not isinstance(value.get("preflight_pass"), dict)
+      or not isinstance(value.get("sidecar_controls"), list)
+      or len(value["sidecar_controls"]) != 8
+      or not isinstance(value.get("preservation_markers"), list)
+      or len(value["preservation_markers"]) != 8
+      or value.get("expected_nodes") != 8
+      or value.get("expected_ranks") != 64
+      or value.get("start_step") != 0
+      or value.get("stop_step") != 192
+  ):
+      raise SystemExit("FATAL w64 eight-node telemetry aggregate is not bound PASS")
+  PYEOF
+  echo "W64_RAW_SUPPLY_CAPTURE_PASS result=$AGGREGATE sha256=$AGGREGATE_SHA (performance analyzer still required)"

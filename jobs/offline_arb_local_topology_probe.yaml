@@ -1,0 +1,322 @@
+# Eight-node, tiny-I/O probe for /local/evan capacity and visibility.  It never
+# allocates a large file and publishes no raw host/boot identifier.
+name: evan-mot-crop-offlinearb-local-topology
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 8
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 32
+maxRetries: 0
+command: |
+  set -euo pipefail
+  umask 077
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1
+  export PYTHONDONTWRITEBYTECODE=1
+  export OMP_NUM_THREADS=1
+  export MKL_NUM_THREADS=1
+  export OPENBLAS_NUM_THREADS=1
+  export NUMEXPR_NUM_THREADS=1
+  export ARROW_NUM_THREADS=1
+
+  HOST=$(hostname)
+  RANK=${HOST##*-}
+  JOBTAG=${HOST%-*}
+  case "$RANK" in 0|1|2|3|4|5|6|7) ;; *) echo "FATAL: invalid worker rank"; exit 2 ;; esac
+  [ "$HOST" = "$JOBTAG-$RANK" ] || { echo "FATAL: hostname binding drift"; exit 2; }
+
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_local_topology_v1
+  EVIDENCE=$BASE/$JOBTAG
+  READY=$EVIDENCE/ready
+  REPORTS=$EVIDENCE/workers
+  LOCAL_BASE=/local/evan/offline_arb_topology_probe
+  LOCAL_ROOT=$LOCAL_BASE/$JOBTAG
+  SELF=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop/jobs/offline_arb_local_topology_probe.yaml
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  [ -f "$SELF" ] && [ ! -L "$SELF" ] && [ -s "$SELF" ] \
+    || { echo "FATAL: invalid live job spec"; exit 2; }
+  mkdir -m 700 -p "$READY" "$REPORTS" "$LOCAL_BASE" "$LOCAL_ROOT"
+
+  "$PY" - "$RANK" "$JOBTAG" "$LOCAL_ROOT" "$READY/$RANK.json" "$SELF" <<'PYEOF'
+  import hashlib
+  import json
+  import os
+  import stat
+  import sys
+  from pathlib import Path
+
+  rank = int(sys.argv[1])
+  jobtag = sys.argv[2]
+  local_root = Path(sys.argv[3])
+  ready = Path(sys.argv[4])
+  spec = Path(sys.argv[5])
+
+  def mount_for(path: Path) -> dict:
+      resolved = str(path.resolve(strict=True))
+      best = None
+      for line in Path('/proc/self/mountinfo').read_text(encoding='utf-8').splitlines():
+          left, right = line.split(' - ', 1)
+          fields = left.split()
+          mountpoint = fields[4].replace('\\040', ' ').replace('\\011', '\t')
+          if resolved == mountpoint or resolved.startswith(mountpoint.rstrip('/') + '/'):
+              if best is None or len(mountpoint) > len(best['mountpoint']):
+                  rfields = right.split()
+                  best = {
+                      'mountpoint': mountpoint,
+                      'mount_options': fields[5],
+                      'fs_type': rfields[0],
+                      'super_options': rfields[2] if len(rfields) > 2 else '',
+                  }
+      if best is None:
+          raise RuntimeError(f'no mountinfo entry for {resolved}')
+      return best
+
+  def path_info(path: Path) -> dict:
+      link_value = path.lstat()
+      resolved = path.resolve(strict=True)
+      value = resolved.stat()
+      if not stat.S_ISDIR(value.st_mode):
+          raise RuntimeError(f'not a directory: {path}')
+      fs = os.statvfs(resolved)
+      return {
+          'path': str(path),
+          'requested_is_symlink': stat.S_ISLNK(link_value.st_mode),
+          'resolved_path_sha256': hashlib.sha256(str(resolved).encode()).hexdigest(),
+          'st_dev': int(value.st_dev),
+          'mode': stat.S_IMODE(value.st_mode),
+          'fragment_bytes': int(fs.f_frsize),
+          'total_bytes': int(fs.f_blocks * fs.f_frsize),
+          'free_bytes_root': int(fs.f_bfree * fs.f_frsize),
+          'available_bytes': int(fs.f_bavail * fs.f_frsize),
+          'mount': mount_for(resolved),
+      }
+
+  nonce_path = local_root / f'worker-{rank}.nonce'
+  payload = os.urandom(4096)
+  fd = os.open(nonce_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+  try:
+      view = memoryview(payload)
+      while view:
+          count = os.write(fd, view)
+          if count <= 0:
+              raise RuntimeError('short nonce write')
+          view = view[count:]
+      os.fsync(fd)
+  finally:
+      os.close(fd)
+  dfd = os.open(local_root, os.O_RDONLY | os.O_DIRECTORY)
+  try:
+      os.fsync(dfd)
+  finally:
+      os.close(dfd)
+  if nonce_path.read_bytes() != payload:
+      raise RuntimeError('nonce readback mismatch')
+
+  boot_raw = Path('/proc/sys/kernel/random/boot_id').read_text(encoding='ascii').strip()
+  report = {
+      'schema_version': 'offline_arb_local_topology_worker_v1',
+      'jobtag': jobtag,
+      'rank': rank,
+      'boot_id_sha256': hashlib.sha256(boot_raw.encode('ascii')).hexdigest(),
+      'hostname_sha256': hashlib.sha256(os.uname().nodename.encode()).hexdigest(),
+      'local': path_info(Path('/local')),
+      'local_evan': path_info(Path('/local/evan')),
+      'local_root': path_info(local_root),
+      'nonce': {
+          'path_basename': nonce_path.name,
+          'bytes': len(payload),
+          'sha256': hashlib.sha256(payload).hexdigest(),
+      },
+      'job_spec_sha256': hashlib.sha256(spec.read_bytes()).hexdigest(),
+  }
+  raw = (json.dumps(report, sort_keys=True, separators=(',', ':')) + '\n').encode()
+  out = os.open(ready, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+  try:
+      view = memoryview(raw)
+      while view:
+          count = os.write(out, view)
+          if count <= 0:
+              raise RuntimeError('short ready report write')
+          view = view[count:]
+      os.fsync(out)
+  finally:
+      os.close(out)
+  parent = os.open(ready.parent, os.O_RDONLY | os.O_DIRECTORY)
+  try:
+      os.fsync(parent)
+  finally:
+      os.close(parent)
+  PYEOF
+
+  for _ in $(seq 1 300); do
+    COUNT=$(find "$READY" -maxdepth 1 -type f -name '*.json' | wc -l)
+    [ "$COUNT" -eq 8 ] && break
+    sleep 1
+  done
+  [ "${COUNT:-0}" -eq 8 ] || { echo "FATAL: ready barrier timeout"; exit 2; }
+
+  "$PY" - "$RANK" "$JOBTAG" "$LOCAL_ROOT" "$READY" "$REPORTS/$RANK.json" <<'PYEOF'
+  import hashlib
+  import json
+  import os
+  import sys
+  from pathlib import Path
+
+  rank = int(sys.argv[1])
+  jobtag = sys.argv[2]
+  local_root = Path(sys.argv[3])
+  ready = Path(sys.argv[4])
+  output = Path(sys.argv[5])
+  controls = [json.loads((ready / f'{idx}.json').read_text()) for idx in range(8)]
+  if [item['rank'] for item in controls] != list(range(8)):
+      raise SystemExit('FATAL: ready rank closure')
+  visible = []
+  for idx, control in enumerate(controls):
+      path = local_root / f'worker-{idx}.nonce'
+      try:
+          raw = path.read_bytes()
+      except FileNotFoundError:
+          continue
+      if len(raw) != control['nonce']['bytes'] or hashlib.sha256(raw).hexdigest() != control['nonce']['sha256']:
+          raise SystemExit('FATAL: visible nonce identity mismatch')
+      visible.append(idx)
+  if rank not in visible:
+      raise SystemExit('FATAL: own local nonce not visible')
+  report = {
+      'schema_version': 'offline_arb_local_topology_visibility_v1',
+      'jobtag': jobtag,
+      'rank': rank,
+      'boot_id_sha256': controls[rank]['boot_id_sha256'],
+      'visible_worker_ranks': visible,
+      'ready_controls_sha256': hashlib.sha256(
+          b''.join((ready / f'{idx}.json').read_bytes() for idx in range(8))
+      ).hexdigest(),
+  }
+  raw = (json.dumps(report, sort_keys=True, separators=(',', ':')) + '\n').encode()
+  fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+  try:
+      view = memoryview(raw)
+      while view:
+          count = os.write(fd, view)
+          if count <= 0:
+              raise RuntimeError('short visibility report write')
+          view = view[count:]
+      os.fsync(fd)
+  finally:
+      os.close(fd)
+  PYEOF
+
+  if [ "$RANK" -eq 0 ]; then
+    for _ in $(seq 1 300); do
+      COUNT=$(find "$REPORTS" -maxdepth 1 -type f -name '*.json' | wc -l)
+      [ "$COUNT" -eq 8 ] && break
+      sleep 1
+    done
+    [ "${COUNT:-0}" -eq 8 ] || { echo "FATAL: report barrier timeout"; exit 2; }
+    "$PY" - "$JOBTAG" "$READY" "$REPORTS" "$EVIDENCE/summary.json" <<'PYEOF'
+  import hashlib
+  import json
+  import os
+  import sys
+  from pathlib import Path
+
+  jobtag, ready_raw, reports_raw, output_raw = sys.argv[1:]
+  ready = Path(ready_raw)
+  reports = Path(reports_raw)
+  output = Path(output_raw)
+  workers = [json.loads((ready / f'{idx}.json').read_text()) for idx in range(8)]
+  visibility = [json.loads((reports / f'{idx}.json').read_text()) for idx in range(8)]
+  if any(item['jobtag'] != jobtag for item in workers + visibility):
+      raise SystemExit('FATAL: jobtag closure')
+  boot_groups = {}
+  for item in workers:
+      boot_groups.setdefault(item['boot_id_sha256'], []).append(item['rank'])
+  node_scoped = all(
+      item['visible_worker_ranks'] == sorted(boot_groups[item['boot_id_sha256']])
+      for item in visibility
+  )
+  all_shared = all(item['visible_worker_ranks'] == list(range(8)) for item in visibility)
+  if not node_scoped and not all_shared:
+      raise SystemExit('FATAL: /local visibility is neither node-scoped nor fully shared')
+  available = [item['local_evan']['available_bytes'] for item in workers]
+  total = [item['local_evan']['total_bytes'] for item in workers]
+  reserve = [max(100 * 1024**3, value // 5) for value in total]
+  safe_device = [max(0, free - hold) for free, hold in zip(available, reserve)]
+  if all_shared:
+      shared_per_worker = min(safe_device) // 8
+      safe = [shared_per_worker] * 8
+      scope = 'shared_across_all_workers'
+  else:
+      safe = [0] * 8
+      for group in boot_groups.values():
+          per_worker = min(safe_device[idx] for idx in group) // len(group)
+          for idx in group:
+              safe[idx] = per_worker
+      scope = 'node_scoped_by_boot_group'
+  if min(safe) < 8 * 1024**3:
+      raise SystemExit('FATAL: less than 8GiB safe staging capacity on a worker')
+  summary = {
+      'schema_version': 'offline_arb_local_topology_summary_v1',
+      'status': 'PASS',
+      'jobtag': jobtag,
+      'workers': 8,
+      'physical_boot_groups': sorted(sorted(group) for group in boot_groups.values()),
+      'local_visibility_scope': scope,
+      'local_is_node_scoped_by_boot_group': node_scoped,
+      'local_is_shared_across_all_workers': all_shared,
+      'total_bytes_min': min(total),
+      'total_bytes_max': max(total),
+      'available_bytes_min': min(available),
+      'available_bytes_max': max(available),
+      'reserve_policy': 'max_100GiB_or_20pct_total',
+      'safe_staging_bytes_min': min(safe),
+      'safe_staging_bytes_per_worker': safe,
+      'cross_job_persistence_assumed': False,
+      'worker_reports_sha256': hashlib.sha256(
+          b''.join((ready / f'{idx}.json').read_bytes() + (reports / f'{idx}.json').read_bytes() for idx in range(8))
+      ).hexdigest(),
+  }
+  summary['summary_sha256'] = hashlib.sha256(
+      (json.dumps(summary, sort_keys=True, separators=(',', ':')) + '\n').encode()
+  ).hexdigest()
+  raw = (json.dumps(summary, sort_keys=True, separators=(',', ':')) + '\n').encode()
+  fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+  try:
+      view = memoryview(raw)
+      while view:
+          count = os.write(fd, view)
+          if count <= 0:
+              raise RuntimeError('short summary write')
+          view = view[count:]
+      os.fsync(fd)
+  finally:
+      os.close(fd)
+  success = output.parent / '_SUCCESS'
+  fd = os.open(success, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+  try:
+      payload = (summary['summary_sha256'] + '\n').encode('ascii')
+      view = memoryview(payload)
+      while view:
+          count = os.write(fd, view)
+          if count <= 0:
+              raise RuntimeError('short success write')
+          view = view[count:]
+      os.fsync(fd)
+  finally:
+      os.close(fd)
+  print('OFFLINE_ARB_LOCAL_TOPOLOGY_PASS ' + json.dumps(summary, sort_keys=True), flush=True)
+  PYEOF
+  else
+    for _ in $(seq 1 300); do
+      [ -f "$EVIDENCE/_SUCCESS" ] && break
+      sleep 1
+    done
+    [ -f "$EVIDENCE/_SUCCESS" ] || { echo "FATAL: summary barrier timeout"; exit 2; }
+  fi
+
+  rm -f -- "$LOCAL_ROOT/worker-$RANK.nonce"
+  rmdir -- "$LOCAL_ROOT" 2>/dev/null || true
+  echo "OFFLINE_ARB_LOCAL_TOPOLOGY_WORKER_PASS rank=$RANK"

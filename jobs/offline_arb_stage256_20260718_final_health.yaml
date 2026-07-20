@@ -1,0 +1,110 @@
+# Post-smoke CPU final-health close.  Re-hashes the complete new release and
+# re-verifies the prior full freeze, then emits the one receipt formal may trust.
+name: evan-offarb-s256-20260718-final-health-v1
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 160
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  CACHE_TAG=${JCC_JOB_ID:-${JOB_ID:-manual}}
+  export PYTHONPYCACHEPREFIX="/local/evan/stage256_20260718_pycache/$CACHE_TAG/$(hostname)"
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  RUN_ID=stage256_20260718_causalmlf_offline_exact_v1
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  ROOT=$BASE/offline_arb_stage256_20260718_semantic_v1
+  CFG=configs/stage256_20260718_causalmlf_offline_exact_v1.yaml
+  PLAN=$ROOT/w64_prod/plan
+  UPSTREAM_FREEZE=$BASE/offline_arb_plans_v1/FREEZE_MANIFEST.json
+  UPSTREAM_VERIFY=$ROOT/FINAL_HEALTH_UPSTREAM_VERIFY.json
+  RELEASE_VERIFY=$ROOT/FINAL_HEALTH_RELEASE_VERIFY.json
+  OUT=$ROOT/FINAL_HEALTH_SUCCESS.json
+  SCRIPT=scripts/offline_arb/freeze_stage256_20260718_release.py
+  FORMAL_CK=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage256_20260718_causalmlf_offline_exact_v1
+  EXPECTED_ARCH_FP_SHA256=70546507a768a9d01705b8118b6e3cfea3f055f22db5e9bcdfb3e25e7d022642
+  MANIFEST_SHA256=a18ba1f1250e3b00abdc1051dc71e08a254b8855d5b61b9975e88d2e6ae2ee05
+
+  for REQUIRED in \
+    "$ROOT/FREEZE_MANIFEST.json" \
+    "$ROOT/FREEZE_VERIFY_SUCCESS.json" \
+    "$ROOT/SEMANTIC_VALIDATE_SUCCESS.json" \
+    "$ROOT/SMOKE_SUCCESS.json" \
+    "$ROOT/SMOKE_CHECKPOINT_SUCCESS.json"; do
+    test -f "$REQUIRED" && test ! -L "$REQUIRED" \
+      || { echo "FATAL: final-health prerequisite missing/non-regular: $REQUIRED"; exit 43; }
+  done
+  for TARGET in "$UPSTREAM_VERIFY" "$RELEASE_VERIFY" "$OUT" "$ROOT/final_health_contract.json"; do
+    test ! -e "$TARGET" && test ! -L "$TARGET" \
+      || { echo "FATAL: final-health create-once output exists: $TARGET"; exit 40; }
+  done
+  test ! -e "$FORMAL_CK" && test ! -L "$FORMAL_CK" \
+    || { echo "FATAL: formal checkpoint namespace is not fresh"; exit 42; }
+  if grep -Eq '^[[:space:]]+init_from:' "$CFG"; then echo "FATAL: trainer.init_from is forbidden"; exit 42; fi
+
+  timeout --signal=TERM --kill-after=60s 14400s \
+    "$PY" scripts/offline_arb/make_freeze_manifest.py \
+      --verify-freeze --freeze "$UPSTREAM_FREEZE" \
+      --repo /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop \
+      --plan "$BASE/offline_arb_plans_v1/w64_prod/plan" \
+      --catalog-root "$BASE/offline_arb_catalog_v1" \
+      --sampling /fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json \
+      --animefreq-root "$BASE/offline_arb_animefreq_v1" \
+      --sidecar-root "$BASE/offline_arb_caption_sidecar_v1" \
+      > "$UPSTREAM_VERIFY.tmp"
+  mv "$UPSTREAM_VERIFY.tmp" "$UPSTREAM_VERIFY"
+
+  timeout --signal=TERM --kill-after=60s 14400s \
+    "$PY" "$SCRIPT" --verify \
+      --release-root "$ROOT" --manifest "$ROOT/FREEZE_MANIFEST.json" \
+      --output "$RELEASE_VERIFY"
+
+  # Light config/receipt close after both expensive verifiers have passed.
+  "$PY" scripts/offline_arb/verify_stage256_20260718_contract.py \
+    --config "$CFG" \
+    --baseline-config configs/stage256_offline_exact_v1.yaml \
+    --receipt "$ROOT/SEMANTIC_VALIDATE_SUCCESS.json" \
+    --receipt "$ROOT/FREEZE_VERIFY_SUCCESS.json" \
+    --receipt "$ROOT/SMOKE_SUCCESS.json" \
+    > "$ROOT/final_health_contract.json.tmp"
+  mv "$ROOT/final_health_contract.json.tmp" "$ROOT/final_health_contract.json"
+
+  "$PY" - "$ROOT" "$CFG" "$PLAN" "$UPSTREAM_VERIFY" "$RELEASE_VERIFY" "$OUT" "$RUN_ID" "$EXPECTED_ARCH_FP_SHA256" "$MANIFEST_SHA256" <<'PYEOF'
+  import hashlib, json, os, pathlib, sys
+  root, config, plan, upstream_path, release_path, output = map(pathlib.Path, sys.argv[1:7])
+  run_id, arch, gpic_manifest = sys.argv[7:10]
+  upstream=json.load(open(upstream_path,encoding="utf-8")); release=json.load(open(release_path,encoding="utf-8"))
+  smoke_path=root/"SMOKE_SUCCESS.json"; smoke=json.load(open(smoke_path,encoding="utf-8"))
+  semantic_path=root/"SEMANTIC_VALIDATE_SUCCESS.json"; semantic=json.load(open(semantic_path,encoding="utf-8"))
+  assert upstream.get("status")=="PASS" and upstream.get("mode")=="verify-freeze", upstream
+  assert release.get("status")=="PASS", release
+  assert smoke.get("status")=="PASS" and int(smoke.get("expected_step",-1))==3, smoke
+  assert semantic.get("status")=="PASS" and int(semantic.get("tag_only_exposure",-1))==0, semantic
+  freeze_path=root/"FREEZE_MANIFEST.json"
+  freeze_sha=hashlib.sha256(freeze_path.read_bytes()).hexdigest()
+  assert release.get("freeze_sha256")==freeze_sha, (release,freeze_sha)
+  value={
+    "status":"PASS","run_id":run_id,"tag_only_exposure":0,
+    "architecture_fingerprint_sha256":arch,"gpic_manifest_sha256":gpic_manifest,
+    "freeze_sha256":freeze_sha,
+    "config_sha256":hashlib.sha256(config.read_bytes()).hexdigest(),
+    "formal_plan_header_sha256":hashlib.sha256((plan/"header.json").read_bytes()).hexdigest(),
+    "formal_plan_checksums_sha256":hashlib.sha256((plan/"checksums.json").read_bytes()).hexdigest(),
+    "smoke_success_sha256":hashlib.sha256(smoke_path.read_bytes()).hexdigest(),
+    "semantic_validate_sha256":hashlib.sha256(semantic_path.read_bytes()).hexdigest(),
+    "upstream_verify_sha256":hashlib.sha256(upstream_path.read_bytes()).hexdigest(),
+    "release_verify_sha256":hashlib.sha256(release_path.read_bytes()).hexdigest(),
+  }
+  fd=os.open(output,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o444)
+  with os.fdopen(fd,"w",encoding="utf-8") as f: json.dump(value,f,indent=2,sort_keys=True); f.write("\n"); f.flush(); os.fsync(f.fileno())
+  print(json.dumps(value,indent=2,sort_keys=True))
+  PYEOF
+  echo "FINAL_HEALTH_PASS sha256=$(sha256sum "$OUT" | awk '{print $1}')"

@@ -35,6 +35,10 @@ def main() -> None:
     })
     ds = CompleteV1Dataset(**kwargs)
     ds._multi_ar_active = True
+    # 审计要测【未剪枝】的真实 native 分布：bucket_prob_floor>0 时 Bucketer 会把稀有桶折进保留桶,
+    # 直接用会测出已剪枝分布 → 回填 config 形成自我强化污染（2026-07-09 review C1）。这里解除 clamp。
+    if ds._mar_bucketer is not None:
+        ds._mar_bucketer.allowed = None
     d = args.domain
     if d not in ds.domains:
         raise SystemExit(f"domain {d!r} not active; active={ds.domains}")

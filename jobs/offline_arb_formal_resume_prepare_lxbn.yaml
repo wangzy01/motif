@@ -1,0 +1,303 @@
+# CPU-only, one-shot chained audit/preparation for resuming after the failed
+# lxbn FORMAL attempt.  The previous s9n9/pjhb receipt is an immutable parent
+# receipt.  The complete lxbn 1..4520 metrics stream is preserved byte-for-byte
+# before the active stream is atomically cut back to the unchanged step-3000
+# checkpoint boundary.
+name: evan-offarb-formal-lxbn-resume-prepare
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 256
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  SOURCE_JOBTAG=evan-mot-crop-offline-exact-256-8x8-formal-lxbn
+  PRIOR_SOURCE_JOBTAG=evan-mot-crop-offline-exact-256-8x8-formal-s9n9
+  PRIOR_AUDIT_JOBTAG=evan-offarb-formal-s9n9-resume-prepare-pjhb
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  CK=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage256_offline_exact_v1
+  PRIOR=$BASE/offline_formal_resume_prep_v1/$PRIOR_SOURCE_JOBTAG/$PRIOR_AUDIT_JOBTAG
+  AUDIT_HOST=$(hostname)
+  AUDIT_JOBTAG=${AUDIT_HOST%-0}
+  OUT=$BASE/offline_formal_resume_prep_v1/$SOURCE_JOBTAG/$AUDIT_JOBTAG
+  test ! -e "$OUT" && test ! -L "$OUT" \
+    || { echo "FATAL: resume-prep output namespace exists: $OUT"; exit 2; }
+  mkdir -p "$(dirname "$OUT")"
+  mkdir "$OUT"
+
+  "$PY" - "$CK" "$OUT" "$SOURCE_JOBTAG" "$AUDIT_JOBTAG" \
+    "$PRIOR" "$PRIOR_SOURCE_JOBTAG" "$PRIOR_AUDIT_JOBTAG" <<'PYEOF'
+  import gc
+  import hashlib
+  import json
+  import os
+  import stat
+  import sys
+  from pathlib import Path
+
+  import torch
+
+  checkpoint_root = Path(sys.argv[1])
+  output_root = Path(sys.argv[2])
+  source_jobtag = sys.argv[3]
+  audit_jobtag = sys.argv[4]
+  prior_root = Path(sys.argv[5])
+  prior_source_jobtag = sys.argv[6]
+  prior_audit_jobtag = sys.argv[7]
+  checkpoint = checkpoint_root / "last.pt"
+  metrics = checkpoint_root / "metrics.jsonl"
+  prior_receipt_path = prior_root / "receipt.json"
+  prior_success_path = prior_root / "_SUCCESS"
+
+  expected_checkpoint_step = 3_000
+  expected_failed_last_step = 4_520
+  expected_checkpoint_sha = "da0e2d73b723c1e56db5698ae94ecc562f4b9e94ac801fb675c5bb2c0649c8a9"
+  expected_checkpoint_identity = {
+      "device": 2_985_749_804,
+      "inode": 144_116_596_237_926_403,
+      "bytes": 22_636_962_042,
+      "mtime_ns": 1_783_907_644_000_000_000,
+      "ctime_ns": 1_783_907_644_000_000_000,
+  }
+  expected_prior_receipt_sha = "ffd314f289ccb2c5b8c8f39c2841ecff8fed84cd9b837448527b4a82e85c28e6"
+  expected_prior_success_sha = "20e5b924dfc40eca84a4aa04a5aa4ab1c636b5fe75a14e6961da61869a2a8ad9"
+  expected_prior_failed_metrics_sha = "85ecc0e9ff8e9d604b272e2ee2558f84e6753d0f27ea2b0dd4681263ed184643"
+  expected_resume_metrics_sha = "435bd438b9d07b8091aa2f83fa8d90608613d90036dec252c45de02fcc16e869"
+  expected_failed_metrics_sha = "3bf13e1725d9ee9f8c546a53ffe8c2a2b1a8e1155c0e3f4e1bb07e50b04cefdd"
+  expected_failed_tail_sha = "e48f92960557fc389982ab4f61ecf903940af1c2f4f52b71475ee1d44465748d"
+
+  def file_identity(path):
+      value = path.lstat()
+      if path.is_symlink() or not stat.S_ISREG(value.st_mode) or value.st_size <= 0:
+          raise SystemExit(f"FATAL: not a nonempty ordinary file: {path}")
+      return {
+          "device": value.st_dev,
+          "inode": value.st_ino,
+          "bytes": value.st_size,
+          "mtime_ns": value.st_mtime_ns,
+          "ctime_ns": value.st_ctime_ns,
+      }
+
+  def read_stable(path):
+      before = file_identity(path)
+      raw = path.read_bytes()
+      if file_identity(path) != before:
+          raise SystemExit(f"FATAL: file changed while reading: {path}")
+      return raw, before
+
+  def sha256_file(path):
+      digest = hashlib.sha256()
+      before = file_identity(path)
+      with path.open("rb", buffering=0) as handle:
+          for block in iter(lambda: handle.read(8 << 20), b""):
+              digest.update(block)
+      if file_identity(path) != before:
+          raise SystemExit(f"FATAL: file changed while hashing: {path}")
+      return digest.hexdigest(), before
+
+  def atomic_exclusive(path, raw):
+      temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+      if path.exists() or path.is_symlink() or temporary.exists() or temporary.is_symlink():
+          raise SystemExit(f"FATAL: refusing output overwrite: {path}")
+      with temporary.open("xb", buffering=0) as handle:
+          handle.write(raw)
+          handle.flush()
+          os.fsync(handle.fileno())
+      os.replace(temporary, path)
+
+  prior_receipt_raw, prior_receipt_identity = read_stable(prior_receipt_path)
+  prior_success_raw, prior_success_identity = read_stable(prior_success_path)
+  prior_receipt_sha = hashlib.sha256(prior_receipt_raw).hexdigest()
+  prior_success_sha = hashlib.sha256(prior_success_raw).hexdigest()
+  if prior_receipt_sha != expected_prior_receipt_sha:
+      raise SystemExit(f"FATAL: prior receipt SHA drift: {prior_receipt_sha}")
+  if prior_success_sha != expected_prior_success_sha:
+      raise SystemExit(f"FATAL: prior _SUCCESS SHA drift: {prior_success_sha}")
+  prior_receipt = json.loads(prior_receipt_raw)
+  if (
+      prior_receipt.get("schema_version") != "offline_formal_resume_prep_v1"
+      or prior_receipt.get("status") != "PASS"
+      or prior_receipt.get("source_jobtag") != prior_source_jobtag
+      or prior_receipt.get("audit_jobtag") != prior_audit_jobtag
+      or prior_receipt.get("checkpoint", {}).get("global_step") != expected_checkpoint_step
+      or prior_receipt.get("checkpoint", {}).get("sha256") != expected_checkpoint_sha
+      or prior_receipt.get("failed_metrics", {}).get("rows") != 3_080
+      or prior_receipt.get("failed_metrics", {}).get("sha256") != expected_prior_failed_metrics_sha
+      or prior_receipt.get("resume_metrics", {}).get("rows") != expected_checkpoint_step
+      or prior_receipt.get("resume_metrics", {}).get("sha256") != expected_resume_metrics_sha
+  ):
+      raise SystemExit("FATAL: prior pjhb receipt semantic binding drift")
+  for key, expected in expected_checkpoint_identity.items():
+      if prior_receipt["checkpoint"].get(key) != expected:
+          raise SystemExit(f"FATAL: prior receipt checkpoint identity drift: {key}")
+
+  ckpt_sha, ckpt_identity = sha256_file(checkpoint)
+  if ckpt_sha != expected_checkpoint_sha:
+      raise SystemExit(f"FATAL: checkpoint SHA drift: {ckpt_sha}")
+  if ckpt_identity != expected_checkpoint_identity:
+      raise SystemExit(f"FATAL: checkpoint identity drift: {ckpt_identity}")
+  state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+  required = {"trainable_state", "optimizer", "ema", "scheduler", "global_step", "ablation_fp"}
+  if not isinstance(state, dict) or set(state) != required:
+      raise SystemExit(
+          f"FATAL: checkpoint top-level keys drift: "
+          f"{sorted(state) if isinstance(state, dict) else type(state)}"
+      )
+  if type(state["global_step"]) is not int or state["global_step"] != expected_checkpoint_step:
+      raise SystemExit(f"FATAL: checkpoint global_step drift: {state.get('global_step')}")
+  if not isinstance(state["trainable_state"], dict) or not state["trainable_state"]:
+      raise SystemExit("FATAL: empty trainable_state")
+  if not isinstance(state["optimizer"], dict) or not state["optimizer"].get("state"):
+      raise SystemExit("FATAL: empty optimizer state")
+  if not isinstance(state["scheduler"], dict) or not state["scheduler"]:
+      raise SystemExit("FATAL: empty scheduler state")
+  if not isinstance(state["ema"], dict) or not state["ema"]:
+      raise SystemExit("FATAL: empty EMA state")
+  if not isinstance(state["ablation_fp"], dict) or not state["ablation_fp"]:
+      raise SystemExit("FATAL: empty ablation fingerprint")
+  checkpoint_structure = {
+      "global_step": state["global_step"],
+      "trainable_tensors": len(state["trainable_state"]),
+      "optimizer_state_entries": len(state["optimizer"]["state"]),
+      "optimizer_param_groups": len(state["optimizer"].get("param_groups", [])),
+      "ema_tensors": len(state["ema"]),
+      "scheduler_keys": sorted(state["scheduler"]),
+      "ablation_fp": state["ablation_fp"],
+  }
+  for key in (
+      "trainable_tensors",
+      "optimizer_state_entries",
+      "optimizer_param_groups",
+      "ema_tensors",
+      "scheduler_keys",
+      "ablation_fp",
+  ):
+      if checkpoint_structure[key] != prior_receipt["checkpoint"].get(key):
+          raise SystemExit(f"FATAL: checkpoint structure differs from pjhb receipt: {key}")
+  del state
+  gc.collect()
+  if file_identity(checkpoint) != ckpt_identity:
+      raise SystemExit("FATAL: checkpoint changed while loading")
+
+  metrics_raw, metrics_identity = read_stable(metrics)
+  if hashlib.sha256(metrics_raw).hexdigest() != expected_failed_metrics_sha:
+      raise SystemExit("FATAL: lxbn failed metrics SHA drift")
+  lines = metrics_raw.splitlines(keepends=True)
+  if len(lines) != expected_failed_last_step or any(not line.endswith(b"\n") for line in lines):
+      raise SystemExit(f"FATAL: failed metrics shape drift: rows={len(lines)}")
+  for expected, raw in enumerate(lines, 1):
+      value = json.loads(raw)
+      if not isinstance(value, dict) or value.get("step") != expected:
+          raise SystemExit(
+              f"FATAL: metrics sequence drift at row={expected}: "
+              f"{value.get('step') if isinstance(value, dict) else type(value)}"
+          )
+  resume_raw = b"".join(lines[:expected_checkpoint_step])
+  failed_tail_raw = b"".join(lines[expected_checkpoint_step:])
+  resume_sha = hashlib.sha256(resume_raw).hexdigest()
+  failed_tail_sha = hashlib.sha256(failed_tail_raw).hexdigest()
+  if resume_sha != expected_resume_metrics_sha:
+      raise SystemExit(f"FATAL: step-3000 metrics prefix drift: {resume_sha}")
+  if failed_tail_sha != expected_failed_tail_sha:
+      raise SystemExit(f"FATAL: lxbn metrics tail drift: {failed_tail_sha}")
+
+  backup = output_root / f"metrics.{source_jobtag}.steps1-{expected_failed_last_step}.jsonl"
+  atomic_exclusive(backup, metrics_raw)
+  backup_sha, backup_identity = sha256_file(backup)
+  if backup_sha != expected_failed_metrics_sha:
+      raise SystemExit("FATAL: lxbn metrics backup verification failed")
+
+  temporary_metrics = checkpoint_root / f".metrics.jsonl.resume-prep.{audit_jobtag}.tmp"
+  if temporary_metrics.exists() or temporary_metrics.is_symlink():
+      raise SystemExit(f"FATAL: stale metrics temporary: {temporary_metrics}")
+  with temporary_metrics.open("xb", buffering=0) as handle:
+      handle.write(resume_raw)
+      handle.flush()
+      os.fsync(handle.fileno())
+  if (
+      metrics.read_bytes() != metrics_raw
+      or file_identity(metrics) != metrics_identity
+      or file_identity(checkpoint) != ckpt_identity
+      or file_identity(prior_receipt_path) != prior_receipt_identity
+      or file_identity(prior_success_path) != prior_success_identity
+  ):
+      raise SystemExit("FATAL: checkpoint, metrics, or parent receipt changed before cutover")
+  os.replace(temporary_metrics, metrics)
+  directory_fd = os.open(checkpoint_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+  try:
+      os.fsync(directory_fd)
+  finally:
+      os.close(directory_fd)
+  if metrics.read_bytes() != resume_raw:
+      raise SystemExit("FATAL: active metrics cutover verification failed")
+
+  receipt = {
+      "schema_version": "offline_formal_resume_prep_v2_chained",
+      "status": "PASS",
+      "source_jobtag": source_jobtag,
+      "audit_jobtag": audit_jobtag,
+      "parent_receipt": {
+          "source_jobtag": prior_source_jobtag,
+          "audit_jobtag": prior_audit_jobtag,
+          "root": str(prior_root.resolve(strict=True)),
+          "receipt_path": str(prior_receipt_path.resolve(strict=True)),
+          "receipt_sha256": prior_receipt_sha,
+          "success_path": str(prior_success_path.resolve(strict=True)),
+          "success_sha256": prior_success_sha,
+      },
+      "checkpoint": {
+          "path": str(checkpoint.resolve(strict=True)),
+          "sha256": ckpt_sha,
+          **ckpt_identity,
+          **checkpoint_structure,
+      },
+      "failed_metrics": {
+          "rows": expected_failed_last_step,
+          "step_range": [1, expected_failed_last_step],
+          "sha256": expected_failed_metrics_sha,
+          "backup_path": str(backup.resolve(strict=True)),
+          "backup_identity": backup_identity,
+          "post_checkpoint_tail": {
+              "rows": expected_failed_last_step - expected_checkpoint_step,
+              "step_range": [expected_checkpoint_step + 1, expected_failed_last_step],
+              "sha256": failed_tail_sha,
+          },
+      },
+      "resume_metrics": {
+          "rows": expected_checkpoint_step,
+          "step_range": [1, expected_checkpoint_step],
+          "sha256": resume_sha,
+          "path": str(metrics.resolve(strict=True)),
+      },
+  }
+  receipt_raw = json.dumps(
+      receipt, sort_keys=True, separators=(",", ":"), allow_nan=False
+  ).encode("utf-8")
+  receipt_path = output_root / "receipt.json"
+  atomic_exclusive(receipt_path, receipt_raw)
+  receipt_sha = hashlib.sha256(receipt_raw).hexdigest()
+  marker = (
+      f"PASS|{source_jobtag}|{audit_jobtag}|{prior_receipt_sha}|{ckpt_sha}|"
+      f"{expected_failed_metrics_sha}|{resume_sha}|{receipt_sha}\n"
+  ).encode("ascii")
+  atomic_exclusive(output_root / "_SUCCESS", marker)
+  directory_fd = os.open(output_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+  try:
+      os.fsync(directory_fd)
+  finally:
+      os.close(directory_fd)
+  print(
+      "OFFLINE_FORMAL_CHAINED_RESUME_PREP_PASS "
+      f"source={source_jobtag} parent_receipt_sha256={prior_receipt_sha} "
+      f"checkpoint_step={expected_checkpoint_step} checkpoint_sha256={ckpt_sha} "
+      f"failed_metrics_sha256={expected_failed_metrics_sha} "
+      f"resume_metrics_sha256={resume_sha} receipt_sha256={receipt_sha}"
+  )
+  PYEOF

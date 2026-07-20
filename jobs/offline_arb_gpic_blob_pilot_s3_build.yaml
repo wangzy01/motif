@@ -1,0 +1,140 @@
+# Separate write-once S3 builder.  Disabled by default; requires reviewed edit.
+# Fill the two authority assignments, submit once, then freeze this file through
+# analysis.  Restoring ENABLE_S3_WRITE=false early intentionally breaks closure.
+name: evan-mot-crop-offlinearb-gpic-blob-pilot-s3-build
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  umask 077
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1
+  export PYTHONFAULTHANDLER=1
+  export PYTHONHASHSEED=0
+  export PYTHONDONTWRITEBYTECODE=1
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+
+  # Both literals require review before submission.  No S3 key is touched while false.
+  ENABLE_S3_WRITE=true
+  SOURCE_BUILD_JOBTAG=evan-mot-crop-offlinearb-gpic-blob-pilot-build-m86c
+  [ "$ENABLE_S3_WRITE" = true ] \
+    || { echo "FATAL: S3 pilot write remains disabled pending explicit review"; exit 2; }
+  [ -n "$SOURCE_BUILD_JOBTAG" ] \
+    || { echo "FATAL: SOURCE_BUILD_JOBTAG must explicitly bind the FSx reference"; exit 2; }
+
+  HOST=$(hostname)
+  [ "${HOST##*-}" = 0 ] || { echo "FATAL: single-worker identity drift"; exit 2; }
+  JOBTAG=${HOST%-0}
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  RUNNER=$REPO/scripts/offline_arb/run_offline_gpic_blob_pilot.py
+  SELF=$REPO/jobs/offline_arb_gpic_blob_pilot_s3_build.yaml
+  CATALOG=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_v1
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  RUN_ID=offline_gpic_blob_pilot_20260712r2
+  FSX_REF=$BASE/$RUN_ID/$SOURCE_BUILD_JOBTAG/compare20k_s0_b4g
+  BUILD_EVIDENCE=$BASE/${RUN_ID}_build_evidence/$SOURCE_BUILD_JOBTAG
+  EVIDENCE=$BASE/${RUN_ID}_s3_build_evidence/$JOBTAG
+  S3_ALLOWED=/s3/evan/artifacts
+  S3_ROOT=$S3_ALLOWED/$RUN_ID/$JOBTAG/s3_20k_s0_b4g
+
+  for FILE in "$RUNNER" "$SELF" "$CATALOG/header.json" "$CATALOG/gpic.parquet" \
+      "$FSX_REF/manifest.json" "$FSX_REF/_SUCCESS" "$BUILD_EVIDENCE/source_scan.json"; do
+    [ -f "$FILE" ] && [ ! -L "$FILE" ] && [ -s "$FILE" ] \
+      || { echo "FATAL: invalid S3 builder input"; exit 2; }
+  done
+  [ -d "$S3_ALLOWED" ] && [ ! -L "$S3_ALLOWED" ] \
+    || { echo "FATAL: approved writable S3 prefix unavailable"; exit 2; }
+  [ ! -e "$S3_ROOT" ] && [ ! -L "$S3_ROOT" ] \
+    || { echo "FATAL: S3 write-once namespace is not fresh"; exit 2; }
+  [ ! -e "$EVIDENCE" ] && [ ! -L "$EVIDENCE" ] \
+    || { echo "FATAL: S3 build evidence namespace is not fresh"; exit 2; }
+  mkdir -m 700 -p "$EVIDENCE"
+
+  THREADS=$("$PY" - "$FSX_REF/manifest.json" "$BUILD_EVIDENCE/source_scan.json" <<'PYEOF'
+  import json,sys
+  ref=json.load(open(sys.argv[1],encoding="utf-8"))
+  scan=json.load(open(sys.argv[2],encoding="utf-8"))
+  if ref.get("schema_version") != "offline_gpic_blob_v1_pilot": raise SystemExit("FATAL ref schema")
+  if ref["selection"]["sample_rows"] != 20000: raise SystemExit("FATAL ref rows")
+  if ref["layout"]["blob_target_bytes"] != 4294967296: raise SystemExit("FATAL ref blob layout")
+  if ref["layout"]["stripe"]["count"] != 0: raise SystemExit("FATAL ref stripe")
+  value=scan.get("recommended_threads_by_median")
+  if value not in {8,16,24,32,48}: raise SystemExit("FATAL source threads")
+  print(value)
+  PYEOF
+  )
+
+  timeout --preserve-status --signal=TERM --kill-after=30s 10800s \
+    "$PY" "$RUNNER" build \
+      --catalog-root "$CATALOG" \
+      --sample-rows 20000 \
+      --coverage-intervals 256 \
+      --min-unique-shards 6500 \
+      --source-attempts 3 \
+      --source-order path \
+      --threads "$THREADS" \
+      --blob-target-bytes 4294967296 \
+      --max-total-source-bytes 4294967296 \
+      --stripe-count 0 \
+      --backend mountpoint_s3 \
+      --allowed-output-prefix "$S3_ALLOWED" \
+      --output-root "$S3_ROOT" \
+      --write-authority offline-gpic-blob-v1-pilot-write-authorized \
+      --job-spec "$SELF"
+
+  "$PY" - "$FSX_REF/manifest.json" "$S3_ROOT/manifest.json" "$EVIDENCE/s3_build_receipt.json" \
+    "$SOURCE_BUILD_JOBTAG" "$JOBTAG" "$FSX_REF" "$S3_ROOT" <<'PYEOF'
+  import hashlib,json,os,sys
+  from pathlib import Path
+  left=json.load(open(sys.argv[1],encoding="utf-8")); right=json.load(open(sys.argv[2],encoding="utf-8"))
+  def vector(x):
+      f=x["files"]
+      return {
+          "selection":{k:f["selection"][k] for k in ("bytes","sha256")},
+          "index":{k:f["index"][k] for k in ("bytes","sha256")},
+          "blobs":[{k:b[k] for k in ("blob_id","bytes","sha256")} for b in f["blobs"]],
+      }
+  checks=(
+      left["catalog"]["catalog_hash"] == right["catalog"]["catalog_hash"],
+      left["catalog"]["gpic"]["sha256"] == right["catalog"]["gpic"]["sha256"],
+      left["selection"]["selection_sha256"] == right["selection"]["selection_sha256"],
+      vector(left) == vector(right),
+  )
+  if not all(checks): raise SystemExit("FATAL: FSx/S3 payload identity drift")
+  left_raw=Path(sys.argv[1]).read_bytes(); right_raw=Path(sys.argv[2]).read_bytes()
+  receipt={
+      "schema_version":"offline_gpic_blob_s3_build_receipt_v1",
+      "status":"BYTE_IDENTICAL",
+      "source_build_jobtag":sys.argv[4],
+      "s3_build_jobtag":sys.argv[5],
+      "fsx_root":sys.argv[6],
+      "s3_root":sys.argv[7],
+      "fsx_manifest_raw_sha256":hashlib.sha256(left_raw).hexdigest(),
+      "s3_manifest_raw_sha256":hashlib.sha256(right_raw).hexdigest(),
+      "fsx_manifest_sha256":left["manifest_sha256"],
+      "s3_manifest_sha256":right["manifest_sha256"],
+  }
+  receipt["receipt_sha256"]=hashlib.sha256((json.dumps(receipt,sort_keys=True,separators=(",",":"))+"\n").encode()).hexdigest()
+  raw=(json.dumps(receipt,sort_keys=True,separators=(",",":"))+"\n").encode()
+  fd=os.open(sys.argv[3],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+  try:
+      view=memoryview(raw)
+      while view:
+          count=os.write(fd,view)
+          if count <= 0: raise SystemExit("FATAL: short S3 receipt write")
+          view=view[count:]
+      os.fsync(fd)
+  finally: os.close(fd)
+  directory=os.open(Path(sys.argv[3]).parent,os.O_RDONLY|os.O_DIRECTORY)
+  try: os.fsync(directory)
+  finally: os.close(directory)
+  PYEOF
+  echo "OFFLINE_GPIC_BLOB_PILOT_S3_BUILD_JOB_PASS root=$S3_ROOT evidence=$EVIDENCE"

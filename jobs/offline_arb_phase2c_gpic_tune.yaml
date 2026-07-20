@@ -1,0 +1,41 @@
+# OFFLINE_ARB_V1 Phase-2c · gpic 上探调优(D8 后台线,不阻塞主线)。
+# 只跑 T4 混合 gate,gpic 预取 6 线程/worker(节点 48,vs 2b 的 32);monet=coalesce(2b 裁决),
+# textatlas=simulated(省时;其供给已实证 1635 img/s)。目的:看 48 并发深预取是否突破 88→>90,
+# 混合聚合是否过 347。对照组数据 = p2b T4(32 线程,310.2 img/s)。
+name: evan-mot-crop-offlinearb-p2c-gpictune
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 64
+memGBPerWorker: 384
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  trap 'rm -rf /local/evan/gpic_prefetch_test || true' EXIT
+  rm -rf /local/evan/gpic_prefetch_test || true
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  RUN_TAG="$(date -u +%Y%m%dT%H%M%SZ)_${HOSTNAME:-local}_${RANDOM}"
+  ROOT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_phase2b_${RUN_TAG}
+  mkdir -p "$ROOT"
+  REUSE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_phase2_20260710T002824Z_evan-mot-crop-offlinearb-p2-io-rp25-0_31780/s1_indexes
+  "$PY" -m py_compile scripts/offline_arb/phase2_shootout.py scripts/offline_arb/phase2b_shootout.py
+  set +e
+  timeout --preserve-status --signal=TERM --kill-after=120s 3000s \
+    "$PY" scripts/offline_arb/phase2b_shootout.py --test T4 --output-dir "$ROOT" \
+      --reuse-index-dir "$REUSE" --local-scratch /local/evan/gpic_prefetch_test \
+      --t4-monet-mode coalesce --t4-textatlas-mode simulated \
+      --t4-gpic-threads-per-worker 6 2>&1 | tee "$ROOT/t4_gpic48.log"
+  RC=${PIPESTATUS[0]}
+  set -e
+  echo "rc=$RC" | tee -a "$ROOT/pilot_summary.txt"
+  cat "$ROOT/pilot_summary.txt" || true
+  V=$(grep -o '"verdict": "[A-Z_]*"' "$ROOT/taskT4_result.json" | head -1 || echo none)
+  echo "T4_gpic48 verdict=$V"
+  # 调优探索 job:数据本身就是产出,只有脚本崩溃才算失败
+  [ -s "$ROOT/taskT4_result.json" ] || exit 1
+  exit 0

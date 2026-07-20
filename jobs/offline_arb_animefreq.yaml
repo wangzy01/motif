@@ -1,0 +1,34 @@
+# OFFLINE_ARB_V1:anime 标签频率表预计算(2026-07-11,Evan 拍板"修完再上 formal")。
+# 背景:gpuval 实证 loader 运行时整 shard 冷扫 tags_general 造成每 ~20 步 60-118s 停顿;
+# 预计算逐 shard Counter(语义与运行时扫描逐字节一致,caption 输出不变),loader 改读 ~ms 级 json.gz。
+# 输出:offline_arb_animefreq_v1/<shard>.json.gz ×N + header.json + _SUCCESS(内置抽 2 shard 等值自检)。
+name: evan-mot-crop-offlinearb-animefreq
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 96
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  ROOT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_animefreq_v1
+  CAT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_v1
+  test -f "$CAT/header.json" || { echo "FATAL: catalog missing"; exit 34; }
+  "$PY" -m py_compile scripts/offline_arb/precompute_anime_freq.py
+  RC=0
+  set +e
+  timeout --signal=TERM --kill-after=60s 5340s \
+    "$PY" scripts/offline_arb/precompute_anime_freq.py \
+      --output-dir "$ROOT" --workers 14 \
+    2>&1 | tee "$ROOT.log"
+  RC=${PIPESTATUS[0]}
+  set -e
+  echo "==== ANIMEFREQ exit_code=$RC ===="
+  test -f "$ROOT/_SUCCESS" && echo "ANIMEFREQ _SUCCESS present" || echo "ANIMEFREQ _SUCCESS MISSING"
+  exit "$RC"

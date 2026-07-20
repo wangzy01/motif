@@ -1,0 +1,83 @@
+# OFFLINE_ARB_V1 Phase-4 · 全规模 planner 验证(H=166,667=384M 曝光,W=16,bs=144,真 N[B,d])。
+# 变体:floor0p005(Evan 拍板的生产桶表,20 桶)+ floor0(95 桶全表压力档,顺带裁决其可行性)。
+# 每变体:build + 全量重建(V6)+ --start-step H/2 后缀重建(V5)→ 独立验证器两轮。
+# 判定:validate 全 PASS + 构建可行 → job 成功;floor0 若 solver 判不可行 → 记 DECISIVE_INFEASIBLE
+# 不算 job 失败(它只是压力档,生产档是 floor0p005)。产物 ~18.5GB(/fsx,授权内),重建副本验完即清。
+name: evan-mot-crop-offlinearb-p4-fullscale
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 64
+memGBPerWorker: 384
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=8 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  RUN_TAG="$(date -u +%Y%m%dT%H%M%SZ)_${HOSTNAME:-local}_${RANDOM}"
+  ROOT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_phase4_fullscale_${RUN_TAG}
+  mkdir -p "$ROOT"
+  NMAT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_bucketstats_v1/N_matrix.parquet
+  [ -s "$NMAT" ] || { echo "FATAL: N_matrix missing"; exit 32; }
+  "$PY" -m py_compile scripts/offline_arb/make_planner_input.py scripts/offline_arb/build_plan.py \
+        scripts/offline_arb/validate_plan.py training/dataline_offline/planner_v1.py
+  H=166667; HALF=83333
+  FAIL=0
+  run_variant () {
+    local VAR="$1" FLOOR="$2" STRESS="$3"
+    local D="$ROOT/$VAR"
+    mkdir -p "$D"
+    set +e
+    timeout --preserve-status 900s "$PY" scripts/offline_arb/make_planner_input.py \
+      --n-matrix "$NMAT" --total-steps "$H" --floor "$FLOOR" \
+      --plan-id "stage256_offline_arb_${VAR}" --out "$D/planner_input.json" \
+      2>&1 | tee "$D/make_input.log"
+    local RC=${PIPESTATUS[0]}
+    if [ "$RC" -ne 0 ]; then set -e; echo "variant=$VAR stage=make_input rc=$RC verdict=FAIL" | tee -a "$ROOT/summary.txt"; FAIL=1; return; fi
+    local T0=$SECONDS
+    timeout --preserve-status 5400s "$PY" scripts/offline_arb/build_plan.py \
+      --input "$D/planner_input.json" --out "$D/plan" > "$D/build_plan.log" 2>&1
+    RC=$?
+    local BUILD_WALL=$((SECONDS - T0))
+    if [ "$RC" -ne 0 ]; then
+      set -e
+      if grep -q 'plan_infeasible' "$D/build_plan.log" && [ "$STRESS" = "stress" ]; then
+        echo "variant=$VAR stage=build verdict=DECISIVE_INFEASIBLE(压力档,诊断见 build_plan.log)" | tee -a "$ROOT/summary.txt"
+        tail -20 "$D/build_plan.log" || true
+        return
+      fi
+      echo "variant=$VAR stage=build rc=$RC verdict=FAIL" | tee -a "$ROOT/summary.txt"; tail -30 "$D/build_plan.log"; FAIL=1; return
+    fi
+    timeout --preserve-status 5400s "$PY" scripts/offline_arb/build_plan.py \
+      --input "$D/planner_input.json" --out "$D/plan_rebuild" > "$D/build_rebuild.log" 2>&1
+    RC=$?
+    if [ "$RC" -ne 0 ]; then set -e; echo "variant=$VAR stage=rebuild rc=$RC verdict=FAIL" | tee -a "$ROOT/summary.txt"; FAIL=1; return; fi
+    timeout --preserve-status 5400s "$PY" scripts/offline_arb/build_plan.py \
+      --input "$D/planner_input.json" --out "$D/plan_suffix" --start-step "$HALF" \
+      > "$D/build_suffix.log" 2>&1
+    RC=$?
+    if [ "$RC" -ne 0 ]; then set -e; echo "variant=$VAR stage=suffix rc=$RC verdict=FAIL" | tee -a "$ROOT/summary.txt"; FAIL=1; return; fi
+    timeout --preserve-status 3600s "$PY" scripts/offline_arb/validate_plan.py \
+      --input "$D/planner_input.json" --plan "$D/plan" --rebuild-plan "$D/plan_rebuild" \
+      --report "$D/validate_full.json" > "$D/validate_full.log" 2>&1
+    local V6RC=$?
+    timeout --preserve-status 3600s "$PY" scripts/offline_arb/validate_plan.py \
+      --input "$D/planner_input.json" --plan "$D/plan" --rebuild-plan "$D/plan_suffix" \
+      --report "$D/validate_suffix.json" > "$D/validate_suffix.log" 2>&1
+    local V5RC=$?
+    set -e
+    echo "variant=$VAR floor=$FLOOR v6_rc=$V6RC v5_rc=$V5RC build_wall_s=$BUILD_WALL" | tee -a "$ROOT/summary.txt"
+    grep -h '结果总览' "$D/validate_full.log" "$D/validate_suffix.log" | tee -a "$ROOT/summary.txt" || true
+    if [ "$V6RC" -ne 0 ] || [ "$V5RC" -ne 0 ]; then FAIL=1; fi
+    rm -rf "$D/plan_rebuild" "$D/plan_suffix"   # 重建副本验完即清(主 plan 保留供 loader 用)
+  }
+  run_variant floor0p005 0.005 primary
+  run_variant floor0 0.0 stress
+  echo "==== PHASE4 FULLSCALE VERDICTS ===="
+  cat "$ROOT/summary.txt"
+  echo "ROOT=$ROOT"
+  exit "$FAIL"

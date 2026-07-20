@@ -1,0 +1,85 @@
+# Independent 8-host full verifier.  It is the sole job allowed to publish the
+# canonical controls and S3 root _SUCCESS, with the root marker absolute last.
+name: evan-mot-crop-offlinearb-gpic-s3-production-verify
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 8
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 128
+maxRetries: 0
+excludeNodes:
+  - hyperpod-i-000da9aef0b1fbd38
+  - hyperpod-i-002e96e5a897e4041
+  - hyperpod-i-00756787579833e53
+  - hyperpod-i-027a2bcd38d60ece5
+  - hyperpod-i-05dc0a1f417940a35
+  - hyperpod-i-09d0f1d7ddf478d87
+  - hyperpod-i-0aa9cb7a9237188a7
+  - hyperpod-i-0b9084dbae19101cf
+command: |
+  set -euo pipefail
+  umask 077
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1
+  export PYTHONDONTWRITEBYTECODE=1
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+
+  HOST=$(hostname)
+  NODE_RANK=${HOST##*-}
+  VERIFIER_JOBTAG=${HOST%-*}
+  case "$NODE_RANK" in 0|1|2|3|4|5|6|7) ;; *) echo "FATAL: invalid verifier rank"; exit 2 ;; esac
+  SOURCE_BUILD_JOBTAG=evan-mot-crop-offlinearb-gpic-s3-production-build-zg8g
+  PARTITION_MODE=shard_modulo
+  SOURCE_MODE=tar_sequential
+  [ -n "$SOURCE_BUILD_JOBTAG" ] && [ "$SOURCE_BUILD_JOBTAG" != latest ] \
+    || { echo "FATAL: patch exact SOURCE_BUILD_JOBTAG"; exit 2; }
+  [ -n "$PARTITION_MODE" ] && [ -n "$SOURCE_MODE" ] \
+    || { echo "FATAL: patch frozen partition/source modes"; exit 2; }
+
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  RUNNER=$REPO/scripts/offline_arb/verify_offline_gpic_s3_production.py
+  BUILDER=$REPO/scripts/offline_arb/build_offline_gpic_s3_production.py
+  COORDINATOR=$REPO/scripts/offline_arb/coordinate_offline_gpic_s3_production.py
+  TAR_SOURCE=$REPO/scripts/offline_arb/offline_gpic_tar_sequential.py
+  BUILDER_JOB=$REPO/jobs/offline_arb_gpic_s3_production_build.yaml
+  COORDINATOR_JOB=$REPO/jobs/offline_arb_gpic_s3_production_coordinate.yaml
+  SELF=$REPO/jobs/offline_arb_gpic_s3_production_verify.yaml
+  CATALOG=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_v1
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  BUILD_ARTIFACT_ROOT=$BASE/offline_gpic_blob_v1_production/$SOURCE_BUILD_JOBTAG
+  BUILD_COORD_ROOT=$BASE/offline_gpic_blob_v1_production_coord/$SOURCE_BUILD_JOBTAG
+  VERIFY_ARTIFACT_PREFIX=$BASE/offline_gpic_blob_v1_verification
+  VERIFY_COORD_PREFIX=$BASE/offline_gpic_blob_v1_verification_coord
+  S3_ROOT=/s3/evan/artifacts/offline_gpic_blob_v1/$SOURCE_BUILD_JOBTAG
+  for FILE in "$RUNNER" "$BUILDER" "$COORDINATOR" "$TAR_SOURCE" "$BUILDER_JOB" \
+              "$COORDINATOR_JOB" "$SELF" "$BUILD_ARTIFACT_ROOT/_BUILD_COMPLETE" \
+              "$BUILD_ARTIFACT_ROOT/build_manifest.json" "$S3_ROOT/_INIT.json"; do
+    [ -f "$FILE" ] && [ ! -L "$FILE" ] && [ -s "$FILE" ] \
+      || { echo "FATAL: invalid verifier input"; exit 2; }
+  done
+  mkdir -m 700 -p "$VERIFY_ARTIFACT_PREFIX/$SOURCE_BUILD_JOBTAG" \
+                    "$VERIFY_COORD_PREFIX/$SOURCE_BUILD_JOBTAG"
+  "$PY" -m py_compile "$RUNNER" "$BUILDER" "$COORDINATOR" "$TAR_SOURCE"
+  timeout --preserve-status --signal=TERM --kill-after=60s 172800s \
+    "$PY" "$RUNNER" \
+      --build-artifact-root "$BUILD_ARTIFACT_ROOT" \
+      --build-coord-root "$BUILD_COORD_ROOT" \
+      --verifier-artifact-prefix "$VERIFY_ARTIFACT_PREFIX" \
+      --verifier-coord-prefix "$VERIFY_COORD_PREFIX" \
+      --s3-root "$S3_ROOT" --catalog-root "$CATALOG" \
+      --build-jobtag "$SOURCE_BUILD_JOBTAG" --verifier-jobtag "$VERIFIER_JOBTAG" \
+      --worker-id "$NODE_RANK" --workers 8 --gpic-rows 20000000 \
+      --partition-mode "$PARTITION_MODE" --source-mode "$SOURCE_MODE" \
+      --source-prefix /s3-mewtant-raw-datasets/stanford-vision-lab/gpic_umziped/images/train/ \
+      --max-s3-total-bytes 3200000000000 \
+      --max-source-archive-bytes-per-worker 1800000000000 \
+      --max-fsx-incremental-bytes 50000000000 \
+      --builder-runner "$BUILDER" --builder-job-spec "$BUILDER_JOB" \
+      --coordinator-runner "$COORDINATOR" --coordinator-job-spec "$COORDINATOR_JOB" \
+      --job-spec "$SELF" --barrier-timeout-seconds 86400 \
+      --verify-authority offline-gpic-s3-production-v1-verify-authorized \
+      --production-gate
+  echo "OFFLINE_GPIC_S3_PRODUCTION_VERIFY_JCC_PASS build_jobtag=$SOURCE_BUILD_JOBTAG verifier_jobtag=$VERIFIER_JOBTAG worker=$NODE_RANK"

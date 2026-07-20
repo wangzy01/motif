@@ -1,0 +1,1553 @@
+# JCC-only static and synthetic gate.  It never requires the production
+# caption sidecar to exist and never performs CPU work on the login host.
+name: evan-mot-crop-offlinearb-final-static-validate
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_arb_final_static.$(hostname)
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  "$PY" -m py_compile \
+    scripts/offline_arb/caption_sidecar_contract.py \
+    scripts/offline_arb/build_caption_sidecar.py \
+    scripts/offline_arb/verify_caption_sidecar.py \
+    scripts/offline_arb/test_caption_sidecar_runtime.py \
+    scripts/offline_arb/make_freeze_manifest.py \
+    scripts/offline_arb/analyze_gpuval_r6.py \
+    scripts/offline_arb/analyze_r7_l16_diag.py \
+    scripts/offline_arb/run_w64_raw_supply_gate.py \
+    scripts/offline_arb/analyze_w64_raw_supply_gate.py \
+    scripts/offline_arb/run_w16_gpic_abba_raw_gate.py \
+    scripts/offline_arb/analyze_w16_gpic_abba_raw_gate.py \
+    scripts/offline_arb/recover_w16_gpic_abba_analysis.py \
+    scripts/offline_arb/smoke_offline_loader.py \
+    scripts/offline_arb/audit_planned_caption_availability.py \
+    scripts/offline_arb/test_caption_exceptions_v1.py \
+    scripts/offline_arb/test_anime_exact_refetch.py \
+    scripts/offline_arb/test_image_exceptions_v1.py \
+    scripts/offline_arb/test_auto_resume_reconcile.py \
+    training/auto_resume_reconcile.py \
+    training/dataline_offline/caption_sidecar.py \
+    training/dataline_offline/caption_exceptions_v1.py \
+    training/dataline_offline/image_exceptions_v1.py \
+    training/dataline_offline/offline_dataset.py \
+    training/dataline/native_safety.py \
+    training/dataline/pil_safety.py \
+    training/dataline/caption_build.py \
+    training/dataline/sampler.py \
+    training/config_schema.py \
+    train.py
+
+  "$PY" scripts/offline_arb/test_anime_exact_refetch.py
+  "$PY" scripts/offline_arb/test_image_exceptions_v1.py
+  "$PY" scripts/offline_arb/test_auto_resume_reconcile.py
+
+  "$PY" - <<'PYEOF'
+  import ast
+  import hashlib
+  import json
+  import os
+  import re
+  import shutil
+  import subprocess
+  import sys
+  from argparse import Namespace
+  from pathlib import Path
+
+  import yaml
+
+  repo = Path("/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop")
+  jobs = repo / "jobs"
+
+  def compile_python_heredocs(command, label, expected_count):
+      lines = command.splitlines()
+      count = 0
+      cursor = 0
+      while cursor < len(lines):
+          if "<<'PYEOF'" not in lines[cursor]:
+              cursor += 1
+              continue
+          start = cursor + 1
+          try:
+              stop = lines.index("PYEOF", start)
+          except ValueError as exc:
+              raise RuntimeError(f"unterminated Python heredoc in {label}") from exc
+          compile(
+              "\n".join(lines[start:stop]) + "\n",
+              f"{label}-heredoc-{count}",
+              "exec",
+          )
+          count += 1
+          cursor = stop + 1
+      if count != expected_count:
+          raise RuntimeError(
+              f"unexpected Python heredoc count in {label}: {count} != {expected_count}"
+          )
+
+  paths = set(jobs.glob("offline_arb_caption_sidecar*.yaml"))
+  paths.update(
+      {
+          jobs / "offline_exact_256_2x8_gpuval.yaml",
+          jobs / "offline_exact_256_8x8_FORMAL.yaml",
+          jobs / "offline_arb_freeze_v3.yaml",
+          jobs / "offline_arb_gpuval_r6_postmortem.yaml",
+          jobs / "offline_exact_256_2x8_r7_l16_diag.yaml",
+          jobs / "offline_arb_r7_l16_analyze.yaml",
+          jobs / "offline_arb_w64_raw_supply_gate.yaml",
+          jobs / "offline_arb_w64_raw_supply_analyze.yaml",
+          jobs / "offline_arb_w16_gpic_abba_raw_gate.yaml",
+          jobs / "offline_arb_w16_gpic_abba_analyze.yaml",
+          jobs / "offline_arb_w16_gpic_abba_analyze_recovery.yaml",
+          jobs / "offline_arb_caption_thread_telemetry_independent_audit.yaml",
+          jobs / "offline_arb_planned_caption_availability_audit.yaml",
+          jobs / "offline_arb_caption_exceptions_v1_test.yaml",
+          jobs / "offline_arb_anime_exact_refetch_test.yaml",
+          jobs / "offline_arb_image_exceptions_v1_test.yaml",
+          jobs / "offline_arb_auto_resume_reconcile_test.yaml",
+          jobs / "offline_arb_checkpoint51000_audit.yaml",
+          jobs / "offline_arb_metrics52940_audit.yaml",
+          jobs / "offline_arb_formal_resume_prepare_8frz.yaml",
+          jobs / "offline_arb_probation_relaxed_acceptance_s657.yaml",
+          jobs / "offline_arb_final_static_validate.yaml",
+      }
+  )
+  missing = sorted(str(path) for path in paths if not path.is_file())
+  if missing:
+      raise RuntimeError(f"missing required JCC yaml: {missing}")
+  for path in sorted(paths):
+      value = yaml.safe_load(path.read_text(encoding="utf-8"))
+      if not isinstance(value, dict) or not isinstance(value.get("command"), str):
+          raise RuntimeError(f"malformed JCC yaml: {path}")
+      if value.get("cpuPerWorker", 0) < 16 and value.get("gpuPerWorker", 0) == 0:
+          raise RuntimeError(f"CPU JCC must request at least 16 CPUs: {path}")
+      subprocess.run(
+          ["bash", "-n"], input=value["command"], text=True, check=True
+      )
+      print(f"YAML+BASH PASS {path.relative_to(repo)}")
+
+  relaxed_policy = yaml.safe_load(
+      (jobs / "offline_arb_probation_relaxed_acceptance_s657.yaml").read_text(
+          encoding="utf-8"
+      )
+  )
+  compile_python_heredocs(
+      relaxed_policy["command"], "probation-relaxed-acceptance", 1
+  )
+  for relative, label in (
+      ("offline_arb_checkpoint51000_audit.yaml", "checkpoint51000-audit"),
+      ("offline_arb_metrics52940_audit.yaml", "metrics52940-audit"),
+      ("offline_arb_formal_resume_prepare_8frz.yaml", "formal-8frz-resume-prepare"),
+  ):
+      value = yaml.safe_load((jobs / relative).read_text(encoding="utf-8"))
+      compile_python_heredocs(value["command"], label, 1)
+
+  for relative in (
+      "jobs/offline_exact_256_2x8_gpuval.yaml",
+      "jobs/offline_exact_256_8x8_FORMAL.yaml",
+  ):
+      path = repo / relative
+      text = path.read_text(encoding="utf-8")
+      parsed = yaml.safe_load(text)
+      expected_retries = 3 if relative.endswith("8x8_FORMAL.yaml") else 0
+      if parsed.get("maxRetries") != expected_retries:
+          raise RuntimeError(
+              f"GPU launch maxRetries drift: {relative}: "
+              f"{parsed.get('maxRetries')} != {expected_retries}"
+          )
+      lowered = text.lower()
+      if any(
+          token in lowered
+          for token in ("anime_caption", "caption_required_bytes", "caption_stage_log")
+      ):
+          raise RuntimeError(f"legacy anime-caption staging leaked into {relative}")
+      if "offline_arb_caption_sidecar_v1" not in text:
+          raise RuntimeError(f"caption sidecar gate missing from {relative}")
+      for token in ("release_digest", "PREFLIGHT_JSON_SHA", "FRESH_MARKER", '-nt "$FRESH_MARKER"'):
+          if token not in text:
+              raise RuntimeError(f"fresh/release preflight binding missing from {relative}: {token}")
+      if "unset OFFLINE_ARB_GPIC_THREADS_PER_NODE" not in text:
+          raise RuntimeError(
+              f"GPU launch must clear GPIC thread env and use frozen config authority: {relative}"
+          )
+      if re.search(
+          r"(?m)^\s*(?:export\s+)?OFFLINE_ARB_GPIC_THREADS_PER_NODE\s*=",
+          text,
+      ):
+          raise RuntimeError(
+              f"GPU launch must not override config-owned GPIC threads: {relative}"
+          )
+      if relative.endswith("8x8_FORMAL.yaml"):
+          for token in (
+              "OFFLINE_ARB_AUTO_RESUME_RECONCILE=1",
+              "OFFLINE_ARB_ATTEMPT_JOBTAG=$JOBTAG",
+              "OFFLINE_ARB_ATTEMPT_NONCE=$PASS_NONCE",
+              "OFFLINE_ARB_AUTO_RESUME_FREEZE_SHA256=$PASS_FREEZE_SHA",
+              "OFFLINE_ARB_AUTO_RESUME_PLAN_HEADER_SHA256=$PLAN_HEADER_SHA",
+          ):
+              if token not in text:
+                  raise RuntimeError(f"FORMAL auto-resume binding missing: {token}")
+  freeze_text = (jobs / "offline_arb_freeze_v3.yaml").read_text(encoding="utf-8")
+  if any(token not in freeze_text for token in ("release_digest", "VERIFY_JSON_SHA", "FREEZE_SHA")):
+      raise RuntimeError("freeze v3 PASS does not bind release/freeze/verify JSON identities")
+  gpuval = (repo / "jobs/offline_exact_256_2x8_gpuval.yaml").read_text(
+      encoding="utf-8"
+  )
+  if "gpuval_20260711r6" not in gpuval:
+      raise RuntimeError("GPUVAL is not using the clean r6 namespace")
+  r7 = (jobs / "offline_exact_256_2x8_r7_l16_diag.yaml").read_text(
+      encoding="utf-8"
+  )
+  for token in (
+      "OFFLINE_ARB_GPIC_THREADS_PER_NODE=16",
+      "OFFLINE_ARB_PREFETCH_STEPS=4",
+      "OFFLINE_ARB_WAIT_LOG_THRESHOLD_S=2",
+      "OFFLINE_ARB_IO_STATE_EVERY_STEPS=4",
+      "OFFLINE_ARB_PROFILE_WINDOWS=0",
+      "OFFLINE_ARB_IO_TELEMETRY_DIR=$TELEM_LOCAL",
+      "OFFLINE_ARB_ATTEMPT_JOBTAG=$JOBTAG",
+      "OFFLINE_ARB_ATTEMPT_NONCE=$PASS_NONCE",
+      "OFFLINE_ARB_ATTEMPT_HOST=$HOST",
+      "OFFLINE_ARB_SIDECAR_HEADER_SHA256=$PASS_HEADER",
+      "OFFLINE_ARB_SIDECAR_RELEASE_DIGEST=$PASS_RELEASE",
+      "--max-steps 192",
+      "trainer.checkpoint_steps=0",
+      "trainer.save_final=false",
+      "trainer.resume=false",
+      "trainer.force_os_exit_after_train=true",
+      "trainer.skip_distributed_teardown=true",
+      "offline_arb_r7_l16_telemetry_aggregate_v1",
+  ):
+      if token not in r7:
+          raise RuntimeError(f"r7-L16 diagnostic contract token missing: {token}")
+  analyzer = (repo / "scripts/offline_arb/analyze_r7_l16_diag.py").read_text(
+      encoding="utf-8"
+  )
+  for token in (
+      "STEADY_METRIC_STEPS = range(41, 193)",
+      "STEADY_WINDOW_STARTS = range(40, 192, 4)",
+      "TARGET_SECONDS_PER_STEP = 2.592",
+      "MIN_CAPACITY_RATIO = 1.0 / 0.9",
+      '"metrics_iter_max_s"',
+      '"metrics_iter_gt_5s_count"',
+      '"metrics_data_wait_time_weighted_frac"',
+      '"combined_critical_mean_s"',
+      '"combined_critical_p95_s"',
+      '"combined_critical_max_s"',
+      '"gpic_min_rank_capacity_ratio"',
+      '"monet_real_min_rank_capacity_ratio"',
+      'closure reports rejected telemetry',
+      'return 0 if result["status"] == "PASS" else 3',
+  ):
+      if token not in analyzer:
+          raise RuntimeError(f"r7-L16 analyzer contract token missing: {token}")
+  w64_capture_path = jobs / "offline_arb_w64_raw_supply_gate.yaml"
+  w64_capture = w64_capture_path.read_text(encoding="utf-8")
+  w64_capture_value = yaml.safe_load(w64_capture)
+  if (
+      w64_capture_value.get("numWorkers") != 8
+      or w64_capture_value.get("gpuPerWorker") != 0
+      or w64_capture_value.get("cpuPerWorker") != 16
+      or w64_capture_value.get("maxRetries") != 0
+  ):
+      raise RuntimeError("W64 capture topology is not strict 8x16-CPU/maxRetries=0")
+  w64_capture_command = w64_capture_value["command"]
+  compile_python_heredocs(w64_capture_command, "w64-capture", 6)
+  if "--create" in w64_capture_command or "--verify-freeze" not in w64_capture_command:
+      raise RuntimeError("W64 capture must only verify an externally rebuilt formal freeze")
+  for token in (
+      "RUN_ID=stage256_offline_exact_w64_raw_supply_gate_20260712",
+      "NNODES=8",
+      "LOCAL_RANKS=8",
+      "OFFLINE_ARB_GPIC_THREADS_PER_NODE=16",
+      "OFFLINE_ARB_PREFETCH_STEPS=4",
+      "OFFLINE_ARB_WAIT_LOG_THRESHOLD_S=0.000001",
+      "OFFLINE_ARB_IO_STATE_EVERY_STEPS=1",
+      'OFFLINE_ARB_IO_TELEMETRY_DIR=$TELEM_LOCAL',
+      'read -r GPIC_MODE GPIC_THREADS',
+      'assert mode in {"strict_path","fd_stable"} and threads == 16',
+      '[ "$OFFLINE_ARB_GPIC_THREADS_PER_NODE" = "$GPIC_THREADS" ]',
+      '"gpic_threads_per_node": threads',
+      "--nproc-per-node \"$LOCAL_RANKS\"",
+      "--expected-runner-sha256 \"$PASS_RUNNER_SHA\"",
+      "--expected-runtime-contract-sha256 \"$PASS_CONTRACT_SHA\"",
+      "--expected-gpic-source-consistency-mode \"$PASS_GPIC_MODE\"",
+      "--expected-gpic-threads-per-node \"$OFFLINE_ARB_GPIC_THREADS_PER_NODE\"",
+      'empty_artifact_keys = {"training_package_source", "dataline_package_source"}',
+      'allow_empty=name in empty_artifact_keys',
+      '"namespace_packages": {',
+      'POSTFLIGHT_JSON=$RES/freezepost.$JOBTAG.json',
+      'CLOSURE_READY=$RES/closure.$JOBTAG.n$NODE_RANK.ready',
+      "expected_exactly_8_dataset_jsonl",
+      'artifact(Path(run_log_raw), "runner.log")',
+      '"offline_arb_w64_raw_supply_node_manifest_v1"',
+      '"offline_arb_w64_raw_supply_aggregate_v1"',
+      "W64_RAW_SUPPLY_CAPTURE_PASS",
+  ):
+      if token not in w64_capture:
+          raise RuntimeError(f"W64 capture contract token missing: {token}")
+  w64_runner = (
+      repo / "scripts/offline_arb/run_w64_raw_supply_gate.py"
+  ).read_text(encoding="utf-8")
+  for token in (
+      "EXPECTED_WORLD_SIZE = 64",
+      "EXPECTED_LOCAL_WORLD_SIZE = 8",
+      "START_STEP = 0",
+      "STOP_STEP = 192",
+      'backend="gloo"',
+      "offline_module.decode_rgb = _decode_is_forbidden",
+      "offline_module.resize_u8_to_bucket = _decode_is_forbidden",
+      "offline_module.uint8_to_norm_tensor = _decode_is_forbidden",
+      "_maintain_bounded_prefetch(dataset)",
+      "--expected-runner-sha256",
+      "--expected-runtime-contract-sha256",
+      "--expected-gpic-source-consistency-mode",
+      "--expected-gpic-threads-per-node",
+      'GPIC_CONSISTENCY_MODES = frozenset({"strict_path", "fd_stable"})',
+      'EMPTY_RUNTIME_ARTIFACT_KEYS = frozenset(',
+      '"caption_contract_source"',
+      '"training_package_source"',
+      '"dataline_package_source"',
+      'RUNTIME_NAMESPACE_PACKAGES = {',
+      '"before_import"',
+      '"after_import"',
+      '"before_run"',
+      '"after_run"',
+      '"after_close"',
+      'if observed == expected_window_keys:',
+      'value["gpic_threads_per_node"] != 16',
+      'int(getattr(dataset, "_gpic_threads_per_node", -1)) != 16',
+      '"gpic_threads_per_node": int(dataset._gpic_threads_per_node)',
+      "W64_RAW_STEP_RETIRED",
+      "W64_RAW_RANK_PASS",
+      '"decode_calls": 0',
+  ):
+      if token not in w64_runner:
+          raise RuntimeError(f"W64 raw runner contract token missing: {token}")
+  w64_analyzer = (
+      repo / "scripts/offline_arb/analyze_w64_raw_supply_gate.py"
+  ).read_text(encoding="utf-8")
+  for token in (
+      'TELEMETRY_SCHEMA = "offline_arb_io_profile_v1"',
+      'AGGREGATE_SCHEMA = "offline_arb_w64_raw_supply_aggregate_v1"',
+      'MANIFEST_SCHEMA = "offline_arb_w64_raw_supply_node_manifest_v1"',
+      'ANALYSIS_SCHEMA = "offline_arb_w64_raw_supply_analysis_v1"',
+      "WORLD_SIZE = 64",
+      "LOCAL_WORLD_SIZE = 8",
+      "NODES = 8",
+      "PER_RANK_BS = 36",
+      'EXPECTED_PLAN_ID = "stage256_offline_exact_v1_w64_prod"',
+      'EXPECTED_DOMAINS = ("anime", "monet_real", "gpic", "synthetic", "textatlas")',
+      "STEADY_STEPS = range(40, STOP_STEP)",
+      "STEADY_WINDOW_STARTS = range(40, STOP_STEP, PREFETCH_STEPS)",
+      "TARGET_SECONDS_PER_STEP = 2.592",
+      "CAPACITY_HEADROOM_RATIO = 1.0 / 0.9",
+      "WAIT_MEAN_MAX_S = TARGET_SECONDS_PER_STEP * 0.9",
+      "WAIT_P95_MAX_S = TARGET_SECONDS_PER_STEP * 2.0",
+      "WAIT_MAX_S = TARGET_SECONDS_PER_STEP * 4.0",
+      "WAIT_OVER_TARGET_FRACTION_MAX = 0.10",
+      "WINDOW_MEAN_MAX_S = PREFETCH_STEPS * TARGET_SECONDS_PER_STEP * 0.9",
+      "WINDOW_TAIL_MAX_S = PREFETCH_STEPS * TARGET_SECONDS_PER_STEP * 2.0",
+      "FORMAL_STEPS = 166_667",
+      'GPIC_CONSISTENCY_MODES = frozenset({"strict_path", "fd_stable"})',
+      'EMPTY_RUNTIME_ARTIFACT_KEYS = frozenset(',
+      'RUNTIME_NAMESPACE_PACKAGES = {',
+      'def validated_jobtag(',
+      'def validated_analysis_output(',
+      'aggregate_supplied.resolve(strict=True)',
+      'analysis_verify_supplied.resolve(strict=True)',
+      'def atomic_publish_bytes(',
+      'os.link(temporary, path, follow_symlinks=False)',
+      'def atomic_no_clobber_self_test(',
+      'runtime contract/config GPIC threads-per-node mismatch',
+      '"gpic_threads_per_node": 16,',
+      'analysis-time full freeze verify',
+      "FROZEN_GATE_FILES = (",
+      'closure_artifacts: dict[str, tuple[Path, str]] = {',
+      'raise ValueError(f"final immutable-evidence closure mismatch: {label}")',
+      'status = "PASS" if not failed else "NO_GO"',
+      '"status": "FATAL"',
+      'return 0 if result["status"] == "PASS" else 3',
+  ):
+      if token not in w64_analyzer:
+          raise RuntimeError(f"W64 analyzer contract token missing: {token}")
+  w64_analyze_path = jobs / "offline_arb_w64_raw_supply_analyze.yaml"
+  w64_analyze = w64_analyze_path.read_text(encoding="utf-8")
+  w64_analyze_value = yaml.safe_load(w64_analyze)
+  compile_python_heredocs(w64_analyze_value["command"], "w64-analyze", 1)
+  if (
+      w64_analyze_value.get("numWorkers") != 1
+      or w64_analyze_value.get("gpuPerWorker") != 0
+      or w64_analyze_value.get("cpuPerWorker") != 16
+      or w64_analyze_value.get("maxRetries") != 0
+  ):
+      raise RuntimeError("W64 analyzer JCC topology is not strict 1x16-CPU/maxRetries=0")
+  for token in (
+      "RUN_ID=stage256_offline_exact_w64_raw_supply_gate_20260712",
+      "scripts/offline_arb/analyze_w64_raw_supply_gate.py",
+      'SOURCE_JOBTAG=${OFFLINE_ARB_W64_SOURCE_JOBTAG:-}',
+      "(''|.|..|*[!A-Za-z0-9_.-]*)",
+      'RUN_ROOT_REAL=$(realpath -e "$RUN_ROOT")',
+      '[ "$RES" = "$RUN_ROOT_REAL/$SOURCE_JOBTAG" ]',
+      'w64_raw_supply_analysis.$SOURCE_JOBTAG.$ANALYSIS_JOBTAG.json',
+      'analysis_freeze_verify.$SOURCE_JOBTAG.$ANALYSIS_JOBTAG.pre.json',
+      'W64_ATOMIC_NO_CLOBBER_SELF_TEST_PASS',
+      'from scripts.offline_arb.analyze_w64_raw_supply_gate import atomic_publish_bytes',
+      '"gpic_threads_per_node": 16,',
+      "--capture-yaml \"$CAPTURE_YAML\"",
+      "--analyze-yaml \"$ANALYZE_YAML\"",
+      '0: "PASS", 3: "NO_GO"',
+      "*) exit 1 ;;",
+  ):
+      if token not in w64_analyze:
+          raise RuntimeError(f"W64 analyzer JCC token missing: {token}")
+  if 'find "$RUN_ROOT"' in w64_analyze or "AGGREGATES" in w64_analyze:
+      raise RuntimeError("W64 analyzer retry source regressed to ambiguous attempt discovery")
+  if '--expected-gpic-source-consistency-mode "strict_path"' in w64_capture:
+      raise RuntimeError("W64 capture hardcoded a selector winner instead of frozen config mode")
+  if "os.replace" in w64_analyzer:
+      raise RuntimeError("W64 analyzer publication regressed to clobbering os.replace")
+  if 'closure.open("x"' in w64_analyze:
+      raise RuntimeError("W64 analysis closure is visible before its payload is durable")
+
+  from scripts.offline_arb import analyze_w64_raw_supply_gate as w64_analyzer_module
+  from scripts.offline_arb import run_w64_raw_supply_gate as w64_runner_module
+
+  expected_w64_runtime_artifacts = {
+      "runner",
+      "capture_yaml",
+      "config",
+      "freeze_manifest",
+      "preflight_verify",
+      "plan_header",
+      "plan_checksums",
+      "catalog_header",
+      "animefreq_header",
+      "sidecar_header",
+      "sampling",
+      "freeze_builder_source",
+      "caption_contract_source",
+      "training_package_source",
+      "dataline_package_source",
+      "offline_package_source",
+      "dataset_source",
+      "planner_source",
+      "sidecar_runtime_source",
+      "complete_dataset_source",
+      "dataline_config_source",
+      "image_fetch_source",
+      "manifest_index_source",
+      "multi_ar_source",
+      "native_safety_source",
+      "pil_safety_source",
+      "caption_build_source",
+      "sampler_source",
+  }
+  expected_empty_runtime_artifacts = {
+      "training_package_source",
+      "dataline_package_source",
+  }
+  expected_namespace_packages = {
+      "scripts": "scripts",
+      "scripts.offline_arb": "scripts/offline_arb",
+  }
+  if (
+      len(expected_w64_runtime_artifacts) != 28
+      or w64_runner_module.RUNTIME_ARTIFACT_KEYS != expected_w64_runtime_artifacts
+      or w64_analyzer_module.RUNTIME_ARTIFACT_KEYS != expected_w64_runtime_artifacts
+      or w64_runner_module.EMPTY_RUNTIME_ARTIFACT_KEYS
+      != expected_empty_runtime_artifacts
+      or w64_analyzer_module.EMPTY_RUNTIME_ARTIFACT_KEYS
+      != expected_empty_runtime_artifacts
+      or w64_runner_module.RUNTIME_NAMESPACE_PACKAGES
+      != expected_namespace_packages
+      or w64_analyzer_module.RUNTIME_NAMESPACE_PACKAGES
+      != expected_namespace_packages
+  ):
+      raise RuntimeError("W64 runner/analyzer recursive runtime closure set drift")
+  for key in expected_empty_runtime_artifacts:
+      relative = w64_runner_module.RUNTIME_MODULES[key][1]
+      path = repo / relative
+      if (
+          path.stat().st_size != 0
+          or hashlib.sha256(path.read_bytes()).hexdigest()
+          != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      ):
+          raise RuntimeError(f"W64 zero-byte runtime artifact contract drift: {key}")
+  for relative in ("scripts/__init__.py", "scripts/offline_arb/__init__.py"):
+      if (repo / relative).exists():
+          raise RuntimeError(
+              f"W64 scripts namespace unexpectedly gained executable init source: {relative}"
+          )
+
+  capture_lines = w64_capture_command.splitlines()
+  capture_heredocs = []
+  cursor = 0
+  while cursor < len(capture_lines):
+      if "<<'PYEOF'" not in capture_lines[cursor]:
+          cursor += 1
+          continue
+      stop = capture_lines.index("PYEOF", cursor + 1)
+      capture_heredocs.append("\n".join(capture_lines[cursor + 1 : stop]) + "\n")
+      cursor = stop + 1
+  contract_tree = ast.parse(capture_heredocs[0])
+  contract_path_keys = None
+  contract_empty_keys = None
+  for node in ast.walk(contract_tree):
+      if not isinstance(node, ast.Assign):
+          continue
+      names = {target.id for target in node.targets if isinstance(target, ast.Name)}
+      if "paths" in names and isinstance(node.value, ast.Dict):
+          contract_path_keys = {ast.literal_eval(key) for key in node.value.keys}
+      if "empty_artifact_keys" in names:
+          contract_empty_keys = set(ast.literal_eval(node.value))
+  if (
+      contract_path_keys != expected_w64_runtime_artifacts
+      or contract_empty_keys != expected_empty_runtime_artifacts
+  ):
+      raise RuntimeError("W64 capture/runner/analyzer runtime artifact sets differ")
+
+  w64_static_root = Path("/local/evan/offline_arb_w64_static_contract")
+  if w64_static_root.is_symlink():
+      w64_static_root.unlink()
+  elif w64_static_root.exists():
+      shutil.rmtree(w64_static_root)
+  w64_static_root.mkdir(parents=True)
+  atomic_target = w64_static_root / "atomic-winner.json"
+  gate_read, gate_write = os.pipe()
+  atomic_children = []
+  for writer in ("left", "right"):
+      child = os.fork()
+      if child == 0:
+          os.close(gate_write)
+          os.read(gate_read, 1)
+          try:
+              w64_analyzer_module.atomic_write(atomic_target, {"writer": writer})
+              os._exit(0)
+          except ValueError:
+              os._exit(17)
+          except BaseException:
+              os._exit(91)
+      atomic_children.append(child)
+  os.close(gate_read)
+  os.write(gate_write, b"xx")
+  os.close(gate_write)
+  atomic_codes = []
+  for child in atomic_children:
+      _waited, wait_status = os.waitpid(child, 0)
+      atomic_codes.append(os.waitstatus_to_exitcode(wait_status))
+  if sorted(atomic_codes) != [0, 17]:
+      raise RuntimeError(f"W64 atomic no-clobber race mismatch: {atomic_codes}")
+  atomic_winner_bytes = atomic_target.read_bytes()
+  atomic_winner = json.loads(atomic_winner_bytes.decode("utf-8"))
+  if atomic_winner.get("writer") not in {"left", "right"}:
+      raise RuntimeError("W64 atomic race winner payload is malformed")
+  try:
+      w64_analyzer_module.atomic_write(atomic_target, {"writer": "late-overwrite"})
+  except ValueError:
+      pass
+  else:
+      raise RuntimeError("W64 atomic publisher accepted a late overwrite")
+  if (
+      atomic_target.read_bytes() != atomic_winner_bytes
+      or {path.name for path in w64_static_root.iterdir()} != {atomic_target.name}
+  ):
+      raise RuntimeError("W64 atomic winner changed or temporary artifact leaked")
+  atomic_target.unlink()
+
+  path_run_root = w64_static_root / "w64-run"
+  path_source_root = path_run_root / "source-ok"
+  path_source_root.mkdir(parents=True)
+  safe_output = path_source_root / "w64_raw_supply_analysis.source-ok.analysis-ok.json"
+  resolved_output, analysis_jobtag = w64_analyzer_module.validated_analysis_output(
+      Namespace(
+          source_jobtag="source-ok",
+          run_id="w64-run",
+          output=str(safe_output),
+      )
+  )
+  if resolved_output != safe_output or analysis_jobtag != "analysis-ok":
+      raise RuntimeError("W64 canonical source/output path selftest drift")
+  for unsafe_jobtag in ("", ".", "..", "../escape", "a/b", "x y"):
+      try:
+          w64_analyzer_module.validated_jobtag(unsafe_jobtag, "static attack")
+      except ValueError:
+          pass
+      else:
+          raise RuntimeError(f"W64 unsafe source jobtag was accepted: {unsafe_jobtag!r}")
+  unsafe_outputs = (
+      path_source_root / ".." / "escape.json",
+      w64_static_root / "w64_raw_supply_analysis.source-ok.analysis-ok.json",
+  )
+  for unsafe_output in unsafe_outputs:
+      try:
+          w64_analyzer_module.validated_analysis_output(
+              Namespace(
+                  source_jobtag="source-ok",
+                  run_id="w64-run",
+                  output=str(unsafe_output),
+              )
+          )
+      except ValueError:
+          pass
+      else:
+          raise RuntimeError(f"W64 unsafe output path was accepted: {unsafe_output}")
+  symlink_source = path_run_root / "linked-source"
+  symlink_target = path_run_root / "real-source"
+  symlink_target.mkdir()
+  symlink_source.symlink_to(symlink_target, target_is_directory=True)
+  try:
+      w64_analyzer_module.validated_analysis_output(
+          Namespace(
+              source_jobtag="linked-source",
+              run_id="w64-run",
+              output=str(
+                  symlink_source
+                  / "w64_raw_supply_analysis.linked-source.analysis-ok.json"
+              ),
+          )
+      )
+  except ValueError:
+      pass
+  else:
+      raise RuntimeError("W64 symlink source root escaped canonical validation")
+  shutil.rmtree(w64_static_root)
+  abba_capture_path = jobs / "offline_arb_w16_gpic_abba_raw_gate.yaml"
+  abba_capture = abba_capture_path.read_text(encoding="utf-8")
+  abba_capture_value = yaml.safe_load(abba_capture)
+  if (
+      abba_capture_value.get("numWorkers") != 2
+      or abba_capture_value.get("gpuPerWorker") != 0
+      or abba_capture_value.get("cpuPerWorker") != 16
+      or abba_capture_value.get("maxRetries") != 0
+  ):
+      raise RuntimeError("W16 ABBA capture topology is not strict 2x16-CPU/maxRetries=0")
+  if "--verify-freeze" in abba_capture:
+      raise RuntimeError("W16 ABBA diagnostic must not depend on the formal freeze")
+  for token in (
+      "RUNNER=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop/scripts/offline_arb/run_w16_gpic_abba_raw_gate.py",
+      'PY=/fsx/evan/mot_code/venv-gpu/bin/python',
+      'PY_REAL=$(readlink -f -- "$PY")',
+      'resolved W16 ABBA Python target is not a real executable regular file',
+      'RUN_ID=stage256_offline_exact_w16_gpic_abba_raw_20260712r4',
+      'export OFFLINE_ARB_ABBA_RUN_ID="$RUN_ID"',
+      "OFFLINE_ARB_STEP_TIMEOUT_S=1800",
+      "PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_arb_w16_abba_capture.$(hostname)",
+      'capture pycache prefix is not fresh',
+      'unset OFFLINE_ARB_IO_TELEMETRY_DIR OFFLINE_ARB_ATTEMPT_JOBTAG',
+      '"$PY" "$RUNNER" node-wrapper',
+  ):
+      if token not in abba_capture:
+          raise RuntimeError(f"W16 ABBA capture JCC token missing: {token}")
+  abba_runner = (
+      repo / "scripts/offline_arb/run_w16_gpic_abba_raw_gate.py"
+  ).read_text(encoding="utf-8")
+  if "--verify-freeze" in abba_runner or "FREEZE_MANIFEST" in abba_runner:
+      raise RuntimeError("W16 ABBA runner leaked a formal-freeze dependency")
+  for token in (
+      'RUN_ID = "stage256_offline_exact_w16_gpic_abba_raw_20260712r4"',
+      "WORLD_SIZE = 16",
+      "LOCAL_WORLD_SIZE = 8",
+      '("l16_a", 16, 0, 192)',
+      '("l8_a", 8, 192, 384)',
+      '("l8_b", 8, 384, 576)',
+      '("l16_b", 16, 576, 768)',
+      'backend="gloo"',
+      '"--verify-sidecar-control"',
+      'value = validate_sidecar(SIDECAR, CATALOG, full=True)',
+      '"sidecar_snapshot_fingerprints_sha256"',
+      'offline_module.decode_rgb = decode_is_forbidden',
+      'offline_module.resize_u8_to_bucket = decode_is_forbidden',
+      'offline_module.uint8_to_norm_tensor = decode_is_forbidden',
+      'if observed == expected_window_keys:',
+      'int(dataset._telemetry_rejected_count) != 0',
+      '"complete_dataset_source": COMPLETE_DATASET_SOURCE',
+      '"dataline_config_source": DATALINE_CONFIG_SOURCE',
+      '"image_fetch_source": IMAGE_FETCH_SOURCE',
+      '"manifest_index_source": MANIFEST_INDEX_SOURCE',
+      '"multi_ar_source": MULTI_AR_SOURCE',
+      '"native_safety_source": NATIVE_SAFETY_SOURCE',
+      '"pil_safety_source": PIL_SAFETY_SOURCE',
+      '"caption_build_source": CAPTION_BUILD_SOURCE',
+      '"sampler_source": SAMPLER_SOURCE',
+      '"sampling": SAMPLING',
+      'artifacts["python_interpreter"] = python_interpreter_artifact(PYTHON)',
+      '_assert_bound_python_interpreter(preflight["artifacts"])',
+      'os.environ.get("OFFLINE_ARB_ABBA_RUN_ID") != RUN_ID',
+      'pipe_buf = int(os.fpathconf(descriptor, "PC_PIPE_BUF"))',
+      'written = os.write(descriptor, payload)',
+      'partial atomic rank sentinel write',
+      'def attempt_nonce(jobtag: str)',
+      'def arm_nonce(',
+      'validate_fresh_marker_declarations(',
+      'FRESH_MARKER_MAX_AGE_S = 1800',
+      '"animefreq_ledger": animefreq_ledger',
+      'contract["sidecar_baseline"] = _sidecar_baseline(verify)',
+      'phase="before"',
+      'phase="after"',
+      'post_full = _full_sidecar_snapshot()',
+      '"sidecar_full_post": sidecar_post',
+      '"offline_arb_w16_gpic_abba_node_manifest_v1"',
+      '"offline_arb_w16_gpic_abba_arm_aggregate_v1"',
+      '"offline_arb_w16_gpic_abba_master_aggregate_v1"',
+      "W16_GPIC_ABBA_CAPTURE_PASS",
+  ):
+      if token not in abba_runner:
+          raise RuntimeError(f"W16 ABBA runner contract token missing: {token}")
+  if "st_mtime_ns >" in abba_runner:
+      raise RuntimeError("W16 ABBA freshness still depends on strict mtime ordering")
+  if abba_runner.count("str(PYTHON),") != 2:
+      raise RuntimeError("W16 ABBA subprocesses must execute through the venv alias")
+  abba_runner_tree = ast.parse(abba_runner)
+  sentinel_calls = [
+      node
+      for node in ast.walk(abba_runner_tree)
+      if isinstance(node, ast.Call)
+      and isinstance(node.func, ast.Name)
+      and node.func.id == "write_rank_sentinel"
+  ]
+  if len(sentinel_calls) != 2:
+      raise RuntimeError("W16 ABBA rank sentinel call count drifted")
+  sentinel_segments = [
+      ast.get_source_segment(abba_runner, node) or "" for node in sentinel_calls
+  ]
+  for prefix in ("W16_ABBA_RAW_STEP_RETIRED ", "W16_ABBA_RAW_RANK_PASS "):
+      if sum(prefix in segment for segment in sentinel_segments) != 1:
+          raise RuntimeError(f"W16 ABBA rank sentinel helper binding drifted: {prefix!r}")
+  for node in ast.walk(abba_runner_tree):
+      if (
+          isinstance(node, ast.Call)
+          and isinstance(node.func, ast.Name)
+          and node.func.id == "print"
+          and "W16_ABBA_RAW_" in (ast.get_source_segment(abba_runner, node) or "")
+      ):
+          raise RuntimeError("W16 ABBA multi-rank evidence leaked through print()")
+  abba_analyzer = (
+      repo / "scripts/offline_arb/analyze_w16_gpic_abba_raw_gate.py"
+  ).read_text(encoding="utf-8")
+  for token in (
+      'ANALYSIS_SCHEMA = "offline_arb_w16_gpic_abba_analysis_v1"',
+      "STEADY_OFFSET = 40",
+      "TARGET_SECONDS_PER_STEP = 2.592",
+      "CAPACITY_HEADROOM_RATIO = 1.0 / 0.9",
+      "WAIT_MEAN_MAX_S = TARGET_SECONDS_PER_STEP * 0.9",
+      "WAIT_P95_MAX_S = TARGET_SECONDS_PER_STEP * 2.0",
+      "WAIT_MAX_S = TARGET_SECONDS_PER_STEP * 4.0",
+      "WAIT_OVER_TARGET_FRACTION_MAX = 0.10",
+      "WINDOW_MEAN_MAX_S = PREFETCH_STEPS * TARGET_SECONDS_PER_STEP * 0.9",
+      "WINDOW_TAIL_MAX_S = PREFETCH_STEPS * TARGET_SECONDS_PER_STEP * 2.0",
+      "PAIR_DRIFT_MAX = 0.05",
+      'THREAD_GROUPS = {"L8": ("l8_a", "l8_b"), "L16": ("l16_a", "l16_b")}',
+      'return abs(left_value - right_value) / max(left_value, right_value)',
+      '"pair_drift_formula": "abs(a-b)/max(a,b)"',
+      '"qualified": arms_pass and stable',
+      'else "INCONCLUSIVE"',
+      'validate_sidecar(',
+      'full=True',
+      '"sidecar_full_analysis": str(analysis_full_path)',
+      'final ABBA evidence-root exact-set rescan mismatch',
+      '"python_interpreter": PYTHON.resolve(strict=True)',
+      'Path(sys.executable).resolve(strict=True) != expected_paths["python_interpreter"]',
+      'expected_attempt_nonce(args.run_id, result_root.name)',
+      'expected_arm_nonce(preflight["attempt_nonce"], arm, threads, start, stop)',
+      'validate_marker_time(',
+      'status = "PASS" if candidates else "NO_GO"',
+      'return 0 if result["status"] == "PASS" else 3',
+  ):
+      if token not in abba_analyzer:
+          raise RuntimeError(f"W16 ABBA analyzer contract token missing: {token}")
+  abba_analyze_path = jobs / "offline_arb_w16_gpic_abba_analyze.yaml"
+  abba_analyze = abba_analyze_path.read_text(encoding="utf-8")
+  abba_analyze_value = yaml.safe_load(abba_analyze)
+  compile_python_heredocs(abba_analyze_value["command"], "w16-abba-analyze", 1)
+  if (
+      abba_analyze_value.get("numWorkers") != 1
+      or abba_analyze_value.get("gpuPerWorker") != 0
+      or abba_analyze_value.get("cpuPerWorker") != 16
+      or abba_analyze_value.get("maxRetries") != 0
+  ):
+      raise RuntimeError("W16 ABBA analyzer topology is not strict 1x16-CPU/maxRetries=0")
+  for token in (
+      "RUN_ID=stage256_offline_exact_w16_gpic_abba_raw_20260712r4",
+      'PY=/fsx/evan/mot_code/venv-gpu/bin/python',
+      'PY_REAL=$(readlink -f -- "$PY")',
+      'resolved W16 ABBA analyzer Python target is not a real executable regular file',
+      "OFFLINE_ARB_ABBA_SOURCE_JOBTAG",
+      '[ "$SOURCE_JOBTAG" != . ] && [ "$SOURCE_JOBTAG" != .. ]',
+      '$(basename "$SOURCE_JOBTAG")',
+      '--catalog "$CATALOG" --animefreq "$ANIMEFREQ" --sidecar "$SIDECAR"',
+      'abs(left_capacity - right_capacity) / max(',
+      'expected_drift <= 0.05',
+      'expected_decision = (',
+      'expected_gate_names = {',
+      'recomputed = value_number <= threshold if operator == "<=" else value_number >= threshold',
+      'post-analysis sidecar root exact-set drift',
+      "*) exit 1 ;;",
+  ):
+      if token not in abba_analyze:
+          raise RuntimeError(f"W16 ABBA analyzer JCC token missing: {token}")
+  recovery_script = (
+      repo / "scripts/offline_arb/recover_w16_gpic_abba_analysis.py"
+  ).read_text(encoding="utf-8")
+  for token in (
+      'EXPECTED_CAPTURE_ANALYZER_SHA256 = (',
+      '"9451471ddc77cc5c831b68a6fb5c03abe5cfd93173d332a5355008e643cb848f"',
+      'DECLARATION_LABEL_RE = re.compile(',
+      'set(declaration) != {"path", "sha256"}',
+      'recovered_labels.append(label)',
+      'not module.exact_json_equal(existing, value)',
+      'reused_snapshots != [expected_reused_snapshot]',
+      'len(recovered_labels) != len(expected_labels)',
+      'source_result = module.analyze(args)',
+      'immutable analyzer attempted an unexpected recovery write',
+      'offline_arb_w16_gpic_abba_posthoc_diagnostic_v1',
+      '"production_selector_eligible": False',
+      'return 3',
+  ):
+      if token not in recovery_script:
+          raise RuntimeError(f"W16 ABBA recovery wrapper token missing: {token}")
+  if "module.main()" in recovery_script:
+      raise RuntimeError("W16 ABBA recovery wrapper must not call capture analyzer main()")
+  recovery_yaml_path = jobs / "offline_arb_w16_gpic_abba_analyze_recovery.yaml"
+  recovery_yaml_text = recovery_yaml_path.read_text(encoding="utf-8")
+  recovery_yaml = yaml.safe_load(recovery_yaml_text)
+  compile_python_heredocs(recovery_yaml["command"], "w16-abba-recovery", 2)
+  if (
+      recovery_yaml.get("numWorkers") != 1
+      or recovery_yaml.get("gpuPerWorker") != 0
+      or recovery_yaml.get("cpuPerWorker") != 16
+      or recovery_yaml.get("maxRetries") != 0
+  ):
+      raise RuntimeError("W16 ABBA recovery topology is not strict 1x16-CPU/maxRetries=0")
+  for token in (
+      "SOURCE_JOBTAG=evan-mot-crop-offlinearb-w16-gpic-abba-raw-ztk7",
+      "MASTER_SHA=97307271156222d2a4adb2d4bf770c273d172b644d223a9d192b616bf6e70c98",
+      "CAPTURE_ANALYZER_SHA=9451471ddc77cc5c831b68a6fb5c03abe5cfd93173d332a5355008e643cb848f",
+      "CAPTURE_ANALYZE_YAML_SHA=cf642f344ccf9159a4f9826262e7974a0ab899f95906004d06ab086206c41990",
+      "PRESERVED_SIDECAR_SHA=e063af3e212a7f64230583ccf95ab75e50abcdaaf2285d0b63c4cb9e0ec4d456",
+      "FAILED_OUTPUT_SHA=b010ffad074993aea081fabf97befbdf8be5697b7574d0f2265a26c23eb6e7ca",
+      "W16_ABBA_RECOVERY_SELFTEST_PASS labels=24 negatives=5",
+      "w16_gpic_abba_posthoc_diagnostic.$SOURCE_JOBTAG.$ANALYSIS_JOBTAG.json",
+      'source = value.get("source_analysis")',
+      'if not isinstance(gates, list) or not isinstance(failed, list) or not gates:',
+      'expected_thresholds = {',
+      'expected_gate_specs = {',
+      'source.get("thresholds") != expected_thresholds',
+      'gates_by_name[f"{domain}_min_rank_capacity_ratio"]["value"] != capacity_value',
+      "POSTHOC_DIAGNOSTIC_ONLY_NOT_A_PRODUCTION_SELECTOR",
+      'exit "$ANALYZE_RC"',
+  ):
+      if token not in recovery_yaml_text:
+          raise RuntimeError(f"W16 ABBA recovery JCC token missing: {token}")
+  independent_audit = yaml.safe_load(
+      (jobs / "offline_arb_caption_thread_telemetry_independent_audit.yaml").read_text(
+          encoding="utf-8"
+      )
+  )
+  compile_python_heredocs(
+      independent_audit["command"], "caption-thread-independent-audit", 1
+  )
+  final_sidecar_reclose = "validate_sidecar_baseline(Path(args.sidecar), sidecar_baseline)"
+  if abba_analyzer.count(final_sidecar_reclose) != 2:
+      raise RuntimeError("W16 ABBA analyzer must close sidecar baseline at entry and return")
+
+  from scripts.offline_arb import analyze_w16_gpic_abba_raw_gate as abba_module
+  from scripts.offline_arb import recover_w16_gpic_abba_analysis as recovery_module
+  from scripts.offline_arb import run_w16_gpic_abba_raw_gate as abba_runner_module
+
+  python_link = Path("/fsx/evan/mot_code/venv-gpu/bin/python")
+  if not python_link.is_symlink():
+      raise RuntimeError("W16 ABBA interpreter fixture is no longer a symlink")
+  python_target = python_link.resolve(strict=True)
+  python_artifact = abba_runner_module.python_interpreter_artifact(python_link)
+  if (
+      Path(python_artifact["path"]) != python_target
+      or Path(sys.executable).resolve(strict=True) != python_target
+      or Path(sys.prefix).resolve(strict=True)
+      != Path("/fsx/evan/mot_code/venv-gpu").resolve(strict=True)
+      or python_target.is_symlink()
+      or not python_target.is_file()
+      or python_artifact["bytes"] != python_target.stat().st_size
+      or python_artifact["sha256"] != hashlib.sha256(python_target.read_bytes()).hexdigest()
+  ):
+      raise RuntimeError("W16 ABBA interpreter symlink-to-real-target binding mismatch")
+  try:
+      abba_runner_module.require_file(python_link, "symlink rejection fixture")
+  except RuntimeError:
+      pass
+  else:
+      raise RuntimeError("W16 ABBA generic artifact symlink rejection was weakened")
+
+  atomic_workers = 16
+  atomic_lines_per_worker = 64
+  read_fd, write_fd = os.pipe()
+  children = []
+  sys.stdout.flush()
+  for worker in range(atomic_workers):
+      child = os.fork()
+      if child == 0:
+          try:
+              os.close(read_fd)
+              os.dup2(write_fd, sys.stdout.fileno())
+              if write_fd != sys.stdout.fileno():
+                  os.close(write_fd)
+              for sequence in range(atomic_lines_per_worker):
+                  abba_runner_module.write_rank_sentinel(
+                      "W16_ABBA_RAW_STEP_RETIRED "
+                      f"arm=l16_a rank={worker} step={sequence} "
+                      f"relative_step={sequence} items=36 "
+                      f"raw_bytes={worker * 100000 + sequence + 1} "
+                      f"wait_s=0.000000001 scheduled_until={sequence + 8}"
+                  )
+              abba_runner_module.write_rank_sentinel(
+                  "W16_ABBA_RAW_RANK_PASS "
+                  f"arm=l16_a rank={worker} start_step=0 stop_step=192 "
+                  "retired_steps=192 per_rank_batch_size=36 raw_items=6912 "
+                  f"raw_bytes={worker * 1000000 + 1} wait_total_s=0.000000064 "
+                  "wait_max_s=0.000000001 elapsed_s=1.000000000 decode_calls=0"
+              )
+          except BaseException:
+              os._exit(91)
+          os._exit(0)
+      children.append(child)
+  os.close(write_fd)
+  atomic_payload = bytearray()
+  while True:
+      block = os.read(read_fd, 1 << 16)
+      if not block:
+          break
+      atomic_payload.extend(block)
+  os.close(read_fd)
+  child_codes = []
+  for child in children:
+      _waited, wait_status = os.waitpid(child, 0)
+      child_codes.append(os.waitstatus_to_exitcode(wait_status))
+  if child_codes != [0] * atomic_workers:
+      raise RuntimeError(f"W16 ABBA atomic-line child failure: {child_codes}")
+  try:
+      atomic_text = bytes(atomic_payload).decode("utf-8", errors="strict")
+  except UnicodeDecodeError as exc:
+      raise RuntimeError("W16 ABBA atomic-line output is not strict UTF-8") from exc
+  atomic_lines = atomic_text.splitlines()
+  expected_atomic_pairs = {
+      (worker, sequence)
+      for worker in range(atomic_workers)
+      for sequence in range(atomic_lines_per_worker)
+  }
+  observed_atomic_pairs = []
+  observed_atomic_pass_ranks = []
+  for line in atomic_lines:
+      step_match = abba_module.STEP_LINE_RE.fullmatch(line)
+      pass_match = abba_module.PASS_LINE_RE.fullmatch(line)
+      if (step_match is None) == (pass_match is None):
+          raise RuntimeError(f"W16 ABBA atomic-line fullmatch failure: {line!r}")
+      if step_match is not None:
+          observed_atomic_pairs.append(
+              (int(step_match["rank"]), int(step_match["step"]))
+          )
+      else:
+          observed_atomic_pass_ranks.append(int(pass_match["rank"]))
+  if (
+      not atomic_text.endswith("\n")
+      or "\r" in atomic_text
+      or len(atomic_lines) != atomic_workers * (atomic_lines_per_worker + 1)
+      or len(observed_atomic_pairs) != len(set(observed_atomic_pairs))
+      or set(observed_atomic_pairs) != expected_atomic_pairs
+      or sorted(observed_atomic_pass_ranks) != list(range(atomic_workers))
+  ):
+      raise RuntimeError("W16 ABBA atomic-line exact-count/identity mismatch")
+  print(
+      "W16 ABBA ATOMIC-LINE SELFTEST PASS "
+      f"processes={atomic_workers} lines={len(atomic_lines)}"
+  )
+
+  marker_root = (
+      Path("/local/evan/offline_arb_w16_abba_marker_static") / os.uname().nodename
+  )
+  shutil.rmtree(marker_root, ignore_errors=True)
+  marker_root.mkdir(parents=True)
+  marker_time = 1_700_000_000
+  marker_jobtag = "same-second-static"
+  marker_attempt = abba_runner_module.attempt_nonce(marker_jobtag)
+  preflight_marker_paths = [
+      marker_root / f"livepreflight.{marker_jobtag}.n{node_rank}.fresh"
+      for node_rank in range(2)
+  ]
+  for node_rank, marker in enumerate(preflight_marker_paths):
+      marker.write_text(
+          f"READY|{marker_jobtag}|{marker_attempt}|{node_rank}|{marker_time}|"
+          f"{marker_jobtag}-{node_rank}\n",
+          encoding="utf-8",
+      )
+  preflight_declarations = [
+      {
+          "path": str(marker),
+          "sha256": abba_runner_module.sha256_file(marker),
+      }
+      for marker in preflight_marker_paths
+  ]
+  preflight_identities = [
+      ("READY", marker_jobtag, marker_attempt, str(node_rank))
+      for node_rank in range(2)
+  ]
+  abba_runner_module.validate_fresh_marker_declarations(
+      preflight_declarations,
+      preflight_marker_paths,
+      preflight_identities,
+      contract_created_at=marker_time,
+      label="static same-second preflight",
+  )
+
+  marker_arm = "l16_a"
+  marker_threads, marker_start, marker_stop = 16, 0, 192
+  marker_arm_nonce = abba_runner_module.arm_nonce(
+      marker_attempt, marker_arm, marker_threads, marker_start, marker_stop
+  )
+  arm_marker_paths = [
+      marker_root / f"arm_fresh.{marker_jobtag}.{marker_arm}.n{node_rank}"
+      for node_rank in range(2)
+  ]
+  for node_rank, marker in enumerate(arm_marker_paths):
+      marker.write_text(
+          f"READY|{marker_jobtag}|{marker_arm}|{marker_attempt}|{marker_arm_nonce}|"
+          f"{node_rank}|{marker_time}|{marker_jobtag}-{node_rank}\n",
+          encoding="utf-8",
+      )
+  arm_declarations = [
+      {
+          "path": str(marker),
+          "sha256": abba_runner_module.sha256_file(marker),
+      }
+      for marker in arm_marker_paths
+  ]
+  arm_identities = [
+      (
+          "READY",
+          marker_jobtag,
+          marker_arm,
+          marker_attempt,
+          marker_arm_nonce,
+          str(node_rank),
+      )
+      for node_rank in range(2)
+  ]
+  abba_runner_module.validate_fresh_marker_declarations(
+      arm_declarations,
+      arm_marker_paths,
+      arm_identities,
+      contract_created_at=marker_time,
+      label="static same-second arm",
+  )
+  marker_preflight_path = marker_root / f"preflight.{marker_jobtag}.contract.json"
+  marker_preflight_path.write_text("{}\n", encoding="utf-8")
+  arm_contract_fixture = {
+      "schema_version": "offline_arb_w16_gpic_abba_arm_contract_v1",
+      "status": "READY",
+      "jobtag": marker_jobtag,
+      "arm": marker_arm,
+      "attempt_nonce": marker_attempt,
+      "arm_nonce": marker_arm_nonce,
+      "threads": marker_threads,
+      "start_step": marker_start,
+      "stop_step": marker_stop,
+      "created_at_unix": marker_time,
+      "preflight": {
+          "path": str(marker_preflight_path),
+          "sha256": abba_runner_module.sha256_file(marker_preflight_path),
+      },
+      "fresh_markers": arm_declarations,
+  }
+  abba_runner_module._validate_arm_contract(
+      arm_contract_fixture,
+      jobtag=marker_jobtag,
+      arm=marker_arm,
+      threads=marker_threads,
+      start=marker_start,
+      stop=marker_stop,
+      preflight_path=marker_preflight_path,
+      attempt=marker_attempt,
+  )
+
+  def expect_marker_rejection(label, declarations, paths, identities, created_at):
+      try:
+          abba_runner_module.validate_fresh_marker_declarations(
+              declarations,
+              paths,
+              identities,
+              contract_created_at=created_at,
+              label=label,
+          )
+      except RuntimeError:
+          return
+      raise RuntimeError(f"W16 ABBA marker negative case was accepted: {label}")
+
+  bad_sha_declarations = [dict(item) for item in preflight_declarations]
+  bad_sha_declarations[1]["sha256"] = "0" * 64
+  expect_marker_rejection(
+      "static bad SHA",
+      bad_sha_declarations,
+      preflight_marker_paths,
+      preflight_identities,
+      marker_time,
+  )
+  wrong_attempt_identities = [
+      ("READY", marker_jobtag, "0" * 64, str(node_rank))
+      for node_rank in range(2)
+  ]
+  expect_marker_rejection(
+      "static wrong attempt",
+      preflight_declarations,
+      preflight_marker_paths,
+      wrong_attempt_identities,
+      marker_time,
+  )
+  wrong_nonce_identities = [
+      (
+          "READY",
+          marker_jobtag,
+          marker_arm,
+          marker_attempt,
+          "f" * 64,
+          str(node_rank),
+      )
+      for node_rank in range(2)
+  ]
+  expect_marker_rejection(
+      "static wrong arm nonce",
+      arm_declarations,
+      arm_marker_paths,
+      wrong_nonce_identities,
+      marker_time,
+  )
+  for field in ("attempt_nonce", "arm_nonce"):
+      bad_contract = dict(arm_contract_fixture)
+      bad_contract[field] = "0" * 64
+      try:
+          abba_runner_module._validate_arm_contract(
+              bad_contract,
+              jobtag=marker_jobtag,
+              arm=marker_arm,
+              threads=marker_threads,
+              start=marker_start,
+              stop=marker_stop,
+              preflight_path=marker_preflight_path,
+              attempt=marker_attempt,
+          )
+      except RuntimeError:
+          pass
+      else:
+          raise RuntimeError(f"W16 ABBA bad arm-contract {field} was accepted")
+  expect_marker_rejection(
+      "static stale marker",
+      preflight_declarations,
+      preflight_marker_paths,
+      preflight_identities,
+      marker_time + abba_runner_module.FRESH_MARKER_MAX_AGE_S + 1,
+  )
+  shutil.rmtree(marker_root)
+  print("W16 ABBA SAME-SECOND MARKER SELFTEST PASS negative=sha,attempt,nonce,stale")
+
+  helper_root = Path("/local/evan/offline_arb_w16_abba_static_helpers") / os.uname().nodename
+  helper_root.mkdir(parents=True)
+  helper_json = helper_root / "object.json"
+  helper_json.write_text("{}\n", encoding="utf-8")
+  if abba_module.read_object(helper_json, "static helper") != {}:
+      raise RuntimeError("W16 ABBA read_object helper smoke mismatch")
+  helper_declaration = {
+      "path": str(helper_json),
+      "bytes": helper_json.stat().st_size,
+      "sha256": hashlib.sha256(helper_json.read_bytes()).hexdigest(),
+  }
+  if abba_module.validate_sha_artifact(
+      helper_json, helper_declaration, "static helper", named=False
+  ) != helper_declaration["sha256"]:
+      raise RuntimeError("W16 ABBA validate_sha_artifact helper smoke mismatch")
+  recovery_label = "l16_a node 0 sidecar control"
+  recovery_declaration = {
+      "path": str(helper_json.resolve(strict=True)),
+      "sha256": helper_declaration["sha256"],
+  }
+  if recovery_module.validate_unsized_reference(
+      abba_module, helper_json, recovery_declaration, recovery_label
+  ) != recovery_declaration["sha256"]:
+      raise RuntimeError("W16 ABBA recovery unsized-reference positive mismatch")
+  recovery_link = helper_root / "object.link.json"
+  recovery_link.symlink_to(helper_json)
+  recovery_bad_cases = (
+      (helper_json, dict(recovery_declaration, bytes=helper_json.stat().st_size), recovery_label),
+      (helper_json, dict(recovery_declaration, path=str(helper_root / "wrong")), recovery_label),
+      (helper_json, dict(recovery_declaration, sha256="0" * 64), recovery_label),
+      (helper_json, recovery_declaration, "unapproved label"),
+      (recovery_link, recovery_declaration, recovery_label),
+  )
+  for path, declaration, label in recovery_bad_cases:
+      try:
+          recovery_module.validate_unsized_reference(
+              abba_module, path, declaration, label
+          )
+      except ValueError:
+          pass
+      else:
+          raise RuntimeError(f"W16 ABBA recovery negative case accepted: {label}")
+  if recovery_module.validate_reusable_snapshot(
+      abba_module, helper_json, {}
+  ) != hashlib.sha256(helper_json.read_bytes()).hexdigest():
+      raise RuntimeError("W16 ABBA recovery reusable-snapshot positive mismatch")
+  for snapshot_path, snapshot_value in (
+      (helper_json, {"unexpected": 1}),
+      (recovery_link, {}),
+  ):
+      try:
+          recovery_module.validate_reusable_snapshot(
+              abba_module, snapshot_path, snapshot_value
+          )
+      except ValueError:
+          pass
+      else:
+          raise RuntimeError("W16 ABBA recovery reusable-snapshot negative accepted")
+  helper_json.write_text('{"value": 1}\n', encoding="utf-8")
+  recovery_module.validate_reusable_snapshot(abba_module, helper_json, {"value": 1})
+  try:
+      recovery_module.validate_reusable_snapshot(
+          abba_module, helper_json, {"value": 1.0}
+      )
+  except ValueError:
+      pass
+  else:
+      raise RuntimeError("W16 ABBA recovery snapshot type-exact mismatch was accepted")
+  recovery_link.unlink()
+  if len(recovery_module._expected_recovery_labels()) != 24:
+      raise RuntimeError("W16 ABBA recovery exact-label cardinality drift")
+  helper_json.unlink()
+  helper_root.rmdir()
+
+  def synthetic_abba_decision(left, right, left_pass=True, right_pass=True):
+      drift = abs(left - right) / max(left, right)
+      stable = drift <= 0.05
+      qualified = left_pass and right_pass and stable
+      return drift, qualified, "SELECTABLE" if qualified else "INCONCLUSIVE" if not stable else "NO_GO"
+
+  drift, qualified, decision = synthetic_abba_decision(1.0, 0.951)
+  if not qualified or decision != "SELECTABLE" or abs(drift - 0.049) > 1e-12:
+      raise RuntimeError("ABBA 4.9% pair-drift synthetic PASS failed")
+  drift, qualified, decision = synthetic_abba_decision(1.0, 0.949)
+  if qualified or decision != "INCONCLUSIVE" or abs(drift - 0.051) > 1e-12:
+      raise RuntimeError("ABBA 5.1% pair-drift synthetic INCONCLUSIVE failed")
+  drift, qualified, decision = synthetic_abba_decision(
+      1.0, 0.951, left_pass=True, right_pass=False
+  )
+  if qualified or decision != "NO_GO":
+      raise RuntimeError("ABBA single-arm NO_GO was hidden by its repeated peer")
+  freeze_builder = (
+      repo / "scripts/offline_arb/make_freeze_manifest.py"
+  ).read_text(encoding="utf-8")
+  for relative in (
+      "scripts/offline_arb/run_w64_raw_supply_gate.py",
+      "jobs/offline_arb_w64_raw_supply_gate.yaml",
+      "scripts/offline_arb/analyze_w64_raw_supply_gate.py",
+      "jobs/offline_arb_w64_raw_supply_analyze.yaml",
+      "scripts/offline_arb/caption_sidecar_contract.py",
+  ):
+      if f'"{relative}"' not in freeze_builder:
+          raise RuntimeError(f"freeze explicit W64 source binding missing: {relative}")
+  if 'SOURCE_TREES = ("training", "networks")' not in freeze_builder:
+      raise RuntimeError("freeze no longer recursively binds training package init sources")
+  dataset_source = (
+      repo / "training/dataline_offline/offline_dataset.py"
+  ).read_text(encoding="utf-8")
+  for token in (
+      "def _resolved_gpic_threads_per_node(",
+      '"dataset.gpic_threads_per_node conflicts with "',
+      '"gpic_threads_per_node must be at least LOCAL_WORLD_SIZE: "',
+      '"gpic_threads_per_node must be divisible by LOCAL_WORLD_SIZE: "',
+      "resolved % world != 0",
+      "gpic_threads_per_node=None",
+      "self._gpic_threads_per_node = _resolved_gpic_threads_per_node(",
+      "def _coalesced_tar_payloads_plain(",
+      "def _coalesced_tar_payloads_instrumented(",
+      "def _gpic_payloads_in_memory_plain(",
+      "def _gpic_payloads_in_memory_instrumented(",
+      "self._telemetry_accepting = False",
+      '"telemetry_fatal": bool(',
+      '"operation_max_s": {',
+      '"locator_requests":',
+      '"member_bytes":',
+      '"condition_wakeups": condition_wakeups',
+      '"attempt_jobtag": self._telemetry_jobtag',
+      '"sidecar_release_digest": self._telemetry_sidecar_release_digest',
+      '_GPIC_SOURCE_CONSISTENCY_MODES = frozenset({"strict_path", "fd_stable"})',
+      '"gpic_source_consistency_mode": (',
+      '"gpic_threads_per_node": self._gpic_threads_per_node',
+      '"fstat_calls": sum(int(value["fstat_calls"]) for value in stats)',
+      '"path_stat_calls": sum(',
+  ):
+      if token not in dataset_source:
+          raise RuntimeError(f"r7-L16 dataset telemetry token missing: {token}")
+  from training.dataline_offline.offline_dataset import (
+      OfflineLoaderError,
+      _resolved_gpic_threads_per_node,
+  )
+
+  expected_thread_resolutions = (
+      ((16, None, 8), 16),
+      ((None, 16, 8), 16),
+      ((16, 16, 8), 16),
+      ((None, None, 8), 32),
+  )
+  for arguments, expected in expected_thread_resolutions:
+      if _resolved_gpic_threads_per_node(*arguments) != expected:
+          raise RuntimeError(
+              f"GPIC config/env/default resolution drift: {arguments} -> {expected}"
+          )
+  for arguments in ((16, 32, 8), (4, None, 8), (12, None, 8)):
+      try:
+          _resolved_gpic_threads_per_node(*arguments)
+      except OfflineLoaderError:
+          pass
+      else:
+          raise RuntimeError(f"invalid GPIC thread authority was accepted: {arguments}")
+  formal_config = yaml.safe_load(
+      (repo / "configs/stage256_offline_exact_v1.yaml").read_text(encoding="utf-8")
+  )
+  formal_dataset = formal_config.get("dataset", {})
+  formal_gpic_mode = formal_dataset.get("gpic_source_consistency_mode")
+  if formal_gpic_mode not in {"strict_path", "fd_stable"}:
+      raise RuntimeError(
+          "formal GPIC consistency mode must be explicit and selector-approved"
+      )
+  if type(formal_dataset.get("gpic_threads_per_node")) is not int or formal_dataset[
+      "gpic_threads_per_node"
+  ] != 16:
+      raise RuntimeError("formal GPIC threads-per-node must be explicit integer 16")
+  config_schema_source = (repo / "training/config_schema.py").read_text(encoding="utf-8")
+  for token in (
+      '"gpic_source_consistency_mode": str',
+      '"gpic_threads_per_node": int',
+  ):
+      if token not in config_schema_source:
+          raise RuntimeError(f"GPIC runtime authority is absent from config schema: {token}")
+  train_source = (repo / "train.py").read_text(encoding="utf-8")
+  for token in (
+      'if "gpic_source_consistency_mode" in config.dataset:',
+      'dataset.gpic_source_consistency_mode was not bound by store_cls',
+      '[train] dataset gpic_source_consistency_mode=',
+      'if "gpic_threads_per_node" in config.dataset:',
+      'dataset.gpic_threads_per_node was not bound by store_cls',
+      '[train] dataset gpic_threads_per_node=',
+  ):
+      if token not in train_source:
+          raise RuntimeError(f"train GPIC mode/thread anti-swallow token missing: {token}")
+  auto_resume_source = (
+      repo / "training/auto_resume_reconcile.py"
+  ).read_text(encoding="utf-8")
+  for token in (
+      'ENABLE_ENV = "OFFLINE_ARB_AUTO_RESUME_RECONCILE"',
+      'SCHEMA_VERSION = "offline_arb_auto_resume_reconcile_v1"',
+      'if last_step == checkpoint_step:',
+      '"mode": "already_at_checkpoint"',
+      'guard_path = claims / f"{digest}.json"',
+      'os.O_WRONLY | os.O_CREAT | os.O_EXCL',
+      'os.replace(temporary, metrics)',
+      '_fsync_dir(metrics.parent)',
+      '"metrics_before"',
+      '"discarded_tail"',
+  ):
+      if token not in auto_resume_source:
+          raise RuntimeError(f"auto-resume reconcile contract token missing: {token}")
+  load_index = train_source.index("global_step = load_checkpoint(")
+  reconcile_index = train_source.index(
+      "reconcile_metrics_for_resume(\n                    checkpoint_path=ckpt_path"
+  )
+  dataset_start_index = train_source.index('if hasattr(dataset, "set_start_step")')
+  metrics_append_index = train_source.index('open(metrics_path, "a"')
+  if not load_index < reconcile_index < dataset_start_index < metrics_append_index:
+      raise RuntimeError(
+          "auto-resume reconcile must run after checkpoint load and before "
+          "dataset start/metrics append"
+      )
+  for token in (
+      "if is_dist:\n            dist.barrier()",
+      "dist.broadcast(failed, src=0)",
+      '[auto-resume] rank0 reconciliation failed closed:',
+  ):
+      if token not in train_source:
+          raise RuntimeError(f"train auto-resume distributed safety token missing: {token}")
+  runtime_selftest_source = (
+      repo / "scripts/offline_arb/test_caption_sidecar_runtime.py"
+  ).read_text(encoding="utf-8")
+  for token in (
+      "class _NamespaceSwapReader",
+      'for mode in ("strict_path", "fd_stable"):',
+      'plain == instrumented',
+      'strict namespace swap telemetry=',
+      'fd_stable did not retain bytes from the opened old inode',
+      'detail.get("fstat_calls")',
+      'detail.get("path_stat_calls")',
+  ):
+      if token not in runtime_selftest_source:
+          raise RuntimeError(f"GPIC consistency runtime selftest token missing: {token}")
+  if '"record_type": "batch_slow"' in dataset_source or '"batch_slow"' in analyzer:
+      raise RuntimeError("uncontracted batch_slow telemetry leaked into r7-L16")
+  semantic_original = (
+      jobs / "offline_arb_caption_sidecar_semantic_ab.yaml"
+  ).read_text(encoding="utf-8")
+  if any(
+      token not in semantic_original
+      for token in ("source_stage", "source_direct", "sidecar_direct")
+  ):
+      raise RuntimeError("original caption source three-arm semantic proof drifted")
+  if "l32_off" in semantic_original or "l16_on" in semantic_original:
+      raise RuntimeError("thread matrix leaked into original source semantic job")
+  thread_matrix = (
+      jobs / "offline_arb_caption_sidecar_thread_telemetry_semantic.yaml"
+  ).read_text(encoding="utf-8")
+  for token in (
+      "0) ARM=l32_off; THREADS=32; TELEMETRY=false",
+      "1) ARM=l16_off; THREADS=16; TELEMETRY=false",
+      "2) ARM=l16_on;  THREADS=16; TELEMETRY=true",
+      "OFFLINE_ARB_PROFILE_WINDOWS=0",
+      "OFFLINE_ARB_SMOKE_DATASET_CONFIG=$RUN_DIR/formal.snapshot.yaml",
+      '"trace_sha256", "prompts_sha256", "pixels_sha256", "cfg_keep_sha256"',
+      '"offline_arb_io_profile_v1"',
+      '"identity"',
+      '"closure"',
+      '"telemetry_fatal"',
+      '"rejected_emits_before_closure"',
+      '"rejected_emits_observed_by_writer"',
+      '"offline_arb_caption_thread_matrix_shared_telemetry_v1"',
+      '"shared_path"',
+      '"manifest_sha256"',
+      '"offline_arb_caption_thread_telemetry_semantic_v1"',
+      "CAPTION_THREAD_TELEMETRY_SEMANTIC_PASS",
+  ):
+      if token not in thread_matrix:
+          raise RuntimeError(f"caption thread/telemetry matrix token missing: {token}")
+  failure_guard = 'if [ -s "$1/thread.failed.worker$index" ] && grep -Fq "$2" "$1/thread.failed.worker$index"; then'
+  if thread_matrix.count(failure_guard) != 1:
+      raise RuntimeError("thread matrix peer-failure guard is missing or duplicated")
+  matrix_command = yaml.safe_load(thread_matrix)["command"]
+  matrix_lines = matrix_command.splitlines()
+  heredoc_count = 0
+  cursor = 0
+  while cursor < len(matrix_lines):
+      if "<<'PYEOF'" not in matrix_lines[cursor]:
+          cursor += 1
+          continue
+      start = cursor + 1
+      try:
+          stop = matrix_lines.index("PYEOF", start)
+      except ValueError as exc:
+          raise RuntimeError("unterminated Python heredoc in thread matrix") from exc
+      compile(
+          "\n".join(matrix_lines[start:stop]) + "\n",
+          f"thread-matrix-heredoc-{heredoc_count}",
+          "exec",
+      )
+      heredoc_count += 1
+      cursor = stop + 1
+  if heredoc_count != 4:
+      raise RuntimeError(f"unexpected thread-matrix Python heredoc count: {heredoc_count}")
+  print(f"STATIC SOURCE/YAML PASS files={len(paths)}")
+  PYEOF
+
+  # Synthetic performance-gate cases prove that a slow resumed round cannot be
+  # hidden by a fast first round and that only strict PASS returns zero.
+  "$PY" - <<'PYEOF'
+  import json
+  import shutil
+  import subprocess
+  from pathlib import Path
+
+  repo = Path("/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop")
+  root = Path("/local/evan/offline_arb_gpuval_postmortem_selftest")
+  shutil.rmtree(root, ignore_errors=True)
+  stamp = "20260712T000000Z"
+
+  def run_case(label, mean_a, mean_b, expected_status, expected_rc):
+      run_id = f"gpuval-postmortem-selftest-{label}"
+      ckpt = root / label / run_id / "ckpt"
+      ckpt.mkdir(parents=True)
+      metrics = ckpt / "metrics.jsonl"
+      rows = []
+      for round_name, steps, base, checkpoint_carried in (
+          ("A", range(1, 351), mean_a, 201),
+          ("B", range(201, 501), mean_b, 401),
+      ):
+          for step in steps:
+              iter_s = base + (8.0 if step == checkpoint_carried else 0.0)
+              wait_s = iter_s * 0.05
+              rows.append({
+                  "step": step,
+                  "iter_s": round(iter_s, 3),
+                  "data_wait_s": round(wait_s, 3),
+                  "data_wait_frac": round(wait_s / iter_s, 3),
+              })
+      metrics.write_text(
+          "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+          encoding="utf-8",
+      )
+      jobtag = f"selftest-{label}"
+      log_a = ckpt.parent / f"train.{jobtag}.rA.n0.{stamp}.log"
+      log_b = ckpt.parent / f"train.{jobtag}.rB.n0.{stamp}.log"
+      last = ckpt / "last.pt"
+      log_a.write_text(
+          f"[train] checkpoint saved at step 200 -> {last}\n"
+          "[train] step 350/350 loss 1.0 iter 2.5s\n",
+          encoding="utf-8",
+      )
+      log_b.write_text(
+          f"[train] resumed from {last} at step 200\n"
+          f"[train] checkpoint saved at step 400 -> {last}\n"
+          "[train] step 500/500 loss 1.0 iter 2.5s\n",
+          encoding="utf-8",
+      )
+      command = [
+          str(repo.parent / "venv-gpu/bin/python"),
+          str(repo / "scripts/offline_arb/analyze_gpuval_r6.py"),
+          "--metrics", str(metrics),
+          "--round-a-log", str(log_a),
+          "--round-b-log", str(log_b),
+          "--config", str(repo / "configs/stage256_offline_exact_v1.yaml"),
+          "--gpuval-yaml", str(repo / "jobs/offline_exact_256_2x8_gpuval.yaml"),
+          "--formal-yaml", str(repo / "jobs/offline_exact_256_8x8_FORMAL.yaml"),
+          "--run-id", run_id,
+          "--formal-world-size", "64",
+          "--formal-checkpoint-steps", "3000",
+          "--formal-final-save", "true",
+          "--setup-budget-s", "1800",
+      ]
+      result = subprocess.run(command, text=True, capture_output=True, check=False)
+      if result.returncode != expected_rc:
+          raise RuntimeError(
+              f"{label}: rc={result.returncode} expected={expected_rc} stderr={result.stderr}"
+          )
+      value = json.loads(result.stdout)
+      if value.get("status") != expected_status:
+          raise RuntimeError(f"{label}: status={value.get('status')} expected={expected_status}")
+      print(f"GPUVAL POSTMORTEM SELFTEST PASS case={label} status={expected_status} rc={expected_rc}")
+
+  run_case("strict", 2.45, 2.48, "PASS", 0)
+  run_case("borderline", 2.80, 2.80, "BORDERLINE", 4)
+  run_case("round_b_regression", 2.20, 3.20, "NO_GO", 3)
+  shutil.rmtree(root, ignore_errors=True)
+  PYEOF
+
+  # Pure synthetic contract tests: no production catalog, source, sidecar or
+  # freeze is read.  Each timeout preserves a finite static-gate failure mode.
+  timeout --signal=TERM --kill-after=30s 1200s \
+    "$PY" scripts/offline_arb/build_caption_sidecar.py --self-test
+  timeout --signal=TERM --kill-after=30s 1200s \
+    "$PY" scripts/offline_arb/verify_caption_sidecar.py --self-test
+  export SELFTEST_LOCAL_ROOT=/local/evan/offline_arb_caption_sidecar_runtime_selftest.static.$(hostname)
+  timeout --signal=TERM --kill-after=30s 1200s \
+    "$PY" scripts/offline_arb/test_caption_sidecar_runtime.py

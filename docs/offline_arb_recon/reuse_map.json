@@ -1,0 +1,422 @@
+{
+ "key": "reuse_map",
+ "summary": "已只读侦察 crop 工作树 training/dataline/*.py（8个核心文件,~3492行）+ train.py loader 契约 + training/checkpoint.py + scripts/ 下 27 个 dataline 相关脚本。完成三分类(复用/改造/弃用归档),逐项带 file:line 证据,见 facts。\n\n关键结论:\n1) train.py 与 dataline 之间无 torch DataLoader/collate_fn——dataset.loader(batch_size) 直接是个 Python generator,batch dict 由 loader()/_loader_item_queue() 内联手工 append+torch.stack 拼装(collate 即在 CompleteV1Dataset 内,非独立层)。\n2) checkpoint(training/checkpoint.py:144-214)只存 {trainable_state, optimizer, ema, scheduler, global_step, ablation_fp}——**不存任何 dataloader/数据位置状态**。resume 时 dataset.set_start_step(global_step) 唯一作用是让 multi-AR 的确定性 BucketSchedule(seed,step) 重算出与断点前一致的桶序列(FSDP shape 对齐用),而非恢复\"消费到哪条数据\"——因为当前采样是带放回的近似流,本就没有\"epoch 位置\"概念可恢复。这对新 plan-driven 设计是重要的自由度:不存在需要保持字节级兼容的 resume 数据位置契约。\n3) metrics 钩子(train.py:306-339)靠 getattr(dataset, \"domain_counter\"/\"buffer_fill\"/\"produced\", {}) 鸭子类型读取,image_fetch.fetch_stats_snapshot() 全局 Counter 单独取——只要新 loader 挂同名属性即可零改 train.py 复用此钩子。\n4) 全仓库已有两个\"离线 manifest/catalog\"先例可直接参考:scripts/vae_cache_flux2_moments.py(全量 elig 扫描+单次 resize/decode+落盘,非流式)与 scripts/build_textatlas_manifest.py + latent_cache.py(uid→物理路径全局索引+批量并发读),形态非常接近 Phase-1 要建的\"item catalog + fetch adapter\"。\n5) image_fetch.stream_tar_images 目前是\"顺序流式('r|'),无随机 seek\",不支持 range-read;若选 tar range-read 适配器需要新增 offset 索引,现有代码不能直接充当。\n\n三分类清单、train.py契约细节、scripts分类全部见 facts 字段,每条附 file:line。",
+ "facts": {
+  "方法说明": "全部通过 Read/Bash(ls,wc,grep,sed -n) 完成,未执行任何 python/pyarrow 读表,未解码图片,未全量扫描 tar,未进入 mot_pilot_v1_cleanup。行号引用的文件均为 /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop 下路径(下方 file 字段省略仓库前缀)。",
+  "复用_近乎不改": [
+   {
+    "file": "training/dataline/image_fetch.py",
+    "item": "decode_rgb",
+    "line": "221-227",
+    "reason": "纯函数:bytes->PIL RGB,except 吞坏图返回 None,零外部状态耦合。"
+   },
+   {
+    "file": "training/dataline/image_fetch.py",
+    "item": "resize_crop_uint8",
+    "line": "241-256",
+    "reason": "纯函数:短边 resize+方形 center-crop(带 v_anchor)->uint8 HWC,唯一依赖 PIL_NATIVE_LOCK。"
+   },
+   {
+    "file": "training/dataline/image_fetch.py",
+    "item": "uint8_to_norm_tensor",
+    "line": "259-262",
+    "reason": "纯函数:uint8->[-1,1] CHW tensor,新旧架构 batch 装配都需要,零耦合。"
+   },
+   {
+    "file": "training/dataline/image_fetch.py",
+    "item": "crop_offset",
+    "line": "230-238",
+    "reason": "纯数学:裁剪起点(anchor 0.5 时逐字节回落旧行为),被 resize_crop_uint8/resize_crop_to_bucket 共用。"
+   },
+   {
+    "file": "training/dataline/image_fetch.py",
+    "item": "process_square",
+    "line": "265-267",
+    "reason": "resize_crop_uint8+uint8_to_norm_tensor 的薄组合,纯函数。"
+   },
+   {
+    "file": "training/dataline/image_fetch.py",
+    "item": "gpic_path / read_gpic_bytes",
+    "line": "74-95",
+    "reason": "GPIC 本地文件路径拼接+读取,纯 I/O 函数,签名只需 (src_root,src_shard,src_key,ext),可直接作 fetch adapter 的 gpic 分支。"
+   },
+   {
+    "file": "training/dataline/image_fetch.py",
+    "item": "fetch_url_bytes",
+    "line": "133-215",
+    "reason": "anime 逐图 HTTP 取图+磁盘缓存+图片魔数校验(2026-07-09 加固)+重试分类,任务明确点名的可复用件;唯一副作用是模块级 FETCH_STATS Counter(监控,非流式耦合)。"
+   },
+   {
+    "file": "training/dataline/caption_build.py",
+    "item": "整个文件(proxy_tok/truncate_to_token_budget/truncate_sentences/truncate_tags/finalize_real_caption/build_textatlas_caption/build_anime_caption 及全部私有 helper)",
+    "line": "1-301",
+    "reason": "文档自述'纯函数,无 I/O';所有函数只吃已回源好的 dict/str 字段,零 producer/buffer/queue 耦合,是 caption 终化逻辑的真正实现层。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "CompleteV1Dataset._is_cfg_protected",
+    "line": "873-881",
+    "reason": "@staticmethod,纯函数(domain,rec)->bool,任务明确点名的 cfg 保护函数,零 self 状态耦合。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "_domain_seed",
+    "line": "61-64",
+    "reason": "纯函数:域名->稳定 md5 种子,替代不稳定 hash(),新设计如需域内确定性打乱仍可直接用。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "_load_gpic_caption_src / _load_monet_caption_src",
+    "line": "70-96",
+    "reason": "纯 I/O 函数(路径参数进、dict 出),读 caption 源 parquet 按 key/id 建映射,catalog 构建阶段可直接调用做 caption join。"
+   },
+   {
+    "file": "training/dataline/multi_ar.py",
+    "item": "build_buckets",
+    "line": "23-43",
+    "reason": "纯函数,生成固定 AR 桶表,零状态耦合。"
+   },
+   {
+    "file": "training/dataline/multi_ar.py",
+    "item": "build_adaptive_buckets",
+    "line": "46-77",
+    "reason": "任务明确点名;纯函数,NAI-like 稠密桶表生成,零耦合。"
+   },
+   {
+    "file": "training/dataline/multi_ar.py",
+    "item": "nearest_allowed_bucket / buckets_by_ar_distance / square_index",
+    "line": "80-109",
+    "reason": "纯数学(log-AR距离/面积距离排序),用于稀有桶折算与最近邻查找,catalog 侧桶指派仍会用到。"
+   },
+   {
+    "file": "training/dataline/multi_ar.py",
+    "item": "assign_bucket / assign_adaptive_bucket",
+    "line": "112-161",
+    "reason": "纯函数 (w,h)->bucket_idx,正是离线'每 item 唯一桶指派'需要的核心算法,当前已是无状态实现,可直接在 catalog 构建脚本里对每行调用。"
+   },
+   {
+    "file": "training/dataline/multi_ar.py",
+    "item": "resize_crop_to_bucket / resize_u8_to_bucket",
+    "line": "164-190",
+    "reason": "任务点名 resize_u8_to_bucket;纯函数,AR-preserving resize+裁剪到目标桶,单次 resize/crop 步骤的现成实现。"
+   },
+   {
+    "file": "training/dataline/manifest_index.py",
+    "item": "composition_clean_mask",
+    "line": "71-79",
+    "reason": "纯向量化谓词(tags/yolo_area/quality_z->bool mask),零耦合。"
+   },
+   {
+    "file": "training/dataline/manifest_index.py",
+    "item": "load_real_synth_shard",
+    "line": "285-363",
+    "reason": "任务点名'桶表'关联的 manifest 加载层;已是'扫一个 shard 产出结构化 numpy 记录(uid/elig/base_w/band_captioner)'的纯函数式实现,与流式producer解耦,可直接用作 catalog 构建的逐 shard 扫描单元。"
+   },
+   {
+    "file": "training/dataline/manifest_index.py",
+    "item": "load_anime_shard",
+    "line": "408-491",
+    "reason": "同上,anime 源 shard->结构化记录(含 priority/elig),nrows=None+rng=None 时即整 shard 确定性读,可直接用于全量 catalog 扫描。"
+   },
+   {
+    "file": "training/dataline/manifest_index.py",
+    "item": "load_textatlas_shard",
+    "line": "132-160",
+    "reason": "纯函数,sidecar shard->结构化记录,catalog 扫描可直接复用。"
+   },
+   {
+    "file": "training/dataline/manifest_index.py",
+    "item": "anime_priority",
+    "line": "379-405",
+    "reason": "标量参考实现,纯函数,单测/校验用,零耦合。"
+   },
+   {
+    "file": "training/dataline/manifest_index.py",
+    "item": "list_shards",
+    "line": "88-113",
+    "reason": "按域枚举 shard 路径列表,catalog 构建阶段的'发现所有 shard'步骤可直接复用(训练期按 rank 分片的用法则被新 plan 取代,见改造)。"
+   },
+   {
+    "file": "training/dataline/manifest_index.py",
+    "item": "textatlas_subset_shard",
+    "line": "124-129",
+    "reason": "纯路径解析函数。"
+   },
+   {
+    "file": "training/dataline/manifest_index.py",
+    "item": "compute_real_global_stats(核心计算部分)",
+    "line": "201-236",
+    "reason": "over 全量 monet shard 统计 source_counts/cluster_sizes 的核心逻辑+原子写缓存,是纯函数式的一次性预处理,catalog 构建前用于算 base_w 权重仍需要;多 rank 协调壳层见'改造'。"
+   },
+   {
+    "file": "training/dataline/config.py",
+    "item": "整个文件(SamplingConfig/AnimeCaptionCfg/AnimeSamplingCfg/load_sampling_config)",
+    "line": "1-236",
+    "reason": "纯 JSON 解析+校验层,domain_mix/band_mix/caption路由权重等概念在离线 plan 里语义不变,零耦合。"
+   },
+   {
+    "file": "training/dataline/sampler.py",
+    "item": "_weighted_idx",
+    "line": "20-25",
+    "reason": "纯函数,累积权重数组抽样,catalog 全量抽样/plan 生成仍会用同一算法。"
+   },
+   {
+    "file": "training/dataline/sampler.py",
+    "item": "compute_repeat_counts",
+    "line": "28-61",
+    "reason": "纯 numpy 函数,anime naifu 式整数 repeat 曝光分配,不依赖 buffer/producer,可直接对全量 catalog 数组调用生成离线曝光计划。"
+   },
+   {
+    "file": "training/dataline/native_safety.py",
+    "item": "PARQUET_NATIVE_LOCK / configure_pyarrow_single_thread",
+    "line": "1-18",
+    "reason": "进程级原生库线程安全 guard,与 loader 架构无关,只要仍用 pyarrow 读 parquet 就需要。"
+   },
+   {
+    "file": "training/dataline/pil_safety.py",
+    "item": "PIL_NATIVE_LOCK",
+    "line": "1-15",
+    "reason": "同上,PIL 原生 codec 并发 guard,fetch adapter 若仍用线程池调 PIL 就需要。"
+   },
+   {
+    "file": "training/dataline/latent_cache.py",
+    "item": "LatentCacheIndex(整类)",
+    "line": "29-87",
+    "reason": "uid->文件路径全局索引 + ThreadPoolExecutor 按文件分组并发 get_many,正是'物理位置查表+批量并发读'的现成实现,是新 catalog 的 fetch-by-id 环节的强先例/可直接复用件。"
+   },
+   {
+    "file": "training/checkpoint.py",
+    "item": "save_checkpoint/load_checkpoint/init_from_checkpoint 整体",
+    "line": "144-266",
+    "reason": "与数据线完全解耦(只碰 model/optimizer/scheduler/ema/global_step),文档硬约束'逐字不变',新 loader 无需也不应触碰。"
+   }
+  ],
+  "改造_能用但要解耦": [
+   {
+    "file": "training/dataline/manifest_index.py",
+    "item": "shard_subset_for_rank",
+    "line": "163-185",
+    "reason": "现语义='把 shard 列表按 rank 取模切片(或退化行级)'服务于流式 producer 的 per-rank 分片;新设计里'每 item 唯一桶指派+确定性 plan(step,rank,slot->item)'应直接决定每个 item 归哪个 rank/step,不再需要'整 shard 分给某 rank'这层——需要把其中 force_row_level 的设计教训(fat-shard 内部有序导致 per-rank 偏斜)保留为 plan 生成器的考量,但函数本身的调用方式要重写。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "CompleteV1Dataset._build_global_stats",
+    "line": "685-712",
+    "reason": "compute_real_global_stats 本身是纯函数(见复用),但这层用 torch.distributed barrier 做'rank0算/其余等/读缓存'的多 rank 协调,是为常驻训练进程写的;离线一次性 catalog 构建脚本里应该退化成单进程算一次、写文件,不需要 dist barrier。"
+   },
+   {
+    "file": "training/dataline/multi_ar.py",
+    "item": "BucketSchedule(整类,含 pick)",
+    "line": "193-223",
+    "reason": "RNG(base_seed*1e6+step) 确定性选桶,当前是'每 step 运行时现算'；新设计里 step->bucket 应在生成 training plan 时一次性预计算进表,不需要运行时按 step 重算——算法(确定性种子+cumsum抽样)可保留,调用方式要从'loader 每批调 .pick(step)'改成'plan 构建时批量算好'。"
+   },
+   {
+    "file": "training/dataline/multi_ar.py",
+    "item": "Bucketer(整类)",
+    "line": "226-264",
+    "reason": "resize()内部读 self.ds._multi_ar_active 做 warmup 期软切换,耦合到 CompleteV1Dataset 实例；核心两步(assign_bucket/assign_adaptive_bucket 选桶 + resize_crop_to_bucket 缩放)都是复用件,只是这层壳需要去掉对 dataset 运行时状态的依赖,改成'catalog 每行已知 bucket_idx，fetch 阶段只管按已定 bucket resize'。"
+   },
+   {
+    "file": "training/dataline/sampler.py",
+    "item": "DomainPool / CompleteSampler / build_pool_from_shards",
+    "line": "64-212",
+    "reason": "权重数学(band-first/domain_mix归一/anime priority-repeat)本身通用，但当前建在'滚动 buffer 子集(present 域重归一以应对 producer 供给不足)'之上——离线全量 catalog 下不存在'某域缺席/供给不足'问题，可以对完整 catalog 精确计算联合分布而非蒙特卡洛近似；build_pool_from_shards(189-212)已经是'把多个 shard 数组拼一个大池'的雏形，正是把它推广成'拼全量 catalog'的起点。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "_finalize_caption / _build_caption",
+    "line": "883-904",
+    "reason": "逻辑上是对 caption_build.py 纯函数的薄分发壳，仅耦合 self.tokenizer/self.caption_budget/self.cfg 三个只读配置——机械地把这三者改成显式参数即可脱离 CompleteV1Dataset 实例，caption_build.py 内部函数本身不用动。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "_prefetch_raw",
+    "line": "102-119",
+    "reason": "'ThreadPoolExecutor.map 保序并发预取'是通用模式，任何 fetch adapter(尤其 shard-aware/tar range-read)大概率都要用同款并发预取；但当前签名吃的是一个流式 iterator(items)，需要改造成对 catalog 分片/plan slot 列表的按需并发拉取。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "domain_counter",
+    "line": "671, 各处 += 1",
+    "reason": "曝光计数 Counter，train.py 的 mix_* 指标直接读它(train.py:309-321)；概念(每域累计曝光真值)在新 loader 下依然有意义，只是维护点要从'streaming loader 每抽一条+1'搬到 plan-driven loader 对应位置——建议保留同名属性以复用 train.py 钩子零改。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "CompleteV1Dataset.set_start_step",
+    "line": "724-727",
+    "reason": "当前用途='把 resume 全局步注入以复算确定性 BucketSchedule，防重跑 warmup'；新设计如果仍要支持'从 global_step 断点恢复到 plan 中的正确位置'，这个概念(用 global_step 反推 plan 索引)要保留，但实现要改成'定位到预生成 plan 的第 global_step 行'而非重算 RNG 调度。"
+   },
+   {
+    "file": "scripts/prestage_textatlas.py",
+    "item": "整脚本(预存 textatlas 源 shard 到 /local NVMe)",
+    "line": "1-60行头部, 25-26行import",
+    "reason": "用 shard_subset_for_rank 做 per-rank 预存范围；'预存到本地 NVMe 绕开 S3 挂载带宽'的思路对新 fetch adapter(尤其 shard-aware/重新分片选项)仍有价值，但预存范围要按新 plan 的 rank 分配重算，不能再用旧的 shard 取模切片。"
+   },
+   {
+    "file": "scripts/dryrun_sampler_stats.py",
+    "item": "整脚本(1M 次蒙特卡洛抽样估计各 stage 实际分布)",
+    "line": "1-38(docstring自述方法论), 46-61(imports)",
+    "reason": "文档自陈'全池抽样≈训练实际分布，蒙特卡洛估计'；离线 catalog 下这类边际分布可以对全量数据精确计算而非抽样估计，caption token 长度/回源验证等子模块仍可复用 caption_build 函数，但'测量口径'要从驱动 CompleteSampler+DomainPool 改成直接扫 catalog。"
+   },
+   {
+    "file": "scripts/audit_naifu_arb_bucketdist_domain.py",
+    "item": "整脚本(逐图取图解码算 native 桶分布)",
+    "line": "1-13(imports iter_anime_shard/iter_real_synth_shard/iter_textatlas_shard/CompleteV1Dataset)",
+    "reason": "已被同目录 audit_naifu_arb_bucketdist_fast.py(免取图，只用 manifest 宽高列)取代，后者的做法(w/h列直接算assign_bucket分布，零解码)正是 catalog 阶段该干的事——本脚本的'取图验证'子功能若要保留需重新对接新 fetch adapter，而非整体废弃。"
+   },
+   {
+    "file": "scripts/test_f4_cfg_dropout.py",
+    "item": "整脚本(验证 build_anime_caption + cfg_keep 贯穿 CompleteV1Dataset)",
+    "line": "1-12",
+    "reason": "被测的 build_anime_caption/_is_cfg_protected 都是复用件，但驱动方式经过 CompleteV1Dataset 实例——新 loader 落地后需要把'cfg_keep 从数据线一路带到 batch dict'这条链路的测试改到新 loader 上，断言逻辑本身不用变。"
+   },
+   {
+    "file": "scripts/test_review_fixes.py",
+    "item": "整脚本(测 _freq_dropout + DomainPool/CompleteSampler)",
+    "line": "1-15",
+    "reason": "_freq_dropout(caption_build.py，复用)部分可原样保留；DomainPool/CompleteSampler 部分随 sampler.py 改造同步调整。"
+   },
+   {
+    "file": "scripts/test_textatlas_dataline.py",
+    "item": "整脚本(测 load_textatlas_shard+iter_textatlas_shard+CompleteSampler/DomainPool+build_textatlas_caption)",
+    "line": "1-30",
+    "reason": "load_textatlas_shard/build_textatlas_caption 是复用件；iter_textatlas_shard(流式生成器)与 CompleteSampler/DomainPool 部分随对应模块改造/弃用同步调整。"
+   }
+  ],
+  "弃用归档_streaming专属": [
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "_Producer(整类，含 run())",
+    "line": "348-421",
+    "reason": "后台生产者线程，从 iter_*_shard 生成器拉记录塞进 bounded queue，是任务点名的 producers 全套核心，随 streaming 组批一起废弃。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "CompleteV1Dataset.loader (主循环)",
+    "line": "1225-1521",
+    "reason": "含 buffer(deque)/drain_mode(uniform/proportional/keep_present)/first_fill_policy/_topup/_wait_for_any_record 等，整段是流式 shuffle-buffer 组批逻辑，被离线 plan-driven loader 整体取代。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "CompleteV1Dataset._loader_item_queue",
+    "line": "917-1224",
+    "reason": "任务明确点名的软计划三相(Phase1/2/3)+_topup+bucket_buffers+degraded 逻辑，是 2026-07-09 刚重写的 NAI-like per-bucket queue 运行时调度，其存在理由(在供给不确定下近似满足调度)在离线全量可见的新设计下不再成立。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "CompleteV1Dataset._build_pools",
+    "line": "1522-1561",
+    "reason": "把 buffer(deque)转成 DomainPool 的桥接层，强耦合 buffer/deque 及 bucket 过滤 in-buffer 记录，随 buffer 一起废弃。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "_affinity_present_dist / _square_only_pools / _build_native_affinity / _prune_scheduled_buckets / _square_only_compensation",
+    "line": "733-859",
+    "reason": "MODE-A/MODE-B 域采样近似——都是为'在有限滚动 buffer 里供给不稳定'这一约束设计的补偿数学；全量 catalog 下可以精确算联合分布(domain,bucket)而无需这些运行时近似/退化兜底，但其推导思路(P(B)=Σmix·P_native(B|d) 恒等式)值得作为新 plan 生成算法设计参考(非代码复用)。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "CompleteV1Dataset.__init__ 里 multi_ar 运行时状态初始化块",
+    "line": "462-591",
+    "reason": "warmup_steps/warmup_exposure/bucket_buffer_size/bucket_wait_*_s/assignment_mode 等一堆运行时调度旋钮，服务于流式组批的运行时决策；新设计里桶指派在 catalog 构建期一次性完成，这些旋钮不再需要(其中 build_adaptive_buckets/build_buckets/square_index 调用本身复用，见复用清单)。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "监控计数器 buffer_fill/produced/zerow_dropped/_mar_zerow_pool_skips/_mar_reresize_count(_by_domain)/_mar_sampled_by_domain/_mar_plan_degraded/cluster_counter/cache_miss_counter",
+    "line": "452-491, 671-676",
+    "reason": "均为流式 buffer/producer/re-resize 运行时观测量，train.py 的 buf_*/prod_* 指标(train.py:322-325)随之一起失去意义；domain_counter 例外(见改造，建议保留)。"
+   },
+   {
+    "file": "training/dataline/complete_dataset.py",
+    "item": "iter_real_synth_shard / iter_anime_shard / iter_textatlas_shard 的生成器外壳(rng 打乱顺序/max_rows/skip_image/_TAR_SHUFFLE_CHUNK 窗口打乱)",
+    "line": "122-342",
+    "reason": "其内部'decode+resize+组 rec dict'的核心步骤可提炼成'给定一条 catalog 行->取图+按已定 bucket resize+抽 caption 字段'的纯函数(见改造)，但当前作为'流式遍历一个 shard 并 yield 出'的生成器语义(顺序/乱序、tar 窗口洗牌、producer 友好的 max_rows 提前退出)整体属于 streaming 专属外壳，随 producer 一起废弃。"
+   },
+   {
+    "file": "training/dataline/multi_ar.py",
+    "item": "Bucketer 中对 ds._multi_ar_active/warmup 的读取分支",
+    "line": "248-264(尤其248, 253-254)",
+    "reason": "依赖 CompleteV1Dataset 实例的运行时 warmup 标志做'方图↔多AR软切换'，纯粹是流式渐进切换的产物，离线 catalog 里桶指派在构建期已定，不需要运行时软切换分支。"
+   },
+   {
+    "file": "scripts/bench_complete_v1_data.py",
+    "item": "整脚本(benchmark CompleteV1Dataset 吞吐)",
+    "line": "1-20(docstring+import)",
+    "reason": "专门测流式 producer/buffer 的吞吐瓶颈，随 streaming loader 废弃；新 loader 需要一份新 bench 脚本(harness 形态可参考)。"
+   },
+   {
+    "file": "scripts/smoke_loader_after_fixes.py",
+    "item": "整脚本",
+    "line": "1-8",
+    "reason": "驱动 CompleteV1Dataset.loader() 验证 {prompts,pixels} 契约，随旧 loader 废弃；但其验证的契约本身(prompts/pixels/cfg_keep 齐全、4 域都出现)应原样迁到新 loader 的 smoke 测试里。"
+   },
+   {
+    "file": "scripts/stress_naifu_arb_real_dataline.py",
+    "item": "整脚本(多进程模拟多 rank 压 streaming ARB 找原生 codec SIGSEGV)",
+    "line": "1-6",
+    "reason": "目的是复现 streaming producer 下的原生解码器竞态崩溃，随 producer/buffer 架构一起失去意义；其'多伪 rank 并发跑同一份代码找并发 bug'的 harness 形态可能仍值得给新 fetch adapter 抄一份。"
+   },
+   {
+    "file": "scripts/probe_realized_mix.py",
+    "item": "整脚本(离线量化 CompleteV1Dataset 实际 domain_mix，读 buffer_fill/produced/shards)",
+    "line": "1-15",
+    "reason": "诊断的正是'流式 buffer 供给不足导致 mix 偏离配置'这一问题类别，离线全量可见的新设计下该问题类别不存在(mix 由 plan 精确保证)。"
+   },
+   {
+    "file": "scripts/aggregate_probe_mix.py",
+    "item": "整脚本(聚合 16-rank probe_realized_mix 结果)",
+    "line": "1-6",
+    "reason": "依附于 probe_realized_mix.py 的产物格式，随其一起废弃。"
+   },
+   {
+    "file": "scripts/test_naifu_arb_fixes.py",
+    "item": "整脚本里测 _prune_scheduled_buckets/BucketSchedule.pick/Bucketer.allowed/_force_square_only_record 的部分",
+    "line": "7-11(T1,T3,T6,T7 覆盖清单)",
+    "reason": "这几个 T 用例专测运行时软计划/调度/护栏逻辑，随对应实现一起废弃；同文件里 T2(nearest_allowed_bucket)/T4(_domain_seed)/T8(buckets_by_ar_distance) 测的是复用纯函数，值得抽出保留(见改造/复用交叉说明)。"
+   }
+  ],
+  "train_py_契约细节": {
+   "loader接口与collate位置": "train.py:219-221 `dataset = get_class(config.dataset.store_cls)(**config.dataset); loader = dataset.loader(batch_size)`；无 torch.utils.data.DataLoader/IterableDataset，CompleteV1Dataset(complete_dataset.py:427)是普通类，.loader()是生成器方法。batch 组装(即'collate')**内联在生成器体内**：主路径 complete_dataset.py:1424-1501(prompts.append/imgs.append/cfg_keep.append循环 -> pixels=torch.stack(imgs,0) -> yield {prompts,pixels,cfg_keep})；latent-cache 路径 1396-1422(yield {prompts,moments,cfg_keep})；item_queue 路径 1128-1218(同款手工拼装)。train.py 侧只是 `batch = next(loader)`(train.py:346)，从不做二次 collate。",
+   "batch契约(model_mot.forward消费方确认)": "prompts: list[str](必需)；pixels: Tensor[B,3,H,W]∈[-1,1](networks/model_mot.py:240，latents/moments都缺省时的必需兜底)；moments: Tensor[B,64,S/8,S/8] 可选(缓存路径，同文件234-239，模型侧转 model-space 并重采样 posterior)；latents: 可选(226-230，最高优先级，跳过VAE)；cfg_keep: list[bool] 可选(217-219，per-sample 永不CFG-dropout标志)；text_rich: 可选(214-216)但当前 dataline 全代码库未产出此键(已grep确认training/dataline/、train.py均无text_rich赋值)，是model侧预留但未接线的字段。",
+   "metrics钩子": "train.py:306-339 `_dataline_metrics(ds, prev_mix)` 用 getattr(ds,'domain_counter',{})算 mix_*/mixw_*；getattr(ds,'buffer_fill',{})算 buf_*；getattr(ds,'produced',{})算 prod_*；另外单独 import training.dataline.image_fetch.fetch_stats_snapshot() 算 anime_fetch_*(全局模块级Counter，与dataset实例无关)。整个钩子是鸭子类型+try/except吞异常，只要新loader挂同名属性(或另在train.py加一条新钩子)即可保持写 metrics.jsonl 而不必改 train.py 主循环。调用点：train.py:426-427，每 dl_every 步一次。",
+   "resume恢复内容": "training/checkpoint.py load_checkpoint(197-214)恢复：trainable_state(model权重)、optimizer state、scheduler state、ema state、global_step(int)。**不含任何数据线/dataloader状态**——没有『消费到第几条』『buffer内容』『producer位置』的持久化。save_checkpoint(144-194)写盘字典键为 {trainable_state,optimizer,ema,scheduler,global_step,ablation_fp}，逐一确认无 dataset/loader 相关键。",
+   "global_step与数据消费的对应关系": "train.py主循环(342-390)：next(loader)取一个batch -> forward/backward -> optimizer.step() -> global_step+=1。即『一次 global_step 自增 = 消费一个 batch』，无梯度累积(derive_max_steps注释training/checkpoint.py:41确认'一次optimizer step=一个global batch')。dataset.set_start_step(global_step)(train.py:288-289，仅当hasattr(dataset,'set_start_step')时调用)把resume全局步注入 dataset._mar_start_step(complete_dataset.py:727)，唯一消费点是 _mar_pick_bucket(861-871)：gstep=self._mar_start_step+batch_count-1，喂给BucketSchedule.pick(gstep)(multi_ar.py:218-223，纯RNG(seed,step)确定性函数)。**结论：global_step只用来让多rank在resume后仍选出与断点前一致的桶形状序列(FSDP shape对齐)，不用来定位/跳过已消费的具体样本**——因为当前采样本身是带放回的近似流(buffer滚动+权重抽样)，天然没有'训练走到数据集第N条'这个概念，resume本质是producer从各shard重新开始流式读(种子相同但不从断点续，只是分布相同)。这意味着新的plan-driven design若要支持'resume后从plan第global_step行继续'，是在原有基础上**新增**一个从未存在过的能力，而非维持某个必须保字节兼容的旧契约。"
+  },
+  "既有可参考先例(offline pattern precedents)": [
+   {
+    "file": "scripts/vae_cache_flux2_moments.py",
+    "line": "1-90(尤其list_manifest_shards 77-87, 复用image_fetch函数 54-58)",
+    "reason": "已经是'manifest scanner(按 elig_stage 列全量遍历，不走训练采样loader)+单次 decode/resize+落盘缓存'的完整实现，是 Phase-1 '全量 item catalog 扫描 + 单次 resize/crop' 最接近的现成模板。"
+   },
+   {
+    "file": "scripts/build_latent_cache_index.py",
+    "line": "1-82",
+    "reason": "'各rank写index parquet part -> 全局合并成 uid->path 单文件索引'的落地实现，是新 catalog 的'全局稳定ID+物理位置索引'环节的直接先例。"
+   },
+   {
+    "file": "scripts/build_textatlas_manifest.py",
+    "line": "1-30(docstring定义硬schema契约)",
+    "reason": "'为每个源shard产出sidecar manifest：uid+宽高+elig+caption，训练时无需重读源数据集'——与 Phase-1 'item catalog(稳定ID+宽高+物理位置)'的 schema 理念几乎一致，只是当前只覆盖 textatlas 一个域，宽高早已就位可直接算 bucket_idx。"
+   },
+   {
+    "file": "scripts/audit_naifu_arb_bucketdist_fast.py",
+    "line": "1-26(docstring:'免取图版')",
+    "reason": "已实现'只读 manifest 宽高列，调用 assign_bucket/assign_adaptive_bucket 算每个域的 native 桶分布，零解码零取图'——这正是离线'每 item 唯一桶指派'在全量规模下的性能可行性验证(2026-07-09 刚替换掉需要真实取图解码的慢版本)。"
+   }
+  ]
+ },
+ "needs_jcc": [
+  "全量 item catalog 规模摸底：需要在 venv-gpu python 下对 gpic/monet_real/synthetic(各~64 shard)+anime(17 shard)+textatlas(9 subset×多shard)的真实 manifest 做 pyarrow.parquet.ParquetFile(p).metadata.num_rows 逐 shard 求和(footer级，量大但单次轻量)，估算 catalog 总行数与磁盘/内存占用——本机做几百次 footer 读可能仍偏重，建议 JCC 跑一个纯footer遍历脚本给出行数汇总。",
+  "宽高实际分布(非footer)：assign_bucket/assign_adaptive_bucket 需要真实 width/height 列数据(非仅 schema)，daily_v1 manifest 部分列缺失时需回退取图算(见 manifest_index.py:302-310 的 REDESIGN 分支)，全量跑一遍需要真实列读取(非 footer)，需 JCC 按域分片跑 pyarrow 列读(columns=['width','height'])统计。",
+  "tar range-read 可行性与延迟实测：image_fetch.stream_tar_images 当前只支持 'r|' 顺序流式(无随机 seek)，若三选一里要评估'tar range-read'适配器，需要在 S3 mountpoint 上实测对已知 offset 做 HTTP Range GET 单条取图的延迟/吞吐(对比现有整tar顺序流 vs 逐图fetch_url_bytes)，属于真实网络IO测量，需 JCC 起一个小压测job。",
+  "shard-aware vs 重新分片 吞吐对比：需要在真实数据规模下对比(a)保持现有.tar+按shard预取整块(shard-aware) vs (b)重新分片成'固定bucket的行组parquet内联图字节'(如textatlas现有模式)的构建时间+训练期读取吞吐，这是需要真实IO+可能的重写作业的实验，建议单独立项在 JCC 跑。",
+  "现有 stage256 正式训练(job ...-zdfp)的 checkpoint last.pt 是否真的不含数据线相关键：本次只读了 training/checkpoint.py 源码逻辑确认字典键，若要\"实锤\"可在 JCC 上对一个已有 last.pt 做 torch.load 后打印 top-level keys 核对(严禁在本机做，torch.load 大 state_dict 有 OOM 风险)。"
+ ],
+ "open_questions": [
+  "Fetch adapter 三选一(tar range-read / shard-aware / 重新分片)本次侦察未做取舍——现有代码里 stream_tar_images 只支持顺序流式，三个选项都需要新写而非直接复用/改造，需 Evan 拍板走哪个方向再决定改造深度。",
+  "sampler.py 的 CompleteSampler/DomainPool 数学(domain_mix归一+band-first+anime priority-repeat)在离线全量 catalog 下是否仍要保留'蒙特卡洛式抽样'语义，还是应该改成对全量数据做精确的组合优化/整数规划来分配 bucket 内的 item-to-slot——这决定了 sampler.py 是'轻改造(复用其抽样算法生成plan)'还是'算法层面重新设计(只保留domain_mix权重语义)'，需要设计决策而非代码侦察能回答。",
+  "resume 的'data position'能力目前完全不存在(见 train_py_契约细节.resume恢复内容)，新 plan-driven loader 是否要新增'从 global_step 反推 plan 第几行继续'这个从未有过的能力，还是接受'resume 后重新按 plan 从头轮转(仍无放回保证)'——需 Evan 拍板取舍，涉及 plan 的存储/索引设计。",
+  "textatlas 域'图字节内联在源 parquet 行内(image_path join)'与其它四域'图在独立文件/tar'的物理形态差异，如何统一进同一份 catalog 的'物理位置'字段 schema（例如统一成 {kind: 'inline_parquet'|'tar_member'|'local_file'|'http_url', ...} 的多态字段）——这是新 catalog schema 设计问题，本次侦察只列出了两种现有形态的证据，未做 schema 设计。",
+  "train.py 的 _dataline_metrics 钩子(train.py:306-339)是否要保持零改（新loader挂同名domain_counter/buffer_fill/produced属性）还是借这次重构顺便换成更贴合 plan-driven 架构的指标名——纯风格/维护决策，非阻塞项。"
+ ]
+}

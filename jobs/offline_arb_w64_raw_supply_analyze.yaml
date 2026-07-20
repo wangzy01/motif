@@ -1,0 +1,303 @@
+# Independent 16-CPU analyzer for one explicitly selected W64 capture attempt.
+# It never discovers an attempt by glob count: retries provide SOURCE_JOBTAG,
+# while this analyzer writes a unique output named by its own JCC jobtag.
+name: evan-mot-crop-offlinearb-w64-raw-supply-analyze
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1
+  export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 NUMEXPR_NUM_THREADS=2 ARROW_NUM_THREADS=2
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_arb_w64_raw_analyze.$(hostname)
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  RUN_ID=stage256_offline_exact_w64_raw_supply_gate_20260712
+  RUN_ROOT=$BASE/$RUN_ID
+  PLAN=$BASE/offline_arb_plans_v1/w64_prod/plan
+  CAT=$BASE/offline_arb_catalog_v1
+  ANIME_FREQ=$BASE/offline_arb_animefreq_v1
+  SIDECAR=$BASE/offline_arb_caption_sidecar_v1
+  SAMPLING=/fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json
+  CFG=$REPO/configs/stage256_offline_exact_v1.yaml
+  FREEZE=$BASE/offline_arb_plans_v1/FREEZE_MANIFEST.json
+  RUNNER=$REPO/scripts/offline_arb/run_w64_raw_supply_gate.py
+  CAPTURE_YAML=$REPO/jobs/offline_arb_w64_raw_supply_gate.yaml
+  ANALYZER=$REPO/scripts/offline_arb/analyze_w64_raw_supply_gate.py
+  ANALYZE_YAML=$REPO/jobs/offline_arb_w64_raw_supply_analyze.yaml
+  FREEZE_BUILDER=$REPO/scripts/offline_arb/make_freeze_manifest.py
+
+  SOURCE_JOBTAG=${OFFLINE_ARB_W64_SOURCE_JOBTAG:-}
+  case "$SOURCE_JOBTAG" in
+    (''|.|..|*[!A-Za-z0-9_.-]*) echo "FATAL: set safe basename OFFLINE_ARB_W64_SOURCE_JOBTAG"; exit 1 ;;
+  esac
+  [ "$(basename -- "$SOURCE_JOBTAG")" = "$SOURCE_JOBTAG" ] \
+    || { echo "FATAL: SOURCE_JOBTAG is not a basename"; exit 1; }
+  HOST=$(hostname)
+  ANALYSIS_NODE=${HOST##*-}
+  ANALYSIS_JOBTAG=${HOST%-*}
+  [ "$ANALYSIS_NODE" = 0 ] && [ "$HOST" = "$ANALYSIS_JOBTAG-0" ] \
+    || { echo "FATAL: analyzer hostname/jobtag mapping drift"; exit 1; }
+  case "$ANALYSIS_JOBTAG" in
+    (''|.|..|*[!A-Za-z0-9_.-]*) echo "FATAL: unsafe analyzer jobtag"; exit 1 ;;
+  esac
+  [ -d "$RUN_ROOT" ] && [ ! -L "$RUN_ROOT" ] \
+    || { echo "FATAL: W64 run root missing/non-directory/symlink"; exit 1; }
+  RUN_ROOT_REAL=$(realpath -e "$RUN_ROOT")
+  [ "$RUN_ROOT_REAL" = "$RUN_ROOT" ] \
+    || { echo "FATAL: W64 run root is not canonical"; exit 1; }
+  RES_CANDIDATE=$RUN_ROOT_REAL/$SOURCE_JOBTAG
+  [ -d "$RES_CANDIDATE" ] && [ ! -L "$RES_CANDIDATE" ] \
+    || { echo "FATAL: explicit W64 source attempt missing/non-directory/symlink"; exit 1; }
+  RES=$(realpath -e "$RES_CANDIDATE")
+  [ "$RES" = "$RUN_ROOT_REAL/$SOURCE_JOBTAG" ] \
+    || { echo "FATAL: W64 source attempt escaped canonical run root"; exit 1; }
+  AGGREGATE=$RES/telemetry.$SOURCE_JOBTAG.aggregate.json
+  RUNTIME_CONTRACT=$RES/runtime_contract.$SOURCE_JOBTAG.json
+  CAPTURE_PREFLIGHT=$RES/freezepreflight.$SOURCE_JOBTAG.json
+  CAPTURE_POSTFLIGHT=$RES/freezepost.$SOURCE_JOBTAG.json
+  OUTPUT=$RES/w64_raw_supply_analysis.$SOURCE_JOBTAG.$ANALYSIS_JOBTAG.json
+  ANALYSIS_CLOSURE=$RES/w64_raw_supply_analysis_closure.$SOURCE_JOBTAG.$ANALYSIS_JOBTAG.json
+  ANALYSIS_VERIFY_PRE=$RES/analysis_freeze_verify.$SOURCE_JOBTAG.$ANALYSIS_JOBTAG.pre.json
+  ANALYSIS_VERIFY_POST=$RES/analysis_freeze_verify.$SOURCE_JOBTAG.$ANALYSIS_JOBTAG.post.json
+
+  NW_DECL=$(grep -m1 '^numWorkers:' "$ANALYZE_YAML" | awk '{print $2}')
+  GPU_DECL=$(grep -m1 '^gpuPerWorker:' "$ANALYZE_YAML" | awk '{print $2}')
+  CPU_DECL=$(grep -m1 '^cpuPerWorker:' "$ANALYZE_YAML" | awk '{print $2}')
+  [ "$NW_DECL" = 1 ] && [ "$GPU_DECL" = 0 ] && [ "$CPU_DECL" = 16 ] \
+    || { echo "FATAL: analyzer YAML topology drift workers=$NW_DECL gpu=$GPU_DECL cpu=$CPU_DECL"; exit 1; }
+  for FILE in "$FREEZE" "$RUNNER" "$CAPTURE_YAML" "$ANALYZER" "$ANALYZE_YAML" \
+              "$FREEZE_BUILDER" "$CFG" "$SAMPLING" "$AGGREGATE" \
+              "$RUNTIME_CONTRACT" "$CAPTURE_PREFLIGHT" "$CAPTURE_POSTFLIGHT" \
+              "$PLAN/header.json" "$PLAN/checksums.json" "$CAT/header.json" \
+              "$ANIME_FREQ/header.json" "$SIDECAR/header.json"; do
+    [ -f "$FILE" ] && [ ! -L "$FILE" ] \
+      || { echo "FATAL: required W64 analyzer input missing/non-regular/symlink: $FILE"; exit 1; }
+  done
+  for DIRECTORY in "$RES" "$PLAN" "$PLAN/blocks" "$CAT" "$ANIME_FREQ" "$SIDECAR"; do
+    [ -d "$DIRECTORY" ] && [ ! -L "$DIRECTORY" ] \
+      || { echo "FATAL: required W64 analyzer directory missing/symlinked: $DIRECTORY"; exit 1; }
+  done
+  [ ! -e "$OUTPUT" ] && [ ! -L "$OUTPUT" ] \
+    && [ ! -e "$ANALYSIS_CLOSURE" ] && [ ! -L "$ANALYSIS_CLOSURE" ] \
+    && [ ! -e "$ANALYSIS_VERIFY_PRE" ] && [ ! -L "$ANALYSIS_VERIFY_PRE" ] \
+    && [ ! -e "$ANALYSIS_VERIFY_POST" ] && [ ! -L "$ANALYSIS_VERIFY_POST" ] \
+    && [ ! -e "$ANALYSIS_VERIFY_PRE.tmp" ] && [ ! -L "$ANALYSIS_VERIFY_PRE.tmp" ] \
+    && [ ! -e "$ANALYSIS_VERIFY_POST.tmp" ] && [ ! -L "$ANALYSIS_VERIFY_POST.tmp" ] \
+    || { echo "FATAL: refusing to overwrite unique W64 analyzer evidence"; exit 1; }
+
+  "$PY" -m py_compile "$RUNNER" "$ANALYZER"
+  timeout --signal=TERM --kill-after=30s 14400s \
+    "$PY" "$FREEZE_BUILDER" --verify-freeze \
+      --freeze "$FREEZE" --repo "$REPO" --plan "$PLAN" \
+      --catalog-root "$CAT" --sampling "$SAMPLING" \
+      --animefreq-root "$ANIME_FREQ" --sidecar-root "$SIDECAR" \
+      > "$ANALYSIS_VERIFY_PRE.tmp"
+  mv "$ANALYSIS_VERIFY_PRE.tmp" "$ANALYSIS_VERIFY_PRE"
+
+  FREEZE_SHA_BEFORE=$(sha256sum "$FREEZE" | awk '{print $1}')
+  RUNNER_SHA_BEFORE=$(sha256sum "$RUNNER" | awk '{print $1}')
+  CAPTURE_YAML_SHA_BEFORE=$(sha256sum "$CAPTURE_YAML" | awk '{print $1}')
+  ANALYZER_SHA_BEFORE=$(sha256sum "$ANALYZER" | awk '{print $1}')
+  ANALYZE_YAML_SHA_BEFORE=$(sha256sum "$ANALYZE_YAML" | awk '{print $1}')
+  FREEZE_BUILDER_SHA_BEFORE=$(sha256sum "$FREEZE_BUILDER" | awk '{print $1}')
+  AGGREGATE_SHA_BEFORE=$(sha256sum "$AGGREGATE" | awk '{print $1}')
+  RUNTIME_CONTRACT_SHA_BEFORE=$(sha256sum "$RUNTIME_CONTRACT" | awk '{print $1}')
+  CAPTURE_PREFLIGHT_SHA_BEFORE=$(sha256sum "$CAPTURE_PREFLIGHT" | awk '{print $1}')
+  CAPTURE_POSTFLIGHT_SHA_BEFORE=$(sha256sum "$CAPTURE_POSTFLIGHT" | awk '{print $1}')
+  ANALYSIS_VERIFY_PRE_SHA=$(sha256sum "$ANALYSIS_VERIFY_PRE" | awk '{print $1}')
+  PLAN_HEADER_SHA_BEFORE=$(sha256sum "$PLAN/header.json" | awk '{print $1}')
+  PLAN_CHECKSUMS_SHA_BEFORE=$(sha256sum "$PLAN/checksums.json" | awk '{print $1}')
+  "$PY" -c 'import sys; from pathlib import Path; from scripts.offline_arb.analyze_w64_raw_supply_gate import atomic_no_clobber_self_test; atomic_no_clobber_self_test(Path(sys.argv[1])); print("W64_ATOMIC_NO_CLOBBER_SELF_TEST_PASS")' \
+    "/local/evan/w64_atomic_selftest.$ANALYSIS_JOBTAG"
+
+  set +e
+  timeout --signal=TERM --kill-after=30s 7200s \
+    "$PY" "$ANALYZER" \
+      --aggregate "$AGGREGATE" --plan "$PLAN" --freeze "$FREEZE" \
+      --analysis-freeze-verify "$ANALYSIS_VERIFY_PRE" \
+      --repo "$REPO" --runner "$RUNNER" --capture-yaml "$CAPTURE_YAML" \
+      --analyze-yaml "$ANALYZE_YAML" --config "$CFG" \
+      --catalog-root "$CAT" --anime-freq-root "$ANIME_FREQ" \
+      --sidecar-root "$SIDECAR" --sampling "$SAMPLING" \
+      --run-id "$RUN_ID" --source-jobtag "$SOURCE_JOBTAG" --output "$OUTPUT"
+  ANALYZE_RC=$?
+  set -e
+
+  [ "$(sha256sum "$FREEZE_BUILDER" | awk '{print $1}')" = "$FREEZE_BUILDER_SHA_BEFORE" ] \
+    || { echo "FATAL: freeze verifier source changed before post-analysis closure"; exit 1; }
+  timeout --signal=TERM --kill-after=30s 14400s \
+    "$PY" "$FREEZE_BUILDER" --verify-freeze \
+      --freeze "$FREEZE" --repo "$REPO" --plan "$PLAN" \
+      --catalog-root "$CAT" --sampling "$SAMPLING" \
+      --animefreq-root "$ANIME_FREQ" --sidecar-root "$SIDECAR" \
+      > "$ANALYSIS_VERIFY_POST.tmp"
+  cmp -s "$ANALYSIS_VERIFY_PRE" "$ANALYSIS_VERIFY_POST.tmp" \
+    || { echo "FATAL: complete freeze verification changed during W64 analysis"; exit 1; }
+  mv "$ANALYSIS_VERIFY_POST.tmp" "$ANALYSIS_VERIFY_POST"
+
+  [ -f "$OUTPUT" ] && [ ! -L "$OUTPUT" ] && [ -s "$OUTPUT" ] \
+    || { echo "FATAL: W64 analyzer did not atomically preserve a result"; exit 1; }
+  [ "$(sha256sum "$FREEZE" | awk '{print $1}')" = "$FREEZE_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$RUNNER" | awk '{print $1}')" = "$RUNNER_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$CAPTURE_YAML" | awk '{print $1}')" = "$CAPTURE_YAML_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$ANALYZER" | awk '{print $1}')" = "$ANALYZER_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$ANALYZE_YAML" | awk '{print $1}')" = "$ANALYZE_YAML_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$FREEZE_BUILDER" | awk '{print $1}')" = "$FREEZE_BUILDER_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$AGGREGATE" | awk '{print $1}')" = "$AGGREGATE_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$RUNTIME_CONTRACT" | awk '{print $1}')" = "$RUNTIME_CONTRACT_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$CAPTURE_PREFLIGHT" | awk '{print $1}')" = "$CAPTURE_PREFLIGHT_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$CAPTURE_POSTFLIGHT" | awk '{print $1}')" = "$CAPTURE_POSTFLIGHT_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$ANALYSIS_VERIFY_PRE" | awk '{print $1}')" = "$ANALYSIS_VERIFY_PRE_SHA" ] \
+    && [ "$(sha256sum "$ANALYSIS_VERIFY_POST" | awk '{print $1}')" = "$ANALYSIS_VERIFY_PRE_SHA" ] \
+    && [ "$(sha256sum "$PLAN/header.json" | awk '{print $1}')" = "$PLAN_HEADER_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$PLAN/checksums.json" | awk '{print $1}')" = "$PLAN_CHECKSUMS_SHA_BEFORE" ] \
+    || { echo "FATAL: W64 analyzer inputs/full freeze changed during analysis"; exit 1; }
+
+  "$PY" - "$OUTPUT" "$ANALYSIS_CLOSURE" "$ANALYZE_RC" "$RUN_ID" "$SOURCE_JOBTAG" "$ANALYSIS_JOBTAG" \
+    "$AGGREGATE" "$AGGREGATE_SHA_BEFORE" "$FREEZE_SHA_BEFORE" \
+    "$RUNTIME_CONTRACT_SHA_BEFORE" "$ANALYSIS_VERIFY_PRE" "$ANALYSIS_VERIFY_POST" \
+    "$ANALYSIS_VERIFY_PRE_SHA" "$RUNNER_SHA_BEFORE" "$CAPTURE_YAML_SHA_BEFORE" \
+    "$ANALYZER_SHA_BEFORE" "$ANALYZE_YAML_SHA_BEFORE" \
+    "$PLAN_HEADER_SHA_BEFORE" "$PLAN_CHECKSUMS_SHA_BEFORE" <<'PYEOF'
+  import hashlib
+  import json
+  import sys
+  from pathlib import Path
+
+  from scripts.offline_arb.analyze_w64_raw_supply_gate import atomic_publish_bytes
+
+  (
+      output_raw, closure_raw, rc_raw, run_id, source_jobtag, analysis_jobtag,
+      aggregate_raw, aggregate_sha, freeze_sha, runtime_contract_sha,
+      analysis_verify_raw, analysis_post_raw, analysis_verify_sha, runner_sha, capture_yaml_sha,
+      analyzer_sha, analyze_yaml_sha, plan_header_sha, plan_checksums_sha,
+  ) = sys.argv[1:]
+  output = Path(output_raw)
+  closure = Path(closure_raw)
+  value = json.loads(output.read_text(encoding="utf-8"))
+  rc = int(rc_raw)
+  if value.get("schema_version") != "offline_arb_w64_raw_supply_analysis_v1":
+      raise SystemExit("FATAL: W64 analysis schema mismatch")
+  expected_status = {0: "PASS", 3: "NO_GO"}.get(rc, "FATAL")
+  if value.get("status") != expected_status:
+      raise SystemExit("FATAL: W64 analyzer rc/status mismatch")
+  post_sha = hashlib.sha256(Path(analysis_post_raw).read_bytes()).hexdigest()
+  if post_sha != analysis_verify_sha:
+      raise SystemExit("FATAL: W64 post-analysis full-freeze SHA mismatch")
+  closure_value = {
+      "schema_version": "offline_arb_w64_raw_supply_analysis_closure_v1",
+      "status": expected_status,
+      "run_id": run_id,
+      "source_jobtag": source_jobtag,
+      "analysis_jobtag": analysis_jobtag,
+      "analysis": {
+          "path": str(output),
+          "bytes": output.stat().st_size,
+          "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+      },
+      "aggregate": {"path": aggregate_raw, "sha256": aggregate_sha},
+      "runtime_contract_sha256": runtime_contract_sha,
+      "freeze_sha256": freeze_sha,
+      "analysis_preflight_full_freeze_verify": {
+          "path": analysis_verify_raw,
+          "sha256": analysis_verify_sha,
+      },
+      "analysis_postflight_full_freeze_verify": {
+          "path": analysis_post_raw,
+          "sha256": post_sha,
+      },
+  }
+  payload = json.dumps(closure_value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+  def write_closure():
+      atomic_publish_bytes(
+          closure,
+          payload.encode("utf-8"),
+          label="analysis closure",
+      )
+  if rc not in {0, 3}:
+      if not isinstance(value.get("error"), str) or not value["error"]:
+          raise SystemExit("FATAL: W64 FATAL result lacks an error")
+      write_closure()
+      print(f"W64_RAW_SUPPLY_ANALYSIS_FATAL output={output} closure={closure} rc={rc} error={value['error']}")
+      raise SystemExit(0)
+  identity = value.get("identity")
+  evidence = value.get("evidence")
+  if not isinstance(identity, dict) or not isinstance(evidence, dict):
+      raise SystemExit("FATAL: W64 PASS/NO_GO result lacks identity/evidence")
+  expected_identity = {
+      "run_id": run_id,
+      "jobtag": source_jobtag,
+      "freeze_sha256": freeze_sha,
+      "runtime_contract_sha256": runtime_contract_sha,
+      "gpic_threads_per_node": 16,
+      "world_size": 64,
+      "local_world_size": 8,
+      "per_rank_bs": 36,
+      "start_step": 0,
+      "stop_step": 192,
+      "target_seconds_per_step": 2.592,
+  }
+  for key, expected in expected_identity.items():
+      if identity.get(key) != expected:
+          raise SystemExit(f"FATAL: W64 analysis identity mismatch for {key}")
+  if identity.get("gpic_source_consistency_mode") not in {"strict_path", "fd_stable"}:
+      raise SystemExit("FATAL: W64 analysis GPIC consistency mode is unsupported")
+  if (
+      evidence.get("aggregate") != aggregate_raw
+      or evidence.get("aggregate_sha256") != aggregate_sha
+      or evidence.get("fresh_freeze_sha256") != freeze_sha
+      or evidence.get("runtime_contract", {}).get("sha256") != runtime_contract_sha
+      or evidence.get("analysis_time_full_freeze_verify", {}).get("path")
+      != analysis_verify_raw
+      or evidence.get("analysis_time_full_freeze_verify", {}).get("sha256")
+      != analysis_verify_sha
+      or evidence.get("plan_header_sha256") != plan_header_sha
+      or evidence.get("plan_checksums_sha256") != plan_checksums_sha
+  ):
+      raise SystemExit("FATAL: W64 analysis immutable evidence mismatch")
+  frozen = evidence.get("frozen_gate_files")
+  expected_files = {
+      "scripts/offline_arb/run_w64_raw_supply_gate.py": runner_sha,
+      "jobs/offline_arb_w64_raw_supply_gate.yaml": capture_yaml_sha,
+      "scripts/offline_arb/analyze_w64_raw_supply_gate.py": analyzer_sha,
+      "jobs/offline_arb_w64_raw_supply_analyze.yaml": analyze_yaml_sha,
+  }
+  if not isinstance(frozen, dict) or set(frozen) != set(expected_files):
+      raise SystemExit("FATAL: W64 analysis frozen gate-file set mismatch")
+  for relative, expected_sha in expected_files.items():
+      entry = frozen.get(relative)
+      if not isinstance(entry, dict) or entry.get("sha256") != expected_sha:
+          raise SystemExit(f"FATAL: W64 analysis frozen SHA mismatch for {relative}")
+  gates = value.get("gates")
+  failed = value.get("failed_gates")
+  if not isinstance(gates, list) or not isinstance(failed, list):
+      raise SystemExit("FATAL: W64 analysis gate summary is malformed")
+  observed_failed = [gate.get("name") for gate in gates if gate.get("pass") is False]
+  if failed != observed_failed or len({gate.get("name") for gate in gates}) != len(gates):
+      raise SystemExit("FATAL: W64 analysis failed-gate accounting mismatch")
+  if (expected_status == "PASS" and failed) or (expected_status == "NO_GO" and not failed):
+      raise SystemExit("FATAL: W64 analysis status is inconsistent with strict gates")
+  write_closure()
+  print(
+      f"W64_RAW_SUPPLY_ANALYSIS_{expected_status} output={output} "
+      f"closure={closure} "
+      f"source_jobtag={source_jobtag} analysis_jobtag={analysis_jobtag} "
+      f"failed_gates={failed}"
+  )
+  PYEOF
+
+  case "$ANALYZE_RC" in
+    0) exit 0 ;;
+    3) exit 3 ;;
+    *) exit 1 ;;
+  esac

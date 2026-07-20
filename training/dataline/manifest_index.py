@@ -146,6 +146,8 @@ def load_textatlas_shard(sidecar_path: str, stage: str) -> dict:
     out = {
         "image_path": np.array(t.column("image_path").to_pylist(), dtype=object),
         "uid": np.array(t.column("uid").to_pylist(), dtype=object),
+        "width": w,                                         # bucketdist 快速审计用（免取图）;其余路径不读
+        "height": h,
         "elig_256": short_dim >= 256,                       # 现算（builder 未产 elig_256）
         "elig_512": np.array(t.column("elig_512").to_pylist(), dtype=bool),
         "elig_1024": np.array(t.column("elig_1024").to_pylist(), dtype=bool),
@@ -338,6 +340,12 @@ def load_real_synth_shard(path: str, domain: str, cfg: SamplingConfig, stats: di
     sel = keep
     out = {
         "uid": np.array(cols["uid"].to_pylist(), dtype=object)[sel],
+        # width/height：bucketdist 快速审计用（免取图,manifest 宽高即桶指派输入）;其余路径不读,行为中性。
+        # 防御:老 daily_v1 schema 可能无 w/h 列 → 填 0（审计跳过,主路径不受影响）。
+        "width": (np.array(cols["width"].to_pylist(), dtype=np.int64)[sel]
+                  if "width" in cols else np.zeros(int(keep.sum()), dtype=np.int64)),
+        "height": (np.array(cols["height"].to_pylist(), dtype=np.int64)[sel]
+                   if "height" in cols else np.zeros(int(keep.sum()), dtype=np.int64)),
         "src_root": np.array(cols["src_root"].to_pylist(), dtype=object)[sel],
         "src_shard": np.array(cols["src_shard"].to_pylist(), dtype=object)[sel],
         "src_key": np.array(cols["src_key"].to_pylist(), dtype=object)[sel],
@@ -464,6 +472,8 @@ def load_anime_shard(path: str, cfg: SamplingConfig, with_caption: bool = True,
         "key": np.array(t.column("key").to_pylist(), dtype=object),
         "uuid": np.array(t.column("uuid").to_pylist(), dtype=object),
         "s3key": np.array(t.column("s3key").to_pylist(), dtype=object),
+        "width": w,                                       # bucketdist 快速审计用（免取图）;其余路径不读
+        "height": h,
         "elig_256": np.ones(n, dtype=bool),               # anime 256 全 1
         "elig_512": short_dim >= 512,
         "elig_1024": short_dim >= 1024,

@@ -1,0 +1,132 @@
+# CPU-only mocked/static gate for the GPIC mount concurrency-shape diagnostic.
+name: evan-mot-crop-offlinearb-gpic-concurrency-shape-static
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 32
+maxRetries: 0
+command: |
+  set -euo pipefail
+  umask 077
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1
+  export PYTHONFAULTHANDLER=1
+  export PYTHONHASHSEED=0
+  export PYTHONDONTWRITEBYTECODE=1
+  export AWS_EC2_METADATA_DISABLED=true
+  export OMP_NUM_THREADS=1
+  export MKL_NUM_THREADS=1
+  export OPENBLAS_NUM_THREADS=1
+  export NUMEXPR_NUM_THREADS=1
+  export ARROW_NUM_THREADS=1
+
+  JOBTAG="${JCC_TASK_NAME:-gpic-shape-static}.${JCC_TASK_INSTANCE:-0}.$(hostname).$$"
+  LOCAL_ROOT="/local/evan/offline_arb_gpic_concurrency_shape_static/$JOBTAG"
+  [ ! -e "$LOCAL_ROOT" ] && [ ! -L "$LOCAL_ROOT" ] \
+    || { echo "FATAL: static namespace is not fresh"; exit 1; }
+  mkdir -m 700 -p "$LOCAL_ROOT/tmp" "$LOCAL_ROOT/pycache"
+  trap 'rm -rf -- "$LOCAL_ROOT"' EXIT
+  export TMPDIR="$LOCAL_ROOT/tmp"
+  export PYTHONPYCACHEPREFIX="$LOCAL_ROOT/pycache"
+
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  RUNNER="$REPO/scripts/offline_arb/run_gpic_mount_concurrency_shape_probe.py"
+  SELFTEST="$REPO/scripts/offline_arb/test_gpic_mount_concurrency_shape_probe_static.py"
+  CAPTURE_YAML="$REPO/jobs/offline_arb_gpic_mount_concurrency_shape_probe.yaml"
+  STATIC_YAML="$REPO/jobs/offline_arb_gpic_mount_concurrency_shape_static.yaml"
+
+  for FILE in "$RUNNER" "$SELFTEST" "$CAPTURE_YAML" "$STATIC_YAML"; do
+    [ -f "$FILE" ] && [ ! -L "$FILE" ] && [ -s "$FILE" ] \
+      || { echo "FATAL: invalid static input"; exit 1; }
+  done
+  "$PY" -m py_compile "$RUNNER" "$SELFTEST"
+  "$PY" - "$RUNNER" "$CAPTURE_YAML" "$STATIC_YAML" <<'PYEOF'
+  import ast
+  import hashlib
+  import re
+  import subprocess
+  import sys
+  from pathlib import Path
+
+  import yaml
+
+  runner = Path(sys.argv[1])
+  runner_raw = runner.read_bytes()
+  tree = ast.parse(runner_raw, filename=str(runner))
+  functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+  for required in (
+      "exact_source_read",
+      "exact_local_stage",
+      "run_shared_cell",
+      "run_fragmented_cell",
+      "build_formal_unseen_sample",
+      "assert_artifact_safe",
+  ):
+      if required not in functions:
+          raise SystemExit(f"FATAL: required function missing: {required}")
+  source = runner_raw.decode("utf-8")
+  for token in (
+      "os.O_NOFOLLOW",
+      "os.fstat(descriptor)",
+      "source_short_read",
+      "source_identity_changed",
+      "os.fsync(descriptor)",
+      "os.replace(temporary, destination)",
+      "multiprocessing.get_context(\"spawn\")",
+      "PER_CELL_ITEMS = 2_800",
+      "MAX_CELL_PAYLOAD_BYTES = 8 * 1024 * 1024 * 1024",
+      "FORMAL_CANDIDATES_PER_ROW_GROUP = 70",
+      "formal_sample_cache_overlap",
+      "CAPACITY_GATE_IMG_S = FORMAL_DEMAND_IMG_S * CAPACITY_MARGIN",
+      "COMPLETE_WITH_SHARED16_CANDIDATE",
+      '"local_stage_is_gate": False',
+  ):
+      if token not in source:
+          raise SystemExit(f"FATAL: runner contract token missing: {token}")
+
+  parsed = {}
+  for raw_path in sys.argv[2:]:
+      path = Path(raw_path)
+      value = yaml.safe_load(path.read_text(encoding="utf-8"))
+      parsed[path.name] = value
+      for key, wanted in {
+          "numWorkers": 1,
+          "gpuPerWorker": 0,
+          "cpuPerWorker": 16,
+          "maxRetries": 0,
+      }.items():
+          if value.get(key) != wanted:
+              raise SystemExit(f"FATAL: {path.name} {key} drift")
+      command = value.get("command")
+      if not isinstance(command, str):
+          raise SystemExit(f"FATAL: {path.name} command missing")
+      for token in ("set " + "-x", "pip " + "install", "python -m " + "pip"):
+          if token in command:
+              raise SystemExit(f"FATAL: unsafe command token in {path.name}")
+      subprocess.run(["bash", "-n"], input=command, text=True, check=True)
+
+  capture = parsed["offline_arb_gpic_mount_concurrency_shape_probe.yaml"]["command"]
+  runner_bytes_match = re.search(r"^RUNNER_BYTES=([0-9]+)$", capture, re.MULTILINE)
+  runner_sha_match = re.search(r"^RUNNER_SHA256=([0-9a-f]{64})$", capture, re.MULTILINE)
+  if runner_bytes_match is None or int(runner_bytes_match.group(1)) != len(runner_raw):
+      raise SystemExit("FATAL: capture runner byte freeze drift")
+  observed_sha = hashlib.sha256(runner_raw).hexdigest()
+  if runner_sha_match is None or runner_sha_match.group(1) != observed_sha:
+      raise SystemExit("FATAL: capture runner SHA freeze drift")
+  for token in (
+      "gpuPerWorker: 0",
+      "cpuPerWorker: 16",
+      "--run-id offline_arb_gpic_mount_concurrency_shape_20260712r1",
+      "--local-root \"$LOCAL_NAMESPACE/stage\"",
+  ):
+      if token not in Path(sys.argv[2]).read_text(encoding="utf-8"):
+          raise SystemExit(f"FATAL: capture YAML contract token missing: {token}")
+  PYEOF
+
+  timeout --preserve-status --signal=TERM --kill-after=30s 900s "$PY" "$SELFTEST"
+  echo "GPIC_CONCURRENCY_SHAPE_STATIC_JCC_PASS"

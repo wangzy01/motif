@@ -1,0 +1,72 @@
+# CPU32 deep validation of the formal-v2 step-256 bootstrap checkpoint.
+name: evan-offarb-s256-20260718-boot256-validate-v2
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 384
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch PYTHONUNBUFFERED=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=32 MKL_NUM_THREADS=32
+  export PYTHONPYCACHEPREFIX="/local/evan/stage256_20260718_pycache/${JCC_JOB_ID:-validator}/$(hostname)"
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  ROOT=$BASE/offline_arb_stage256_20260718_semantic_v1
+  CK=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage256_20260718_causalmlf_offline_exact_v2
+  RES=$BASE/stage256_20260718_causalmlf_offline_exact_v2
+  OUT=$ROOT/formal_v2/BOOT256_CHECKPOINT_SUCCESS.json
+  SCRIPT=scripts/offline_arb/verify_stage256_20260718_bootstrap_checkpoint_v1.py
+  CFG=configs/stage256_20260718_causalmlf_offline_exact_v1.yaml
+  V1_YAML=jobs/offline_exact_stage256_20260718_FORMAL_8x8.yaml
+  BOOT_YAML=jobs/offline_exact_stage256_20260718_FORMAL_BOOT256_8x8_v2.yaml
+  RESUME_YAML=jobs/offline_exact_stage256_20260718_FORMAL_RESUME_8x8_v2.yaml
+  VALIDATOR_YAML=jobs/offline_exact_stage256_20260718_FORMAL_BOOT256_VALIDATE_CPU32_v2.yaml
+  ADDENDUM=docs/FORMAL_V2_BOOTSTRAP_ADDENDUM.md
+
+  test ! -e "$OUT" && test ! -L "$OUT"
+  for REQUIRED in \
+    "$CK/last.pt" "$CK/metrics.jsonl" "$RES" "$SCRIPT" "$CFG" "$V1_YAML" \
+    "$BOOT_YAML" "$RESUME_YAML" "$VALIDATOR_YAML" "$ADDENDUM" \
+    "$ROOT/w64_prod/plan/PLAN_AUDIT_SUCCESS.json" \
+    "$ROOT/OVERLAY_VERIFY_SUCCESS.json" "$ROOT/FREEZE_MANIFEST.json" \
+    "$ROOT/FINAL_HEALTH_SUCCESS.json" "$ROOT/STATIC_SUCCESS.json" \
+    "$ROOT/STATIC_CONTRACT_SUCCESS.json"; do
+    test -e "$REQUIRED" && test ! -L "$REQUIRED" \
+      || { echo "FATAL: validator prerequisite missing/non-regular: $REQUIRED"; exit 43; }
+  done
+
+  "$PY" "$SCRIPT" \
+    --checkpoint "$CK/last.pt" \
+    --metrics "$CK/metrics.jsonl" \
+    --result-root "$RES" \
+    --config "$CFG" \
+    --v1-yaml "$V1_YAML" \
+    --boot-yaml "$BOOT_YAML" \
+    --resume-yaml "$RESUME_YAML" \
+    --addendum "$ADDENDUM" \
+    --plan-audit "$ROOT/w64_prod/plan/PLAN_AUDIT_SUCCESS.json" \
+    --overlay "$ROOT/OVERLAY_VERIFY_SUCCESS.json" \
+    --freeze "$ROOT/FREEZE_MANIFEST.json" \
+    --final-health "$ROOT/FINAL_HEALTH_SUCCESS.json" \
+    --static "$ROOT/STATIC_SUCCESS.json" \
+    --static-contract "$ROOT/STATIC_CONTRACT_SUCCESS.json" \
+    --validator-yaml "$VALIDATOR_YAML" \
+    --output "$OUT"
+
+  test -f "$OUT" && test ! -L "$OUT"
+  "$PY" - "$OUT" <<'PYEOF'
+  import json,sys
+  value=json.load(open(sys.argv[1],encoding="utf-8"))
+  assert value.get("status")=="PASS"
+  assert int(value.get("expected_step",-1))==256
+  assert int(value.get("exact_target_step",-1))==166667
+  assert int(value.get("exact_target_exposures",-1))==384000768
+  assert int(value.get("tag_only_exposure",-1))==0
+  print("BOOT256_CHECKPOINT_VALIDATION_PASS",value["checkpoint"]["sha256"])
+  PYEOF

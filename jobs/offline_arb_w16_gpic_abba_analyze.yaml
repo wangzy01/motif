@@ -1,0 +1,372 @@
+# Independent CPU16 analyzer for the two-node W16 raw-supply ABBA capture.
+# It returns 0 only when both arms of at least one thread count independently
+# pass every absolute gate and their GPIC capacity drift is at most 5%.
+# NO_GO, including decision=INCONCLUSIVE, is exit 3.
+name: evan-mot-crop-offlinearb-w16-gpic-abba-analyze
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1
+  export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 NUMEXPR_NUM_THREADS=2 ARROW_NUM_THREADS=2
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_arb_w16_abba_analyze.$(hostname)
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  PY_REAL=$(readlink -f -- "$PY") \
+    || { echo "FATAL: cannot resolve W16 ABBA analyzer Python interpreter"; exit 1; }
+  [ -L "$PY" ] && [ -n "$PY_REAL" ] && [ -f "$PY_REAL" ] && [ ! -L "$PY_REAL" ] \
+    && [ -s "$PY_REAL" ] && [ -x "$PY_REAL" ] \
+    || { echo "FATAL: resolved W16 ABBA analyzer Python target is not a real executable regular file"; exit 1; }
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  RUN_ID=stage256_offline_exact_w16_gpic_abba_raw_20260712r4
+  RUN_ROOT=$BASE/$RUN_ID
+  PLAN=$BASE/offline_arb_plans_v1/w16_gpuval/plan
+  CATALOG=$BASE/offline_arb_catalog_v1
+  ANIMEFREQ=$BASE/offline_arb_animefreq_v1
+  SIDECAR=$BASE/offline_arb_caption_sidecar_v1
+  SAMPLING=/fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json
+  RUNNER=$REPO/scripts/offline_arb/run_w16_gpic_abba_raw_gate.py
+  CAPTURE_YAML=$REPO/jobs/offline_arb_w16_gpic_abba_raw_gate.yaml
+  ANALYZER=$REPO/scripts/offline_arb/analyze_w16_gpic_abba_raw_gate.py
+  ANALYZE_YAML=$REPO/jobs/offline_arb_w16_gpic_abba_analyze.yaml
+  RUNTIME_FILES=(
+    "$PY_REAL"
+    "$REPO/configs/stage256_offline_exact_v1.yaml"
+    "$REPO/training/dataline_offline/offline_dataset.py"
+    "$REPO/training/dataline_offline/planner_v1.py"
+    "$REPO/training/dataline_offline/caption_sidecar.py"
+    "$REPO/training/dataline/complete_dataset.py"
+    "$REPO/training/dataline/config.py"
+    "$REPO/training/dataline/image_fetch.py"
+    "$REPO/training/dataline/manifest_index.py"
+    "$REPO/training/dataline/multi_ar.py"
+    "$REPO/training/dataline/native_safety.py"
+    "$REPO/training/dataline/pil_safety.py"
+    "$REPO/training/dataline/caption_build.py"
+    "$REPO/training/dataline/sampler.py"
+    "$REPO/scripts/offline_arb/caption_sidecar_contract.py"
+    "$REPO/scripts/offline_arb/make_freeze_manifest.py"
+    "$SAMPLING"
+  )
+
+  NW_DECL=$(grep -m1 '^numWorkers:' "$ANALYZE_YAML" | awk '{print $2}')
+  GPU_DECL=$(grep -m1 '^gpuPerWorker:' "$ANALYZE_YAML" | awk '{print $2}')
+  CPU_DECL=$(grep -m1 '^cpuPerWorker:' "$ANALYZE_YAML" | awk '{print $2}')
+  [ "$NW_DECL" = 1 ] && [ "$GPU_DECL" = 0 ] && [ "$CPU_DECL" = 16 ] \
+    || { echo "FATAL: ABBA analyzer topology drift workers=$NW_DECL gpu=$GPU_DECL cpu=$CPU_DECL"; exit 1; }
+  for FILE in "$RUNNER" "$CAPTURE_YAML" "$ANALYZER" "$ANALYZE_YAML" \
+              "$PLAN/header.json" "$PLAN/checksums.json" "$CATALOG/header.json" \
+              "$ANIMEFREQ/header.json" "$SIDECAR/header.json" "$SIDECAR/_SUCCESS" \
+              "${RUNTIME_FILES[@]}"; do
+    [ -f "$FILE" ] && [ ! -L "$FILE" ] && [ -s "$FILE" ] \
+      || { echo "FATAL: ABBA analyzer input missing/empty/non-regular/symlink: $FILE"; exit 1; }
+  done
+  [ -f "$ANIMEFREQ/_SUCCESS" ] && [ ! -L "$ANIMEFREQ/_SUCCESS" ] \
+    || { echo "FATAL: anime-frequency _SUCCESS missing/non-regular/symlink"; exit 1; }
+  mapfile -t ANIMEFREQ_FILES < <(
+    find "$ANIMEFREQ" -mindepth 1 -maxdepth 1 -type f -name '*.json.gz' -print | sort
+  )
+  [ "${#ANIMEFREQ_FILES[@]}" -eq 17 ] \
+    || { echo "FATAL: anime-frequency exact file count is ${#ANIMEFREQ_FILES[@]}, expected 17"; exit 1; }
+  for DIR in "$RUN_ROOT" "$PLAN" "$PLAN/blocks" "$CATALOG" "$ANIMEFREQ" "$SIDECAR"; do
+    [ -d "$DIR" ] && [ ! -L "$DIR" ] \
+      || { echo "FATAL: ABBA analyzer directory missing/non-directory/symlink: $DIR"; exit 1; }
+  done
+
+  "$PY" -m py_compile "$RUNNER" "$ANALYZER"
+  SOURCE_JOBTAG=${OFFLINE_ARB_ABBA_SOURCE_JOBTAG:-}
+  if [ -n "$SOURCE_JOBTAG" ]; then
+    case "$SOURCE_JOBTAG" in (*[!A-Za-z0-9_.-]*) echo "FATAL: malformed ABBA source jobtag"; exit 1;; esac
+    [ "$SOURCE_JOBTAG" != . ] && [ "$SOURCE_JOBTAG" != .. ] \
+      && [ "$(basename "$SOURCE_JOBTAG")" = "$SOURCE_JOBTAG" ] \
+      || { echo "FATAL: non-canonical ABBA source jobtag"; exit 1; }
+    MASTER=$RUN_ROOT/$SOURCE_JOBTAG/abba.$SOURCE_JOBTAG.aggregate.json
+    [ -f "$MASTER" ] && [ ! -L "$MASTER" ] && [ -s "$MASTER" ] \
+      || { echo "FATAL: selected ABBA master missing/empty/non-regular/symlink"; exit 1; }
+  else
+    mapfile -t MASTERS < <(
+      find "$RUN_ROOT" -mindepth 2 -maxdepth 2 -type f \
+        -name 'abba.*.aggregate.json' -print | sort
+    )
+    [ "${#MASTERS[@]}" -eq 1 ] \
+      || { echo "FATAL: expected one ABBA master or explicit OFFLINE_ARB_ABBA_SOURCE_JOBTAG; found ${#MASTERS[@]}"; exit 1; }
+    MASTER=${MASTERS[0]}
+    SOURCE_JOBTAG=$(basename "$(dirname "$MASTER")")
+  fi
+  RESULT_ROOT=$(dirname "$MASTER")
+  [ "$MASTER" = "$RESULT_ROOT/abba.$SOURCE_JOBTAG.aggregate.json" ] \
+    || { echo "FATAL: ABBA master filename/jobtag mismatch"; exit 1; }
+  OUTPUT=$RESULT_ROOT/w16_gpic_abba_analysis.$SOURCE_JOBTAG.json
+  [ ! -e "$OUTPUT" ] && [ ! -L "$OUTPUT" ] \
+    || { echo "FATAL: refusing to overwrite ABBA analysis output: $OUTPUT"; exit 1; }
+
+  declare -A INPUT_SHA
+  for FILE in "$RUNNER" "$CAPTURE_YAML" "$ANALYZER" "$ANALYZE_YAML" "$MASTER" \
+              "$PLAN/header.json" "$PLAN/checksums.json" "$CATALOG/header.json" \
+              "$ANIMEFREQ/header.json" "$ANIMEFREQ/_SUCCESS" \
+              "${ANIMEFREQ_FILES[@]}" "$SIDECAR/header.json" "$SIDECAR/_SUCCESS" \
+              "${RUNTIME_FILES[@]}"; do
+    INPUT_SHA["$FILE"]=$(sha256sum "$FILE" | awk '{print $1}')
+  done
+
+  set +e
+  timeout --signal=TERM --kill-after=30s 7200s \
+    "$PY" "$ANALYZER" \
+      --master "$MASTER" --repo "$REPO" --plan "$PLAN" \
+      --catalog "$CATALOG" --animefreq "$ANIMEFREQ" --sidecar "$SIDECAR" \
+      --run-id "$RUN_ID" --output "$OUTPUT"
+  ANALYZE_RC=$?
+  set -e
+
+  [ -f "$OUTPUT" ] && [ ! -L "$OUTPUT" ] && [ -s "$OUTPUT" ] \
+    || { echo "FATAL: ABBA analyzer did not atomically preserve a result"; exit 1; }
+  for FILE in "${!INPUT_SHA[@]}"; do
+    [ "$(sha256sum "$FILE" | awk '{print $1}')" = "${INPUT_SHA[$FILE]}" ] \
+      || { echo "FATAL: ABBA analyzer input changed during analysis: $FILE"; exit 1; }
+  done
+
+  "$PY" - "$OUTPUT" "$ANALYZE_RC" "$RUN_ID" "$SOURCE_JOBTAG" "$MASTER" \
+    "${INPUT_SHA[$MASTER]}" "$SIDECAR" <<'PYEOF'
+  import hashlib
+  import json
+  import math
+  import stat
+  import sys
+  from pathlib import Path
+
+  output_raw, rc_raw, run_id, jobtag, master_raw, master_sha, sidecar_raw = sys.argv[1:]
+  output = Path(output_raw)
+  value = json.loads(output.read_text(encoding="utf-8"))
+  rc = int(rc_raw)
+  if value.get("schema_version") != "offline_arb_w16_gpic_abba_analysis_v1":
+      raise SystemExit("FATAL: ABBA analysis schema mismatch")
+  expected_status = "PASS" if rc == 0 else "NO_GO" if rc == 3 else "FATAL"
+  if value.get("status") != expected_status:
+      raise SystemExit(
+          f"FATAL: ABBA analyzer rc/status mismatch rc={rc} status={value.get('status')!r}"
+      )
+  if rc not in {0, 3}:
+      if not isinstance(value.get("error"), str) or not value["error"]:
+          raise SystemExit("FATAL: ABBA FATAL result lacks an error")
+      print(f"W16_GPIC_ABBA_ANALYSIS_FATAL output={output} rc={rc} error={value['error']}")
+      raise SystemExit(0)
+  identity = value.get("identity")
+  evidence = value.get("evidence")
+  arms = value.get("arms")
+  qualifications = value.get("thread_qualification")
+  candidates = value.get("selection_candidates")
+  thresholds = value.get("thresholds")
+  if not all(isinstance(item, dict) for item in (identity, evidence, arms, qualifications)):
+      raise SystemExit("FATAL: ABBA PASS/NO_GO result lacks structured evidence")
+  if not isinstance(thresholds, dict) or thresholds.get("pair_drift_max") != 0.05:
+      raise SystemExit("FATAL: ABBA pair-drift threshold mismatch")
+  expected_identity = {
+      "run_id": run_id,
+      "jobtag": jobtag,
+      "world_size": 16,
+      "local_world_size": 8,
+      "per_rank_bs": 36,
+      "prefetch_steps": 4,
+      "target_seconds_per_step": 2.592,
+  }
+  for key, expected in expected_identity.items():
+      if identity.get(key) != expected:
+          raise SystemExit(f"FATAL: ABBA analysis identity mismatch for {key}")
+  if evidence.get("master") != master_raw or evidence.get("master_sha256") != master_sha:
+      raise SystemExit("FATAL: ABBA master evidence mismatch")
+
+  def canonical_sha(value):
+      raw = json.dumps(
+          value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+      ).encode("utf-8")
+      return hashlib.sha256(raw).hexdigest()
+
+  def fingerprint(path, directory=False):
+      metadata = path.lstat()
+      expected_type = stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(metadata.st_mode)
+      if path.is_symlink() or not expected_type:
+          raise SystemExit(f"FATAL: sidecar ledger type/symlink drift: {path}")
+      return {
+          "device": metadata.st_dev,
+          "inode": metadata.st_ino,
+          "size_bytes": metadata.st_size,
+          "mtime_ns": metadata.st_mtime_ns,
+          "ctime_ns": metadata.st_ctime_ns,
+      }
+
+  master = json.loads(Path(master_raw).read_text(encoding="utf-8"))
+  preflight_ref = master.get("preflight")
+  if not isinstance(preflight_ref, dict):
+      raise SystemExit("FATAL: master preflight reference malformed")
+  preflight_path = Path(str(preflight_ref.get("path", "")))
+  preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+  baseline = preflight.get("sidecar_baseline")
+  sidecar = Path(sidecar_raw)
+  if not isinstance(baseline, dict) or baseline.get("root") != str(sidecar):
+      raise SystemExit("FATAL: sidecar baseline identity malformed")
+  directories = baseline.get("directories")
+  files = baseline.get("files")
+  if not isinstance(directories, dict) or not isinstance(files, dict):
+      raise SystemExit("FATAL: sidecar baseline ledger malformed")
+  domains = set(directories) - {"root"}
+  if {path.name for path in sidecar.iterdir()} != {"header.json", "_SUCCESS", *domains}:
+      raise SystemExit("FATAL: post-analysis sidecar root exact-set drift")
+  expected_by_domain = {domain: set() for domain in domains}
+  for label, declaration in directories.items():
+      path = sidecar if label == "root" else sidecar / label
+      if declaration.get("path") != str(path) or declaration.get("fingerprint") != fingerprint(
+          path, directory=True
+      ):
+          raise SystemExit(f"FATAL: post-analysis sidecar directory drift: {label}")
+  total_bytes = 0
+  for name, declaration in files.items():
+      path = sidecar / name
+      if (
+          declaration.get("path") != str(path)
+          or path.parent.name not in expected_by_domain
+          or declaration.get("bytes") != path.stat().st_size
+          or declaration.get("fingerprint") != fingerprint(path)
+      ):
+          raise SystemExit(f"FATAL: post-analysis sidecar file drift: {name}")
+      expected_by_domain[path.parent.name].add(path.name)
+      total_bytes += path.stat().st_size
+  for domain, names in expected_by_domain.items():
+      if {path.name for path in (sidecar / domain).iterdir()} != names:
+          raise SystemExit(f"FATAL: post-analysis sidecar domain exact-set drift: {domain}")
+  if len(files) != baseline.get("file_count") or total_bytes != baseline.get("total_bytes"):
+      raise SystemExit("FATAL: post-analysis sidecar ledger count/bytes mismatch")
+  if evidence.get("sidecar_baseline_sha256") != canonical_sha(baseline):
+      raise SystemExit("FATAL: post-analysis sidecar baseline SHA mismatch")
+  expected_arms = {
+      "l16_a": (16, 0, 192),
+      "l8_a": (8, 192, 384),
+      "l8_b": (8, 384, 576),
+      "l16_b": (16, 576, 768),
+  }
+  expected_gate_names = {
+      "global_wait_mean_s",
+      "global_wait_p95_s",
+      "global_wait_max_s",
+      "global_wait_over_target_fraction",
+      "critical_window_mean_s",
+      "critical_window_p95_s",
+      "critical_window_max_s",
+      "max_rank_runner_elapsed_per_step_s",
+      "anime_min_rank_capacity_ratio",
+      "monet_real_min_rank_capacity_ratio",
+      "gpic_min_rank_capacity_ratio",
+      "synthetic_min_rank_capacity_ratio",
+      "textatlas_min_rank_capacity_ratio",
+  }
+  if set(arms) != set(expected_arms):
+      raise SystemExit("FATAL: ABBA arm result set mismatch")
+  for arm, expected in expected_arms.items():
+      result = arms[arm]
+      if (result.get("threads"), result.get("start_step"), result.get("stop_step")) != expected:
+          raise SystemExit(f"FATAL: ABBA arm identity mismatch: {arm}")
+      gates = result.get("gates")
+      failed = result.get("failed_gates")
+      if not isinstance(gates, list) or not isinstance(failed, list) or not gates:
+          raise SystemExit(f"FATAL: ABBA arm gate summary malformed: {arm}")
+      if any(not isinstance(gate, dict) for gate in gates):
+          raise SystemExit(f"FATAL: ABBA arm gate is not an object: {arm}")
+      if {gate.get("name") for gate in gates} != expected_gate_names:
+          raise SystemExit(f"FATAL: ABBA arm gate-name set mismatch: {arm}")
+      for gate in gates:
+          value_number = gate.get("value")
+          threshold = gate.get("threshold")
+          operator = gate.get("operator")
+          if (
+              not isinstance(gate, dict)
+              or not isinstance(gate.get("name"), str)
+              or isinstance(value_number, bool)
+              or not isinstance(value_number, (int, float))
+              or isinstance(threshold, bool)
+              or not isinstance(threshold, (int, float))
+              or not math.isfinite(float(value_number))
+              or not math.isfinite(float(threshold))
+              or operator not in {"<=", ">="}
+              or type(gate.get("pass")) is not bool
+          ):
+              raise SystemExit(f"FATAL: ABBA arm gate entry malformed: {arm}")
+          recomputed = value_number <= threshold if operator == "<=" else value_number >= threshold
+          if gate["pass"] is not recomputed:
+              raise SystemExit(f"FATAL: ABBA arm gate pass was not independently reproduced: {arm}")
+      observed_failed = [gate["name"] for gate in gates if not gate["pass"]]
+      if failed != observed_failed or len({gate["name"] for gate in gates}) != len(gates):
+          raise SystemExit(f"FATAL: ABBA arm failed-gate accounting mismatch: {arm}")
+      expected_arm_status = "PASS" if not failed else "NO_GO"
+      if result.get("status") != expected_arm_status:
+          raise SystemExit(f"FATAL: ABBA arm status mismatch: {arm}")
+  expected_groups = {"L8": ["l8_a", "l8_b"], "L16": ["l16_a", "l16_b"]}
+  if set(qualifications) != set(expected_groups) or not isinstance(candidates, list):
+      raise SystemExit("FATAL: ABBA thread qualification set mismatch")
+  expected_candidates = []
+  expected_inconclusive = []
+  for group, group_arms in expected_groups.items():
+      left, right = group_arms
+      left_capacity = arms[left]["domain_min_rank_capacity_ratio"]["gpic"]
+      right_capacity = arms[right]["domain_min_rank_capacity_ratio"]["gpic"]
+      expected_drift = abs(left_capacity - right_capacity) / max(
+          left_capacity, right_capacity
+      )
+      expected_stable = expected_drift <= 0.05
+      expected_arms_pass = all(arms[arm]["status"] == "PASS" for arm in group_arms)
+      expected_qualified = expected_arms_pass and expected_stable
+      qualification = qualifications[group]
+      if (
+          qualification.get("arms") != group_arms
+          or qualification.get("gpic_min_rank_capacity_ratio")
+          != {left: left_capacity, right: right_capacity}
+          or qualification.get("pair_drift_formula") != "abs(a-b)/max(a,b)"
+          or qualification.get("pair_drift") != expected_drift
+          or qualification.get("pair_drift_max") != 0.05
+          or qualification.get("stable") is not expected_stable
+          or qualification.get("inconclusive") is not (not expected_stable)
+          or qualification.get("arms_pass") is not expected_arms_pass
+          or qualification.get("qualified") is not expected_qualified
+          or qualification.get("arm_statuses")
+          != {arm: arms[arm]["status"] for arm in group_arms}
+      ):
+          raise SystemExit(f"FATAL: ABBA qualification mismatch: {group}")
+      if expected_qualified:
+          expected_candidates.append(group)
+      if not expected_stable:
+          expected_inconclusive.append(group)
+  if candidates != expected_candidates:
+      raise SystemExit("FATAL: ABBA candidate accounting mismatch")
+  expected_decision = (
+      "SELECTABLE"
+      if expected_candidates
+      else "INCONCLUSIVE"
+      if expected_inconclusive
+      else "NO_GO"
+  )
+  if (
+      value.get("inconclusive_groups") != expected_inconclusive
+      or value.get("decision") != expected_decision
+      or value.get("status") != ("PASS" if expected_candidates else "NO_GO")
+      or (rc == 0) != bool(expected_candidates)
+  ):
+      raise SystemExit("FATAL: ABBA overall status/decision/stability mismatch")
+  print(
+      f"W16_GPIC_ABBA_ANALYSIS_{expected_status} output={output} "
+      f"decision={value.get('decision')} candidates={candidates} "
+      f"failed_arms={value.get('failed_arms')}"
+  )
+  PYEOF
+
+  case "$ANALYZE_RC" in
+    0) exit 0 ;;
+    3) exit 3 ;;
+    *) exit 1 ;;
+  esac

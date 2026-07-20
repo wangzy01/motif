@@ -1,0 +1,68 @@
+# CPU16/no-network synthetic build->coordinate->fresh-verify gate.  It cannot
+# authorize production and cleans its unique FSx test namespace on exit.
+name: evan-mot-crop-offlinearb-gpic-s3-production-static
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 32
+maxRetries: 0
+command: |
+  set -euo pipefail
+  umask 077
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1
+  export PYTHONDONTWRITEBYTECODE=1
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+
+  [ "${HOSTNAME##*-}" = 0 ] || { echo "FATAL: static must be one worker"; exit 2; }
+  JOBTAG=${HOSTNAME%-0}
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  COMMON=$REPO/scripts/offline_arb/offline_gpic_s3_production_common.py
+  TAR_SOURCE=$REPO/scripts/offline_arb/offline_gpic_tar_sequential.py
+  TAR_TEST=$REPO/scripts/offline_arb/test_offline_gpic_tar_sequential_static.py
+  BUILDER=$REPO/scripts/offline_arb/build_offline_gpic_s3_production.py
+  COORDINATOR=$REPO/scripts/offline_arb/coordinate_offline_gpic_s3_production.py
+  VERIFIER=$REPO/scripts/offline_arb/verify_offline_gpic_s3_production.py
+  TEST=$REPO/scripts/offline_arb/test_offline_gpic_s3_production_static.py
+  BUILDER_JOB=$REPO/jobs/offline_arb_gpic_s3_production_build.yaml
+  COORDINATOR_JOB=$REPO/jobs/offline_arb_gpic_s3_production_coordinate.yaml
+  VERIFIER_JOB=$REPO/jobs/offline_arb_gpic_s3_production_verify.yaml
+  SELF=$REPO/jobs/offline_arb_gpic_s3_production_static.yaml
+  ROOT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/.offline_gpic_s3_production_static/$JOBTAG
+  TAR_MAPPING=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_gpic_tar_mapping_probe_20260712v1/evan-mot-crop-offlinearb-gpic-tar-mapping-probe-wvsq/report.json
+  for FILE in "$COMMON" "$TAR_SOURCE" "$TAR_TEST" "$BUILDER" "$COORDINATOR" "$VERIFIER" "$TEST" \
+              "$BUILDER_JOB" "$COORDINATOR_JOB" "$VERIFIER_JOB" "$SELF"; do
+    [ -f "$FILE" ] && [ ! -L "$FILE" ] && [ -s "$FILE" ] \
+      || { echo "FATAL: invalid static input"; exit 2; }
+  done
+  [ ! -e "$ROOT" ] && [ ! -L "$ROOT" ] \
+    || { echo "FATAL: static namespace is not fresh"; exit 2; }
+  cleanup() {
+    case "$ROOT" in
+      /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/.offline_gpic_s3_production_static/*)
+        rm -rf -- "$ROOT" "${ROOT}.tar"
+        ;;
+      *) echo "FATAL: unsafe static cleanup target" >&2; return 1 ;;
+    esac
+  }
+  trap cleanup EXIT
+  mkdir -m 700 -p "$(dirname "$ROOT")"
+  [ -f "$TAR_MAPPING" ] && [ ! -L "$TAR_MAPPING" ] && [ -s "$TAR_MAPPING" ] \
+    || { echo "FATAL: invalid frozen tar mapping authority"; exit 2; }
+  "$PY" -m py_compile "$COMMON" "$TAR_SOURCE" "$TAR_TEST" "$BUILDER" "$COORDINATOR" "$VERIFIER" "$TEST"
+  timeout --preserve-status --signal=TERM --kill-after=30s 600s \
+    "$PY" "$TAR_TEST" \
+      --root "${ROOT}.tar" \
+      --sample-report "$TAR_MAPPING" \
+      --sample-report-raw-sha256 11f680e771b8f636d3125dbce095b3b780fc29b30d9f102091febc9a0393dc92
+  timeout --preserve-status --signal=TERM --kill-after=30s 1800s \
+    "$PY" "$TEST" \
+      --root "$ROOT" --job-spec "$SELF" \
+      --builder-job-spec "$BUILDER_JOB" \
+      --coordinator-job-spec "$COORDINATOR_JOB" \
+      --verifier-job-spec "$VERIFIER_JOB"
+  echo "OFFLINE_GPIC_S3_PRODUCTION_STATIC_JCC_PASS"

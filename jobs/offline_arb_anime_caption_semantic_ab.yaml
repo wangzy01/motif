@@ -1,0 +1,103 @@
+# Exact six-step semantic A/B against the pre-staging caption-worker experiment.
+name: evan-mot-crop-offlinearb-anime-caption-semantic-ab
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 128
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  export OFFLINE_ARB_STEP_TIMEOUT_S=1800
+  export OFFLINE_ARB_PREFETCH_STEPS=20
+  export OFFLINE_ARB_SMOKE_DATASET_CONFIG=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop/configs/stage256_offline_exact_v1.yaml
+  unset OFFLINE_ARB_PROFILE_WINDOWS OFFLINE_ARB_ANIME_CAPTION_WORKERS
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  MANIFEST=$BASE/offline_arb_anime_caption_source_manifest_v1/header.json
+  HOST=$(hostname); STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+  OUT=$BASE/offline_arb_anime_caption_semantic_ab_20260711
+  mkdir -p "$OUT"
+  CAPTION_ROOT=$(timeout --signal=TERM --kill-after=30s 1800s \
+    "$PY" scripts/offline_arb/stage_anime_caption_local.py \
+      --manifest "$MANIFEST" --workers 2)
+  export OFFLINE_ARB_ANIME_CAPTION_ROOT=$CAPTION_ROOT
+  export OFFLINE_ARB_LOCAL_ROOT=/local/evan/offline_arb_caption_semantic_ab_${HOST}
+  LOG=$OUT/semantic_ab.$HOST.$STAMP.log
+
+  set +e
+  timeout --signal=TERM --kill-after=30s 1770s \
+    "$PY" scripts/offline_arb/smoke_offline_loader.py \
+      --plan-root "$BASE/offline_arb_plans_v1/w4_smoke/plan" \
+      --catalog-root "$BASE/offline_arb_catalog_v1" \
+      --anime-freq-root "$BASE/offline_arb_animefreq_v1" \
+      --ranks 4 --steps 6 \
+    2>&1 | tee "$LOG"
+  PIPE_RC=("${PIPESTATUS[@]}")
+  set -e
+  [ "${PIPE_RC[0]}" -eq 0 ] || exit "${PIPE_RC[0]}"
+  [ "${PIPE_RC[1]}" -eq 0 ] || exit "${PIPE_RC[1]}"
+
+  "$PY" - "$LOG" <<'PYEOF'
+  import json, sys
+  from pathlib import Path
+
+  raw = Path(sys.argv[1]).read_text(encoding="utf-8")
+  marker = '{\n  "assertions"'
+  start = raw.find(marker)
+  if start < 0:
+      raise SystemExit("FATAL semantic A/B: smoke JSON not found")
+  result, _end = json.JSONDecoder().raw_decode(raw[start:])
+  expected = {
+      "0": {
+          "trace_sha256": "3434efcba31fd3e70201ebf681f4613da17759dc5746602c85ac65e6b2c1d9cc",
+          "prompts_sha256": "ac6b0b55a37d68c05a1ccfb95ebb0c3b152cee35251554690ae973fb320e9f30",
+          "pixels_sha256": "3c8b87efcf103b28fd8eeff94f5903be050e547de8e10d600f7aef9e0d0b085f",
+          "cfg_keep_sha256": "c81fae31c5f52a9d8be4e31462e60bf70ff0c6e4db8ec4a766176679665e8412",
+      },
+      "1": {
+          "trace_sha256": "e3356fcc69efc6495f71eb666b8b03b5431fd5d729362032632c06af5fd55a8e",
+          "prompts_sha256": "386830df75d48f71361da6aced300a3ddc3ad69646ede7d855a209e11ef547e3",
+          "pixels_sha256": "91222390adcceaefd26aa2bfab91a89c2d97c96e6ecf487c62f39dfb382590aa",
+          "cfg_keep_sha256": "1c79f49d02a3d99bf4c4674a7a0af904183e03209d9c819bd434dc7b0f272482",
+      },
+      "2": {
+          "trace_sha256": "860a8f4e40b6531a78fe1dec04fc154ebb53ccc328f53201580d1a551cda1133",
+          "prompts_sha256": "2b555863e6f92ccd73472c1a29a585df339afb73189a8aff78d374a659dac61d",
+          "pixels_sha256": "bdf5bc03db999f7bdca5d0c3e74467491ec763adade9902766a42d67a07916af",
+          "cfg_keep_sha256": "528c1c7029ebeb25b41c11c7ed2e2d9174efb32e905fab91b42687b2a62462b8",
+      },
+      "3": {
+          "trace_sha256": "18aa548caccbb814f1e6741ffde9967a71e3345441f438cfc35da8b5dcb83961",
+          "prompts_sha256": "b1e7838d2a3596dc775e0161ee1209b4e88248e111d43b2b8224ec9190ea563d",
+          "pixels_sha256": "021a45e8bc0c6f2bb274141c757f58244aed5ce15cb46b1dc45b182675438edc",
+          "cfg_keep_sha256": "e4028818579df66dccc5a37d1c76978cb7e53bb2a94e5e389b345f68227576de",
+      },
+  }
+  if result.get("status") != "PASS" or result.get("steps") != 6:
+      raise SystemExit(f"FATAL semantic A/B smoke status/steps: {result.get('status')}/{result.get('steps')}")
+  for rank, hashes in expected.items():
+      live = result["per_rank"][rank]
+      for key, value in hashes.items():
+          if live.get(key) != value:
+              raise SystemExit(
+                  f"FATAL semantic drift rank={rank} key={key}: {live.get(key)} != {value}"
+              )
+  print(json.dumps({
+      "status": "PASS",
+      "semantic_hash_schema": result["semantic_hash_schema"],
+      "prefetch_steps": 20,
+      "matched_prefetch4_hashes": [
+          "trace_sha256", "prompts_sha256", "pixels_sha256", "cfg_keep_sha256"
+      ],
+      "cfg_keep_sha256": {
+          rank: result["per_rank"][rank]["cfg_keep_sha256"] for rank in sorted(expected)
+      },
+  }, indent=2, sort_keys=True))
+  PYEOF

@@ -1,0 +1,43 @@
+name: evan-mot-crop-offlinearb-caption-inventory-summary
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 32
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  ROOT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_caption_source_inventory_v1
+  "$PY" - "$ROOT" <<'PYEOF'
+  import json, sys
+  from pathlib import Path
+
+  root = Path(sys.argv[1])
+  result = {}
+  for domain in ("monet_real", "gpic"):
+      paths = sorted(root.glob(f"{domain}.*.json"))
+      if len(paths) != 1:
+          raise SystemExit(f"FATAL expected one {domain} inventory, got {paths}")
+      value = json.loads(paths[0].read_text(encoding="utf-8"))
+      sources = value["sources"]
+      largest = sorted(sources, key=lambda item: item["bytes"], reverse=True)[:5]
+      result[domain] = {
+          "inventory": str(paths[0]),
+          "catalog_rows": value["catalog_rows_by_source_total"],
+          "source_count": value["source_count"],
+          "source_total_bytes": value["source_total_bytes"],
+          "source_max_bytes": value["source_max_bytes"],
+          "full_stage_required_bytes": value[
+              "full_stage_required_bytes_total_plus_max_plus_32gib"
+          ],
+          "parents": value["parents"],
+          "metadata_summary": value["metadata_summary"],
+          "largest_sources": [
+              {key: item[key] for key in ("path", "bytes", "catalog_rows", "parquet")}
+              for item in largest
+          ],
+      }
+  print(json.dumps({"status": "PASS", "domains": result}, indent=2, sort_keys=True))
+  PYEOF

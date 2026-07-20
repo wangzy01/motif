@@ -40,6 +40,10 @@ from training.checkpoint import (  # noqa: F401  re-export 供 scripts/experimen
     load_checkpoint,
     save_checkpoint,
 )
+from training.auto_resume_reconcile import (
+    auto_resume_reconcile_enabled,
+    reconcile_metrics_for_resume,
+)
 from training.config_schema import validate_config
 from training.diagnostics import BatchReadyBarrier, StepTraceDiagnostics
 
@@ -217,6 +221,99 @@ def main():
 
     # ----- data（占位 stub，正式版换 naifu dataset+sampler+dataio）----- #
     dataset = get_class(config.dataset.store_cls)(**config.dataset)
+    runtime_gpic_consistency_mode = getattr(
+        dataset, "_gpic_source_consistency_mode", None
+    )
+    if "gpic_source_consistency_mode" in config.dataset:
+        configured_gpic_consistency_mode = str(
+            config.dataset.gpic_source_consistency_mode
+        )
+        if runtime_gpic_consistency_mode != configured_gpic_consistency_mode:
+            raise RuntimeError(
+                "dataset.gpic_source_consistency_mode was not bound by store_cls: "
+                f"configured={configured_gpic_consistency_mode!r}, "
+                f"runtime={runtime_gpic_consistency_mode!r}"
+            )
+    if runtime_gpic_consistency_mode is not None:
+        log(
+            "[train] dataset gpic_source_consistency_mode="
+            f"{runtime_gpic_consistency_mode}"
+        )
+    runtime_gpic_threads_per_node = getattr(
+        dataset, "_gpic_threads_per_node", None
+    )
+    if "gpic_threads_per_node" in config.dataset:
+        configured_gpic_threads_per_node = int(
+            config.dataset.gpic_threads_per_node
+        )
+        if runtime_gpic_threads_per_node != configured_gpic_threads_per_node:
+            raise RuntimeError(
+                "dataset.gpic_threads_per_node was not bound by store_cls: "
+                f"configured={configured_gpic_threads_per_node!r}, "
+                f"runtime={runtime_gpic_threads_per_node!r}"
+            )
+    if runtime_gpic_threads_per_node is not None:
+        log(
+            "[train] dataset gpic_threads_per_node="
+            f"{runtime_gpic_threads_per_node}"
+        )
+    runtime_gpic_payload_backend = getattr(
+        dataset, "_gpic_payload_backend", None
+    )
+    if "gpic_payload_backend" in config.dataset:
+        configured_gpic_payload_backend = str(
+            config.dataset.gpic_payload_backend
+        )
+        if runtime_gpic_payload_backend != configured_gpic_payload_backend:
+            raise RuntimeError(
+                "dataset.gpic_payload_backend was not bound by store_cls: "
+                f"configured={configured_gpic_payload_backend!r}, "
+                f"runtime={runtime_gpic_payload_backend!r}"
+            )
+    runtime_gpic_blob_manifest_sha256 = getattr(
+        dataset, "_gpic_blob_manifest_sha256", None
+    )
+    if "gpic_blob_manifest_sha256" in config.dataset:
+        configured_gpic_blob_manifest_sha256 = str(
+            config.dataset.gpic_blob_manifest_sha256
+        )
+        if runtime_gpic_blob_manifest_sha256 != configured_gpic_blob_manifest_sha256:
+            raise RuntimeError(
+                "dataset.gpic_blob_manifest_sha256 was not bound by store_cls: "
+                f"configured={configured_gpic_blob_manifest_sha256!r}, "
+                f"runtime={runtime_gpic_blob_manifest_sha256!r}"
+            )
+    runtime_gpic_blob_root = getattr(dataset, "_gpic_blob_root", None)
+    if "offline_gpic_blob_root" in config.dataset:
+        configured_gpic_blob_root = str(config.dataset.offline_gpic_blob_root)
+        if str(runtime_gpic_blob_root) != configured_gpic_blob_root:
+            raise RuntimeError(
+                "dataset.offline_gpic_blob_root was not bound by store_cls: "
+                f"configured={configured_gpic_blob_root!r}, "
+                f"runtime={str(runtime_gpic_blob_root)!r}"
+            )
+    runtime_gpic_blob_fd_cache_size = getattr(
+        dataset, "_gpic_blob_fd_cache_size", None
+    )
+    if "gpic_blob_fd_cache_size" in config.dataset:
+        configured_gpic_blob_fd_cache_size = int(
+            config.dataset.gpic_blob_fd_cache_size
+        )
+        if runtime_gpic_blob_fd_cache_size != configured_gpic_blob_fd_cache_size:
+            raise RuntimeError(
+                "dataset.gpic_blob_fd_cache_size was not bound by store_cls: "
+                f"configured={configured_gpic_blob_fd_cache_size!r}, "
+                f"runtime={runtime_gpic_blob_fd_cache_size!r}"
+            )
+    if runtime_gpic_payload_backend is not None:
+        log(
+            "[train] dataset gpic_payload_backend="
+            f"{runtime_gpic_payload_backend} "
+            f"root={runtime_gpic_blob_root} "
+            f"manifest_sha256={runtime_gpic_blob_manifest_sha256} "
+            f"release_sha256={getattr(dataset, '_gpic_blob_release_sha256', None)} "
+            f"fd_cache_size={runtime_gpic_blob_fd_cache_size}"
+        )
     batch_size = int(config.trainer.batch_size)
     loader = dataset.loader(batch_size)
 
@@ -267,9 +364,11 @@ def main():
         model.init_ema(float(ema_cfg.get("decay", 0.9999)))
 
     global_step = 0
+    resumed_from_checkpoint = False
     if os.path.exists(ckpt_path) and bool(config.trainer.get("resume", True)):
         # 同分辨率续训/崩溃恢复：完整恢复 model+optimizer+scheduler+global_step（逐字不变）。
         global_step = load_checkpoint(ckpt_path, model, optimizer, scheduler, is_dist, config)
+        resumed_from_checkpoint = True
         log(f"[train] resumed from {ckpt_path} at step {global_step}")
     elif config.trainer.get("init_from"):
         # 跨分辨率【阶段切换】（gated）：从上一阶段 final ckpt 载权重(+optimizer 动量)，重置 step=0、
@@ -283,6 +382,92 @@ def main():
         init_from_checkpoint(init_path, model, optimizer, is_dist, config, load_optimizer=load_opt)
         global_step = 0
         log(f"[train] init_from {init_path} (load_optimizer={load_opt}); step 重置为 0，scheduler 全新 re-warmup")
+
+    # FORMAL bounded auto-resume (explicit env gate): every rank has completed
+    # checkpoint load before rank 0 validates metrics.  Rank 0 preserves the
+    # complete stream/tail and atomically restores the checkpoint prefix before
+    # any dataset start step or append handle can observe it.  An exact
+    # metrics==checkpoint boundary is a filesystem no-op and consumes no replay
+    # guard.  Errors are broadcast before the post-reconcile barrier so peers do
+    # not wait indefinitely on a rank-0-only exception.
+    auto_reconcile = auto_resume_reconcile_enabled()
+    if is_dist:
+        enabled_count = torch.tensor(
+            [int(auto_reconcile)], dtype=torch.int32, device=device
+        )
+        dist.all_reduce(enabled_count, op=dist.ReduceOp.SUM)
+        if int(enabled_count.item()) not in (0, world_size):
+            raise RuntimeError(
+                "OFFLINE_ARB_AUTO_RESUME_RECONCILE differs across distributed ranks"
+            )
+        auto_reconcile = int(enabled_count.item()) == world_size
+    if auto_reconcile and not resumed_from_checkpoint:
+        # A retry before the first checkpoint has no safe optimizer/model state
+        # to pair with an existing metrics stream.  Never append a new step-1
+        # sequence behind stale progress; require an explicit audited recovery.
+        stale_metrics_error = None
+        if is_main:
+            try:
+                if os.path.lexists(metrics_path) and (
+                    os.path.islink(metrics_path)
+                    or not os.path.isfile(metrics_path)
+                    or os.path.getsize(metrics_path) > 0
+                ):
+                    stale_metrics_error = RuntimeError(
+                        "auto-resume found metrics without a loaded checkpoint: "
+                        f"{metrics_path}"
+                    )
+            except OSError as exc:
+                stale_metrics_error = RuntimeError(
+                    f"auto-resume cannot inspect metrics without checkpoint: {exc}"
+                )
+        if is_dist:
+            failed = torch.tensor(
+                [int(stale_metrics_error is not None)],
+                dtype=torch.int32,
+                device=device,
+            )
+            dist.broadcast(failed, src=0)
+            if int(failed.item()) != 0:
+                if stale_metrics_error is not None:
+                    raise stale_metrics_error
+                raise RuntimeError(
+                    "rank0 found metrics without a loaded checkpoint; see rank0 log"
+                )
+        elif stale_metrics_error is not None:
+            raise stale_metrics_error
+    if resumed_from_checkpoint and auto_reconcile:
+        if is_dist:
+            dist.barrier()
+        reconcile_result = None
+        reconcile_error = None
+        if is_main:
+            try:
+                reconcile_result = reconcile_metrics_for_resume(
+                    checkpoint_path=ckpt_path,
+                    metrics_path=metrics_path,
+                    checkpoint_step=global_step,
+                )
+            except Exception as exc:
+                reconcile_error = exc
+                log(
+                    "[auto-resume] rank0 reconciliation failed closed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+        if is_dist:
+            failed = torch.tensor(
+                [int(reconcile_error is not None)], dtype=torch.int32, device=device
+            )
+            dist.broadcast(failed, src=0)
+            if int(failed.item()) != 0:
+                if reconcile_error is not None:
+                    raise RuntimeError("rank0 auto-resume reconciliation failed") from reconcile_error
+                raise RuntimeError("rank0 auto-resume reconciliation failed; see rank0 log")
+            dist.barrier()
+        elif reconcile_error is not None:
+            raise RuntimeError("auto-resume reconciliation failed") from reconcile_error
+        if is_main:
+            log(f"[auto-resume] reconciliation={json.dumps(reconcile_result, sort_keys=True)}")
     # multi-AR（Phase2b）：把续训全局步注入 dataset → square warmup 按全局步判定（防 resume 重跑 warmup）。
     # gated：仅 CompleteV1Dataset 有此方法且 multi_ar.enabled 时生效；其它 store/非 multi_ar 为 no-op。
     if hasattr(dataset, "set_start_step"):
@@ -337,6 +522,123 @@ def main():
         except Exception:
             pass
         return out
+
+    def _gpic_all_rank_metrics(ds):
+        """Aggregate the formal blob-health canaries on every rank in lockstep."""
+
+        if runtime_gpic_payload_backend != "offline_gpic_blob_v1":
+            return {}
+        health_error = 0.0
+        try:
+            getter = getattr(ds, "gpic_blob_health_metrics")
+            local = dict(getter())
+            if not local:
+                health_error = 1.0
+            if (
+                float(local.get("gpic_blob_process_rss_bytes", -1.0)) < 0
+                or float(local.get("gpic_blob_process_fd_count", -1.0)) < 0
+            ):
+                health_error = 1.0
+        except BaseException:
+            local = {}
+            health_error = 1.0
+        keys = (
+            "gpic_blob_supply_img_s",
+            "gpic_blob_process_rss_bytes",
+            "gpic_blob_process_fd_count",
+            "gpic_blob_startup_rss_bytes",
+            "gpic_blob_startup_fd_count",
+            "gpic_blob_rlimit_nofile_soft",
+            "gpic_blob_rlimit_nofile_hard",
+            "gpic_blob_blob_count",
+            "gpic_blob_fd_cache_size",
+            "gpic_blob_fd_cache_covers_blob_count",
+            "gpic_blob_fd_current",
+            "gpic_blob_fd_peak",
+            "gpic_blob_short_read_failures",
+            "gpic_blob_integrity_failures",
+            "gpic_blob_pread_errors",
+            "gpic_blob_source_fallback_items",
+            "gpic_blob_pread_requested_bytes",
+            "gpic_blob_pread_returned_bytes",
+            "gpic_blob_read_items",
+        )
+        values = [float(local.get(key, 0.0)) for key in keys] + [health_error]
+        local_tensor = torch.tensor(values, dtype=torch.float64, device=device)
+        if is_dist:
+            gathered = [torch.empty_like(local_tensor) for _ in range(world_size)]
+            dist.all_gather(gathered, local_tensor)
+            matrix = torch.stack(gathered).cpu()
+        else:
+            matrix = local_tensor.unsqueeze(0).cpu()
+        column = {key: idx for idx, key in enumerate(keys)}
+
+        def col(key):
+            return matrix[:, column[key]]
+
+        return {
+            "gpic_allrank_slowest_supply_img_s": float(
+                col("gpic_blob_supply_img_s").min().item()
+            ),
+            "gpic_allrank_max_rss_bytes": float(
+                col("gpic_blob_process_rss_bytes").max().item()
+            ),
+            "gpic_allrank_max_process_fd_count": float(
+                col("gpic_blob_process_fd_count").max().item()
+            ),
+            "gpic_allrank_max_startup_rss_bytes": float(
+                col("gpic_blob_startup_rss_bytes").max().item()
+            ),
+            "gpic_allrank_max_startup_fd_count": float(
+                col("gpic_blob_startup_fd_count").max().item()
+            ),
+            "gpic_allrank_min_rlimit_nofile_soft": float(
+                col("gpic_blob_rlimit_nofile_soft").min().item()
+            ),
+            "gpic_allrank_min_rlimit_nofile_hard": float(
+                col("gpic_blob_rlimit_nofile_hard").min().item()
+            ),
+            "gpic_allrank_max_manifest_blob_count": float(
+                col("gpic_blob_blob_count").max().item()
+            ),
+            "gpic_allrank_min_blob_fd_cache_size": float(
+                col("gpic_blob_fd_cache_size").min().item()
+            ),
+            "gpic_allrank_max_blob_fd_cache_size": float(
+                col("gpic_blob_fd_cache_size").max().item()
+            ),
+            "gpic_allrank_min_fd_cache_covers_blob_count": float(
+                col("gpic_blob_fd_cache_covers_blob_count").min().item()
+            ),
+            "gpic_allrank_max_blob_fd_current": float(
+                col("gpic_blob_fd_current").max().item()
+            ),
+            "gpic_allrank_max_blob_fd_peak": float(
+                col("gpic_blob_fd_peak").max().item()
+            ),
+            "gpic_allrank_sum_short_read_failures": float(
+                col("gpic_blob_short_read_failures").sum().item()
+            ),
+            "gpic_allrank_sum_integrity_failures": float(
+                col("gpic_blob_integrity_failures").sum().item()
+            ),
+            "gpic_allrank_sum_pread_errors": float(
+                col("gpic_blob_pread_errors").sum().item()
+            ),
+            "gpic_allrank_sum_source_fallback_items": float(
+                col("gpic_blob_source_fallback_items").sum().item()
+            ),
+            "gpic_allrank_sum_pread_requested_bytes": float(
+                col("gpic_blob_pread_requested_bytes").sum().item()
+            ),
+            "gpic_allrank_sum_pread_returned_bytes": float(
+                col("gpic_blob_pread_returned_bytes").sum().item()
+            ),
+            "gpic_allrank_sum_read_items": float(
+                col("gpic_blob_read_items").sum().item()
+            ),
+            "gpic_allrank_health_snapshot_errors": float(matrix[:, -1].sum().item()),
+        }
 
     t_iter = time.perf_counter()
     while global_step < max_steps:
@@ -407,6 +709,12 @@ def main():
             trace(global_step, "before_loss_all_reduce")
             dist.all_reduce(loss_val, op=dist.ReduceOp.AVG)
             trace(global_step, "after_loss_all_reduce")
+        emit_dataline_metrics = dl_every > 0 and (
+            global_step % dl_every == 0 or global_step == 1
+        )
+        gpic_all_rank = (
+            _gpic_all_rank_metrics(dataset) if emit_dataline_metrics else {}
+        )
         if is_main:
             record = {
                 "step": global_step,
@@ -423,8 +731,9 @@ def main():
             lrs = scheduler.get_last_lr()
             if len(lrs) > 1:
                 record["lr_und_lora"] = lrs[-1]
-            if dl_every > 0 and (global_step % dl_every == 0 or global_step == 1):
+            if emit_dataline_metrics:
                 record.update(_dataline_metrics(dataset, _dl_prev_mix))
+                record.update(gpic_all_rank)
             mf.write(json.dumps(record) + "\n")
             wandb_logger.log(record, global_step)
             if global_step % log_every == 0 or global_step == 1:
@@ -484,9 +793,9 @@ def main():
         sys.stderr.flush()
         tracer.flush()
         os._exit(0)
-    if tracer.trace_fp is not None:
-        tracer.cancel_faulthandler()
-        tracer.close()
+    # 无条件收尾（2026-07-09）：旧版只在 trace_fp 路径 cancel → fh-only 配置的周期 dump 定时器
+    # 带病穿越解释器 teardown（危险探针,详见 diagnostics.setup 注释）。close() 内部先撤定时器再关 fd。
+    tracer.close()
 
 
 if __name__ == "__main__":

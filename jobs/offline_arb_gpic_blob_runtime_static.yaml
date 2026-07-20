@@ -1,0 +1,178 @@
+# CPU16/no-GPU, source-SHA-frozen static and synthetic runtime gate for the
+# production offline_gpic_blob_v1 reader.  It performs no production S3 reads.
+# This gate proves FD safety/RLIMIT rejection only; W64/probation must separately
+# test an explicit cap >= manifest blob_count (first candidate 1024) and close
+# all-rank FD/RSS/supply before formal freeze.
+name: evan-mot-crop-offlinearb-gpic-blob-runtime-static
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 32
+maxRetries: 0
+command: |
+  set -euo pipefail
+  umask 077
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1
+  export PYTHONFAULTHANDLER=1
+  export PYTHONHASHSEED=0
+  export PYTHONDONTWRITEBYTECODE=1
+  export OMP_NUM_THREADS=1
+  export MKL_NUM_THREADS=1
+  export OPENBLAS_NUM_THREADS=1
+  export NUMEXPR_NUM_THREADS=1
+  export ARROW_NUM_THREADS=1
+  export HF_HUB_OFFLINE=1
+  export TRANSFORMERS_OFFLINE=1
+
+  HOST=$(hostname)
+  [ "${HOST##*-}" = 0 ] || { echo "FATAL: static worker identity drift"; exit 2; }
+  JOBTAG=${HOST%-0}
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  MODULE=$REPO/training/dataline_offline/gpic_blob.py
+  RELEASE_VIEW=$REPO/training/dataline_offline/gpic_release_view.py
+  DATASET=$REPO/training/dataline_offline/offline_dataset.py
+  CAPTION_EXCEPTIONS=$REPO/training/dataline_offline/caption_exceptions_v1.py
+  IMAGE_EXCEPTIONS=$REPO/training/dataline_offline/image_exceptions_v1.py
+  AUTO_RESUME=$REPO/training/auto_resume_reconcile.py
+  TRAIN=$REPO/train.py
+  SCHEMA=$REPO/training/config_schema.py
+  STATIC_TEST=$REPO/scripts/offline_arb/test_gpic_blob_static.py
+  RUNTIME_TEST=$REPO/scripts/offline_arb/test_gpic_blob_runtime.py
+  PLAN=$REPO/docs/GPIC_S3_PRODUCTION_PLAN_20260712.md
+  SELF=$REPO/jobs/offline_arb_gpic_blob_runtime_static.yaml
+  ROOT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/.offline_gpic_blob_runtime_static/$JOBTAG
+
+  MODULE_SHA=1163d5f0c440df02bdff1596bb9adb252de98bae8e6673b9248f70dc216fdb45
+  RELEASE_VIEW_SHA=0311d1d397a668c7cbd93fa4c7d1ef95dd1982e4be9ae24bf271c4130f1dabad
+  DATASET_SHA=e48ba947c93676e566d50895fed93feda9d92553275ac08e5322fc6717292cc3
+  CAPTION_EXCEPTIONS_SHA=4c0bc17150859393bed3526b2e2b746e739dd4d545f67e1541c3b5c168be52d9
+  IMAGE_EXCEPTIONS_SHA=dec739f3f0a0860c2c5b895983cab771ad973cc40105c360e6e470f6ab657ded
+  AUTO_RESUME_SHA=785717a095527010a3593375a777399e093a3136e9755146cbd9a7c00c4af8ec
+  TRAIN_SHA=38cf641682dec5174f4f783fbf833eb8e7145e4819f70108bd316803ab616e88
+  SCHEMA_SHA=3c0c7b2a767b504ed4d6d91c7c896e33e2c3059fbd574012c76629fbcb8c8cdd
+  STATIC_TEST_SHA=2206959456ea2ec72b8f82903ba6378645a3088a008eb0a911327b1628ac3ae1
+  RUNTIME_TEST_SHA=f98cbc6ce4766b401f8c2484ac50433744553fdffb2cbbd0952b15f6fed512a9
+  PLAN_SHA=c52bd2869cadd7d7aa662018e8bcb65d836a20859f7377a36d564049d4f9a427
+
+  for FILE in "$MODULE" "$RELEASE_VIEW" "$DATASET" "$CAPTION_EXCEPTIONS" "$IMAGE_EXCEPTIONS" "$AUTO_RESUME" "$TRAIN" "$SCHEMA" "$STATIC_TEST" "$RUNTIME_TEST" "$PLAN" "$SELF"; do
+    [ -f "$FILE" ] && [ ! -L "$FILE" ] && [ -s "$FILE" ] \
+      || { echo "FATAL: invalid runtime-static input $FILE"; exit 2; }
+  done
+  check_sha() {
+    EXPECTED=$1
+    FILE=$2
+    ACTUAL=$(sha256sum -- "$FILE" | awk '{print $1}')
+    [ "$ACTUAL" = "$EXPECTED" ] \
+      || { echo "FATAL: frozen SHA drift file=$FILE expected=$EXPECTED actual=$ACTUAL"; exit 2; }
+  }
+  check_sha "$MODULE_SHA" "$MODULE"
+  check_sha "$RELEASE_VIEW_SHA" "$RELEASE_VIEW"
+  check_sha "$DATASET_SHA" "$DATASET"
+  check_sha "$CAPTION_EXCEPTIONS_SHA" "$CAPTION_EXCEPTIONS"
+  check_sha "$IMAGE_EXCEPTIONS_SHA" "$IMAGE_EXCEPTIONS"
+  check_sha "$AUTO_RESUME_SHA" "$AUTO_RESUME"
+  check_sha "$TRAIN_SHA" "$TRAIN"
+  check_sha "$SCHEMA_SHA" "$SCHEMA"
+  check_sha "$STATIC_TEST_SHA" "$STATIC_TEST"
+  check_sha "$RUNTIME_TEST_SHA" "$RUNTIME_TEST"
+  check_sha "$PLAN_SHA" "$PLAN"
+
+  [ ! -e "$ROOT" ] && [ ! -L "$ROOT" ] \
+    || { echo "FATAL: runtime-static artifact namespace is not fresh"; exit 2; }
+  mkdir -p -- "$ROOT/tmp" "$ROOT/pycache"
+  export TMPDIR=$ROOT/tmp
+  export PYTHONPYCACHEPREFIX=$ROOT/pycache
+
+  timeout --preserve-status --signal=TERM --kill-after=30s 300s \
+    "$PY" -m py_compile \
+      "$MODULE" "$RELEASE_VIEW" "$DATASET" "$CAPTION_EXCEPTIONS" "$IMAGE_EXCEPTIONS" "$AUTO_RESUME" "$TRAIN" "$SCHEMA" "$STATIC_TEST" "$RUNTIME_TEST"
+  timeout --preserve-status --signal=TERM --kill-after=30s 300s \
+    "$PY" "$STATIC_TEST" | tee "$ROOT/static.log"
+  timeout --preserve-status --signal=TERM --kill-after=30s 900s \
+    "$PY" "$RUNTIME_TEST" | tee "$ROOT/runtime.log"
+
+  "$PY" - \
+    "$ROOT" "$JOBTAG" \
+    "$MODULE" "$MODULE_SHA" \
+    "$RELEASE_VIEW" "$RELEASE_VIEW_SHA" \
+    "$DATASET" "$DATASET_SHA" \
+    "$CAPTION_EXCEPTIONS" "$CAPTION_EXCEPTIONS_SHA" \
+    "$IMAGE_EXCEPTIONS" "$IMAGE_EXCEPTIONS_SHA" \
+    "$AUTO_RESUME" "$AUTO_RESUME_SHA" \
+    "$TRAIN" "$TRAIN_SHA" \
+    "$SCHEMA" "$SCHEMA_SHA" \
+    "$STATIC_TEST" "$STATIC_TEST_SHA" \
+    "$RUNTIME_TEST" "$RUNTIME_TEST_SHA" \
+    "$PLAN" "$PLAN_SHA" <<'PYEOF'
+  import hashlib
+  import json
+  import os
+  import sys
+  from pathlib import Path
+
+  root = Path(sys.argv[1])
+  jobtag = sys.argv[2]
+  pairs = sys.argv[3:]
+  if len(pairs) % 2:
+      raise SystemExit("FATAL: receipt path/SHA arguments are not paired")
+  tested = {}
+  for raw_path, expected_sha in zip(pairs[0::2], pairs[1::2]):
+      path = Path(raw_path)
+      actual_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+      if actual_sha != expected_sha:
+          raise SystemExit(f"FATAL: post-test SHA drift {path}")
+      tested[str(path)] = actual_sha
+  logs = {}
+  for name in ("static.log", "runtime.log"):
+      raw = (root / name).read_bytes()
+      logs[name] = {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+  receipt = {
+      "schema_version": "offline_gpic_blob_runtime_static_v1",
+      "status": "PASS",
+      "jobtag": jobtag,
+      "tested_files": dict(sorted(tested.items())),
+      "logs": logs,
+      "record_bytes": 56,
+      "dual_marker": True,
+      "canonical_projection": True,
+      "mmap_same_fd_sha": True,
+      "distributed_failfast": True,
+      "full_source_fallback_items": 0,
+      "fd_cache_performance_p1": {
+          "static_authorizes_formal_cap": False,
+          "first_w64_candidate_entries": 1024,
+          "require_cover_manifest_blob_count": True,
+          "require_allrank_rlimit_fd_rss_supply_gate": True,
+      },
+  }
+  raw = json.dumps(
+      receipt,
+      ensure_ascii=False,
+      sort_keys=True,
+      separators=(",", ":"),
+      allow_nan=False,
+  ).encode("utf-8")
+  receipt_path = root / "receipt.json"
+  with receipt_path.open("xb", buffering=0) as handle:
+      handle.write(raw)
+      os.fsync(handle.fileno())
+  marker = hashlib.sha256(raw).hexdigest().encode("ascii") + b"\n"
+  with (root / "_SUCCESS").open("xb", buffering=0) as handle:
+      handle.write(marker)
+      os.fsync(handle.fileno())
+  directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+  try:
+      os.fsync(directory_fd)
+  finally:
+      os.close(directory_fd)
+  print(
+      "OFFLINE_GPIC_BLOB_RUNTIME_STATIC_JCC_PASS "
+      f"jobtag={jobtag} receipt_sha256={marker.decode('ascii').strip()}"
+  )
+  PYEOF

@@ -1,0 +1,388 @@
+# Read-only CPU forensics for the spent smoke-v2 checkpoint.  This job never
+# writes below v1/v2 or canonical smoke/final/formal leaves.
+name: evan-offarb-s256-20260718-smoke-v2-forensics-v1
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 384
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=16 MKL_NUM_THREADS=16 OPENBLAS_NUM_THREADS=16 NUMEXPR_NUM_THREADS=16
+  CACHE_TAG=${JCC_JOB_ID:-${JOB_ID:-smoke-v2-forensics-v1}}
+  export PYTHONPYCACHEPREFIX="/local/evan/stage256_20260718_pycache/$CACHE_TAG/$(hostname)"
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  ROOT=$BASE/offline_arb_stage256_20260718_semantic_v1
+  V2_RES=$ROOT/smoke_1x8_v2
+  V2_CK=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage256_20260718_causalmlf_offline_exact_v1_smoke_1x8_v2
+  OUTDIR=$ROOT/smoke_v2_activation_forensics_v1
+  OUT=$OUTDIR/ACTIVATION_FORENSICS_EVIDENCE_SUCCESS.json
+  SELF=jobs/offline_exact_stage256_20260718_smoke_v2_activation_forensics_v1.yaml
+  AUTH=docs/SMOKE_V2_ACTIVATION_FORENSICS_ADDENDUM.md
+  V2_YAML=jobs/offline_exact_stage256_20260718_smoke_1x8_v2.yaml
+  V2_ADDENDUM=docs/SMOKE_V2_HUMAN_DECISION_ADDENDUM.md
+  CFG=configs/stage256_20260718_causalmlf_offline_exact_v1.yaml
+  VERIFIER=scripts/offline_arb/verify_stage256_20260718_smoke_checkpoint.py
+  ARCH=networks/arch_mot.py
+  TRAIN_SRC=train.py
+  CHECKPOINT_SRC=training/checkpoint.py
+  FREEZE=$ROOT/FREEZE_VERIFY_SUCCESS.json
+  TRAIN_EVIDENCE=$V2_RES/TRAIN_EVIDENCE_V2.json
+  METRICS=$V2_CK/metrics.jsonl
+  TRAIN_LOG=$V2_RES/train.evan-offarb-s256-20260718-causalmlf-smoke-1x8-v2-nlxr.20260718T182626Z.log
+  GPIC=$V2_RES/gpicpreflight.evan-offarb-s256-20260718-causalmlf-smoke-1x8-v2-nlxr.20260718T182626Z.json
+  VERIFY_LOG=$V2_RES/checkpoint_verifier.evan-offarb-s256-20260718-causalmlf-smoke-1x8-v2-nlxr.20260718T182626Z.log
+  CHECKPOINT=$V2_CK/last.pt
+
+  for REQUIRED in "$SELF" "$AUTH" "$V2_YAML" "$V2_ADDENDUM" "$CFG" "$VERIFIER" \
+      "$ARCH" "$TRAIN_SRC" "$CHECKPOINT_SRC" "$FREEZE" \
+      "$TRAIN_EVIDENCE" "$METRICS" "$TRAIN_LOG" "$GPIC" "$VERIFY_LOG" "$CHECKPOINT"; do
+    test -f "$REQUIRED" && test ! -L "$REQUIRED" \
+      || { echo "FATAL: forensics prerequisite missing/non-regular: $REQUIRED"; exit 43; }
+  done
+  test ! -e "$OUTDIR" && test ! -L "$OUTDIR" \
+    || { echo "FATAL: create-once forensics output exists: $OUTDIR"; exit 40; }
+  for FORBIDDEN in "$ROOT/SMOKE_CHECKPOINT_SUCCESS.json" "$ROOT/SMOKE_SUCCESS.json" "$ROOT/FINAL_HEALTH_SUCCESS.json"; do
+    test ! -e "$FORBIDDEN" && test ! -L "$FORBIDDEN" \
+      || { echo "FATAL: downstream canonical leaf unexpectedly exists: $FORBIDDEN"; exit 42; }
+  done
+  test "$(sha256sum "$AUTH" | awk '{print $1}')" = e0a1091c8155e80b727f46bf5570db55053527f927faf5c8968c38c0714f4d72
+  test "$(sha256sum "$V2_YAML" | awk '{print $1}')" = 56f18a4e375c4af3ec3a9fdb022f14e06b93ec5956164ed8301201e8d718b9b0
+  test "$(sha256sum "$V2_ADDENDUM" | awk '{print $1}')" = 6000007d0438caea8af1714a5ad07aadf732fe6a9c5ad6eebd4d7bbacab6bb18
+  test "$(sha256sum "$CFG" | awk '{print $1}')" = 70c8b4cdadfd17af29e087a9718958bc3e5655feff7afaf8d48ed7bd32bef00a
+  test "$(sha256sum "$VERIFIER" | awk '{print $1}')" = 6716f55cb53a07a28b8e4d307cdae2d0682d3116052b5dc991606fc2e136e6c0
+  test "$(sha256sum "$ARCH" | awk '{print $1}')" = ab80127206aa6a78b4920da373231898ef5fa6eb250a9765d026207ed87bfc05
+  test "$(sha256sum "$TRAIN_SRC" | awk '{print $1}')" = 38cf641682dec5174f4f783fbf833eb8e7145e4819f70108bd316803ab616e88
+  test "$(sha256sum "$CHECKPOINT_SRC" | awk '{print $1}')" = af0039161adafd555d0a69af0df389eeadc9010b0af24bb5333f2c025e655409
+  test "$(sha256sum "$FREEZE" | awk '{print $1}')" = b520d45de584abb6118a7a5b07d69666fd6e8c9e2ab6570d08b53776f888fc68
+  test "$(sha256sum "$TRAIN_EVIDENCE" | awk '{print $1}')" = b228786d1dfc9e7ba3469e58a8cc49467e9fe34a20c147e5b2c3c940067b53de
+  test "$(sha256sum "$METRICS" | awk '{print $1}')" = acd9c39a845cec400b688f9eb6e605021cf6b56b4d67454ceb11957c951e00ac
+  test "$(sha256sum "$TRAIN_LOG" | awk '{print $1}')" = c2c701d4be9088c1e074cf0d09806f5a5bf2f2e74fe4618f800589a1bd82eabe
+  test "$(sha256sum "$GPIC" | awk '{print $1}')" = 715dbabca764d434635383f29bd23c7381ecb3e47e168338f95d57bc1639ae18
+  test "$(sha256sum "$VERIFY_LOG" | awk '{print $1}')" = e2293dfe0a2bbdd32286ad889edc59e10050569f217f1b655049957f36f31dcd
+  test "$(stat -c %s "$CHECKPOINT")" = 26328353144
+  mkdir "$OUTDIR"
+
+  timeout --signal=TERM --kill-after=60s 7200s \
+    "$PY" - "$CHECKPOINT" "$OUT" "$SELF" "$AUTH" "$TRAIN_EVIDENCE" "$METRICS" \
+      "$TRAIN_LOG" "$GPIC" "$VERIFY_LOG" "$V2_YAML" "$V2_ADDENDUM" "$CFG" "$VERIFIER" \
+      "$ARCH" "$TRAIN_SRC" "$CHECKPOINT_SRC" "$FREEZE" <<'PYEOF'
+  import hashlib, json, math, os, pathlib, stat, sys
+  import torch
+
+  (checkpoint_p, output, self_p, authority_p, train_evidence_p, metrics_p,
+   train_log_p, gpic_p, verify_log_p, v2_yaml_p, v2_addendum_p, config_p,
+   verifier_p, arch_p, train_src_p, checkpoint_src_p, freeze_p) = map(pathlib.Path, sys.argv[1:18])
+
+  def identity(path):
+      st = path.stat()
+      return {
+          "path": str(path), "bytes": int(st.st_size), "device": int(st.st_dev),
+          "inode": int(st.st_ino), "mode": int(stat.S_IMODE(st.st_mode)),
+          "mtime_ns": int(st.st_mtime_ns),
+      }
+
+  def sha256(path):
+      h = hashlib.sha256()
+      with path.open("rb", buffering=0) as f:
+          for block in iter(lambda: f.read(16 << 20), b""):
+              h.update(block)
+      return h.hexdigest()
+
+  def tensor_metrics(value):
+      if not torch.is_tensor(value):
+          return {"is_tensor": False, "finite": False}
+      finite = bool(torch.isfinite(value).all())
+      work = value.detach().float()
+      result = {
+          "is_tensor": True, "shape": list(value.shape), "dtype": str(value.dtype),
+          "finite": finite,
+          "l2": float(work.norm().item()) if finite else None,
+          "max_abs": float(work.abs().max().item()) if finite and work.numel() else (0.0 if finite else None),
+          "nonzero_elements": int(torch.count_nonzero(work).item()),
+          "elements": int(work.numel()),
+      }
+      del work
+      return result
+
+  def delta_metrics(current, average):
+      if not torch.is_tensor(current) or not torch.is_tensor(average):
+          return {"available": False, "finite": False, "shape_dtype_match": False}
+      shape_dtype_match = current.shape == average.shape and current.dtype == average.dtype
+      if not shape_dtype_match:
+          return {"available": True, "finite": False, "shape_dtype_match": False}
+      delta = current.detach().float() - average.detach().float()
+      finite = bool(torch.isfinite(delta).all())
+      result = {
+          "available": True, "finite": finite, "shape_dtype_match": True,
+          "l2": float(delta.norm().item()) if finite else None,
+          "max_abs": float(delta.abs().max().item()) if finite and delta.numel() else (0.0 if finite else None),
+          "changed_elements": int(torch.count_nonzero(delta).item()),
+          "elements": int(delta.numel()),
+      }
+      del delta
+      return result
+
+  before = identity(checkpoint_p)
+  checkpoint_sha = sha256(checkpoint_p)
+  after_hash = identity(checkpoint_p)
+  assert before == after_hash and before["bytes"] == 26328353144, (before, after_hash)
+  checkpoint = torch.load(checkpoint_p, map_location="cpu", weights_only=False, mmap=True)
+  state, ema, optimizer = checkpoint.get("trainable_state"), checkpoint.get("ema"), checkpoint.get("optimizer")
+  assert isinstance(state, dict) and isinstance(ema, dict) and isinstance(optimizer, dict)
+  opt_state = optimizer.get("state")
+  assert isinstance(opt_state, dict)
+  param_groups = optimizer.get("param_groups")
+  assert isinstance(param_groups, list)
+  state_keys, ema_keys, opt_keys = set(state), set(ema), set(opt_state)
+  keys = sorted(state_keys)
+  union_keys = sorted(state_keys | ema_keys | opt_keys)
+  keyset_sha = hashlib.sha256(("\n".join(keys) + "\n").encode()).hexdigest()
+  global_step = int(checkpoint.get("global_step", -1))
+  ablation_fp = checkpoint.get("ablation_fp")
+  ablation_sha = (
+      hashlib.sha256(json.dumps(ablation_fp, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+      if isinstance(ablation_fp, dict) else None
+  )
+  def finite_float(value):
+      try:
+          converted = float(value)
+      except (TypeError, ValueError, OverflowError):
+          return None
+      return converted if math.isfinite(converted) else None
+
+  param_group_evidence = []
+  for group in param_groups:
+      source = group if isinstance(group, dict) else {}
+      params = source.get("params", [])
+      param_names = [str(value) for value in params]
+      param_group_evidence.append({
+          "parameter_count": len(param_names),
+          "parameter_keyset_sha256": hashlib.sha256(("\n".join(sorted(param_names)) + "\n").encode()).hexdigest(),
+          "weight_decay": finite_float(source.get("weight_decay")),
+          "lr": finite_float(source.get("lr")),
+          "initial_lr": finite_float(source.get("initial_lr")),
+          "betas": [finite_float(value) for value in source.get("betas", ())],
+          "eps": finite_float(source.get("eps")),
+      })
+  optimizer_hparams_pass = (
+      len(param_group_evidence) == 1
+      and param_group_evidence[0]["parameter_count"] == 483
+      and param_group_evidence[0]["parameter_keyset_sha256"] == "6c61b43d30a8bde2f13fc8a91e30a8a0de271934ba5c3fd72df392cd027a4424"
+      and param_group_evidence[0]["weight_decay"] == 0.0
+      and param_group_evidence[0]["betas"] == [0.9, 0.95]
+      and param_group_evidence[0]["eps"] == 1.0e-8
+      and param_group_evidence[0]["initial_lr"] == 2.121e-4
+      and param_group_evidence[0]["lr"] == 8.484e-7
+  )
+  scheduler_state = checkpoint.get("scheduler")
+  scheduler_pass = (
+      isinstance(scheduler_state, dict)
+      and int(scheduler_state.get("last_epoch", -1)) == 3
+      and [float(value) for value in scheduler_state.get("base_lrs", [])] == [2.121e-4]
+      and [float(value) for value in scheduler_state.get("_last_lr", [])] == [8.484e-7]
+  )
+  structural = {
+      "state_count": len(state_keys), "ema_count": len(ema_keys),
+      "optimizer_state_count": len(opt_keys),
+      "state_missing_from_ema": sorted(state_keys - ema_keys),
+      "state_missing_from_optimizer": sorted(state_keys - opt_keys),
+      "ema_extra_vs_state": sorted(ema_keys - state_keys),
+      "optimizer_extra_vs_state": sorted(opt_keys - state_keys),
+      "state_ema_keyset_equal": state_keys == ema_keys,
+      "state_optimizer_keyset_equal": state_keys == opt_keys,
+      "expected_state_count": len(state_keys) == 483,
+      "expected_keyset_sha256": keyset_sha == "6c61b43d30a8bde2f13fc8a91e30a8a0de271934ba5c3fd72df392cd027a4424",
+      "expected_global_step": global_step == 3,
+      "expected_ablation_fingerprint": ablation_sha == "70546507a768a9d01705b8118b6e3cfea3f055f22db5e9bcdfb3e25e7d022642",
+      "expected_optimizer_hparams": optimizer_hparams_pass,
+      "expected_scheduler_state": scheduler_pass,
+  }
+
+  predicates = {
+      "final_proj_out": lambda k: k in {"proj_out.weight", "proj_out.bias"},
+      "adapter_out_proj": lambda k: "text_adapter_moe_gen.out_proj" in k,
+      "adapter_out_norm": lambda k: "text_adapter_moe_gen.out_norm" in k,
+      "adapter_blocks": lambda k: "text_adapter_moe_gen.blocks" in k,
+      "mlf_gate": lambda k: k.endswith("multi_layer_fusion_moe_gen.gate"),
+      "mlf_logits": lambda k: k.endswith("multi_layer_fusion_moe_gen.logits"),
+      "text_kv": lambda k: "text_k_proj_moe_gen" in k or "text_v_proj_moe_gen" in k,
+      "text_k_norm": lambda k: "text_k_norm_moe_gen" in k,
+  }
+  expected_counts = {
+      "final_proj_out": 2, "adapter_out_proj": 1, "adapter_out_norm": 1, "adapter_blocks": 22,
+      "mlf_gate": 1, "mlf_logits": 1, "text_kv": 56, "text_k_norm": 28,
+  }
+  groups = {}
+  for group, predicate in predicates.items():
+      selected = [key for key in union_keys if predicate(key)]
+      rows = []
+      for key in selected:
+          current, average, record = state.get(key), ema.get(key), opt_state.get(key)
+          parameter_metrics, ema_metrics = tensor_metrics(current), tensor_metrics(average)
+          delta = delta_metrics(current, average)
+          record_valid = isinstance(record, dict) and {"step", "exp_avg", "exp_avg_sq"}.issubset(record)
+          first = record.get("exp_avg") if record_valid else None
+          second = record.get("exp_avg_sq") if record_valid else None
+          first_metrics, second_metrics = tensor_metrics(first), tensor_metrics(second)
+          optimizer_shapes_match = (
+              torch.is_tensor(current) and torch.is_tensor(first) and torch.is_tensor(second)
+              and current.shape == first.shape == second.shape
+          )
+          step_value, step_valid = None, False
+          if record_valid:
+              raw_step = record["step"]
+              if torch.is_tensor(raw_step):
+                  if raw_step.numel() == 1 and bool(torch.isfinite(raw_step).all()):
+                      step_value, step_valid = int(raw_step.item()), True
+              else:
+                  try:
+                      step_value, step_valid = int(raw_step), True
+                  except (TypeError, ValueError, OverflowError):
+                      pass
+          moments_nonzero = (
+              record_valid and optimizer_shapes_match
+              and first_metrics.get("finite") is True and second_metrics.get("finite") is True
+              and first_metrics.get("nonzero_elements", 0) > 0
+              and second_metrics.get("nonzero_elements", 0) > 0
+          )
+          rows.append({
+              "key": key, "parameter_present": key in state, "ema_present": key in ema,
+              "optimizer_state_present": key in opt_state, "parameter": parameter_metrics,
+              "ema": ema_metrics, "trainable_ema_delta": delta,
+              "optimizer_record_valid": record_valid, "optimizer_shapes_match": optimizer_shapes_match,
+              "optimizer_step": step_value, "optimizer_step_valid": step_valid,
+              "exp_avg": first_metrics, "exp_avg_sq": second_metrics,
+              "optimizer_moments_nonzero": moments_nonzero,
+          })
+      groups[group] = {
+          "key_count": len(rows), "expected_key_count": expected_counts[group],
+          "expected_key_count_match": len(rows) == expected_counts[group],
+          "changed_key_count": sum(
+              row["trainable_ema_delta"].get("finite") is True
+              and row["trainable_ema_delta"].get("changed_elements", 0) > 0 for row in rows
+          ),
+          "optimizer_moment_nonzero_key_count": sum(row["optimizer_moments_nonzero"] for row in rows),
+          "optimizer_step_exact3_key_count": sum(row["optimizer_step_valid"] and row["optimizer_step"] == 3 for row in rows),
+          "optimizer_step_values": sorted(set(row["optimizer_step"] for row in rows if row["optimizer_step_valid"])),
+          "invalid_parameter_or_ema_keys": [
+              row["key"] for row in rows
+              if row["parameter"].get("finite") is not True or row["ema"].get("finite") is not True
+              or row["trainable_ema_delta"].get("finite") is not True
+          ],
+          "unchanged_keys": [
+              row["key"] for row in rows
+              if row["trainable_ema_delta"].get("finite") is True
+              and row["trainable_ema_delta"].get("changed_elements") == 0
+          ],
+          "zero_moment_keys": [row["key"] for row in rows if not row["optimizer_moments_nonzero"]],
+          "rows": rows,
+      }
+
+  adapter = groups["adapter_blocks"]
+  expected_norm_suffixes = (".ln1.weight", ".ln2.weight", ".q_norm.weight", ".k_norm.weight")
+  expected_unchanged = sorted(
+      key for key in [key for key in keys if predicates["adapter_blocks"](key)]
+      if key.endswith(expected_norm_suffixes)
+  )
+  adapter_keys = [key for key in keys if predicates["adapter_blocks"](key)]
+  dense_keys = sorted(key for key in adapter_keys if not key.endswith(expected_norm_suffixes))
+  changed_keys = {
+      row["key"] for row in adapter["rows"]
+      if row["trainable_ema_delta"].get("finite") is True
+      and row["trainable_ema_delta"].get("changed_elements", 0) > 0
+  }
+  all_dense_changed = len(dense_keys) == 14 and all(key in changed_keys for key in dense_keys)
+  all_adapter_moments_nonzero = (
+      adapter["optimizer_moment_nonzero_key_count"] == adapter["key_count"]
+      and adapter["optimizer_step_exact3_key_count"] == adapter["key_count"]
+  )
+  all_reported_moments_nonzero = all(
+      group["expected_key_count_match"]
+      and not group["invalid_parameter_or_ema_keys"]
+      and group["optimizer_moment_nonzero_key_count"] == group["key_count"]
+      and group["optimizer_step_exact3_key_count"] == group["key_count"]
+      for group in groups.values()
+  )
+  structural_ok = all(structural[name] for name in (
+      "state_ema_keyset_equal", "state_optimizer_keyset_equal", "expected_state_count",
+      "expected_keyset_sha256", "expected_global_step", "expected_ablation_fingerprint",
+      "expected_optimizer_hparams", "expected_scheduler_state",
+  ))
+  all_zero_init_openers_changed = all(
+      groups[name]["changed_key_count"] == groups[name]["key_count"]
+      for name in ("final_proj_out", "adapter_out_proj", "mlf_gate", "mlf_logits")
+  )
+  exact_norm_only_gap = sorted(adapter["unchanged_keys"]) == expected_unchanged
+  proxy_false_negative_candidate = (
+      adapter["changed_key_count"] == 14 and all_dense_changed
+      and all_adapter_moments_nonzero and all_reported_moments_nonzero
+      and structural_ok and all_zero_init_openers_changed
+      and exact_norm_only_gap
+  )
+  after_analysis = identity(checkpoint_p)
+  assert after_analysis == before, (before, after_analysis)
+  bindings = {}
+  for name, path in {
+      "job_yaml": self_p, "authority": authority_p, "train_evidence_v2": train_evidence_p,
+      "metrics_v2": metrics_p, "train_log_v2": train_log_p, "gpic_v2": gpic_p,
+      "verifier_log_v2": verify_log_p, "v2_yaml": v2_yaml_p,
+      "v2_addendum": v2_addendum_p, "config": config_p, "verifier": verifier_p,
+      "architecture_source": arch_p, "training_source": train_src_p,
+      "checkpoint_source": checkpoint_src_p, "freeze_verify": freeze_p,
+  }.items():
+      bindings[name] = {"path": str(path), "sha256": sha256(path)}
+  value = {
+      "schema_version": "stage256_20260718_smoke_v2_activation_forensics_v1",
+      "status": "PASS", "evidence_only_not_smoke_success": True,
+      "source_failed_job": "evan-offarb-s256-20260718-causalmlf-smoke-1x8-v2-nlxr",
+      "global_step": global_step, "trainable_count": len(keys), "optimizer_state_count": len(opt_state),
+      "keyset_sha256": keyset_sha, "ablation_fingerprint": ablation_fp,
+      "ablation_fingerprint_sha256": ablation_sha,
+      "checkpoint": {**before, "sha256": checkpoint_sha},
+      "bindings": bindings, "structural_identity": structural,
+      "optimizer_param_groups": param_group_evidence, "scheduler_state": scheduler_state,
+      "groups": groups,
+      "diagnosis": {
+          "adapter_block_changed_key_count": adapter["changed_key_count"],
+          "adapter_block_key_count": adapter["key_count"],
+          "adapter_block_optimizer_moment_nonzero_key_count": adapter["optimizer_moment_nonzero_key_count"],
+          "all_14_adapter_dense_parameters_changed": all_dense_changed,
+          "exact_norm_only_parameter_gap": exact_norm_only_gap,
+          "all_adapter_block_optimizer_moments_nonzero": all_adapter_moments_nonzero,
+          "all_reported_group_optimizer_moments_nonzero": all_reported_moments_nonzero,
+          "all_zero_init_openers_changed": all_zero_init_openers_changed,
+          "structural_identity_pass": structural_ok,
+          "old_parameter_delta_proxy_false_negative_candidate": proxy_false_negative_candidate,
+          "recommended_action": (
+              "REVIEW_MOMENT_BACKED_V3_GATE" if proxy_false_negative_candidate
+              else "STOP_REAL_OR_AMBIGUOUS_LEARNING_PATH_FAILURE"
+          ),
+      },
+  }
+  raw = (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
+  tmp = output.with_name(f".{output.name}.tmp.{os.getpid()}")
+  assert not output.exists() and not output.is_symlink() and not tmp.exists()
+  fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+  with os.fdopen(fd, "wb") as f:
+      f.write(raw); f.flush(); os.fsync(f.fileno())
+  assert not output.exists() and not output.is_symlink()
+  os.link(tmp, output)
+  os.unlink(tmp)
+  directory = os.open(output.parent, os.O_RDONLY)
+  try:
+      os.fsync(directory)
+  finally:
+      os.close(directory)
+  print(json.dumps({"status": "PASS", "checkpoint_sha256": checkpoint_sha, "diagnosis": value["diagnosis"]}, sort_keys=True))
+  PYEOF
+
+  test -f "$OUT" && test ! -L "$OUT"
+  echo "SMOKE_V2_ACTIVATION_FORENSICS_PASS sha256=$(sha256sum "$OUT" | awk '{print $1}')"

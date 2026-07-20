@@ -1,0 +1,88 @@
+# SUBMISSION-BLOCKED template.  Fill the three immutable release bindings
+# below only after the full verifier has published both _SUCCESS planes.
+name: evan-offarb-prod-gpic-semantic-ab
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 128
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+  export NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch
+  unset OFFLINE_ARB_IO_TELEMETRY_DIR OFFLINE_ARB_ATTEMPT_JOBTAG
+  unset OFFLINE_ARB_ATTEMPT_NONCE OFFLINE_ARB_ATTEMPT_HOST
+  unset OFFLINE_ARB_SMOKE_DATASET_CONFIG
+
+  # These are intentionally empty in source control.  A submitted copy must
+  # bind one exact publication; using "latest" or discovering a release is forbidden.
+  ARTIFACT_ROOT="/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_gpic_blob_v1_release/evan-mot-crop-offlinearb-gpic-s3-production-build-zg8g"
+  ARTIFACT_BUILDTAG="evan-mot-crop-offlinearb-gpic-s3-production-build-zg8g"
+  MANIFEST_SHA256="a18ba1f1250e3b00abdc1051dc71e08a254b8855d5b61b9975e88d2e6ae2ee05"
+  test -n "$ARTIFACT_ROOT" || { echo "FATAL: ARTIFACT_ROOT is submission-blocked"; exit 64; }
+  test -n "$ARTIFACT_BUILDTAG" || { echo "FATAL: ARTIFACT_BUILDTAG is submission-blocked"; exit 64; }
+  test -n "$MANIFEST_SHA256" || { echo "FATAL: MANIFEST_SHA256 is submission-blocked"; exit 64; }
+  case "$MANIFEST_SHA256" in (*[!0-9a-f]*|'') echo "FATAL: malformed manifest SHA"; exit 64;; esac
+  [ "${#MANIFEST_SHA256}" -eq 64 ] || { echo "FATAL: malformed manifest SHA length"; exit 64; }
+  [ "$(basename "$ARTIFACT_ROOT")" = "$ARTIFACT_BUILDTAG" ] \
+    || { echo "FATAL: artifact root/buildtag mismatch"; exit 64; }
+  [ "$ARTIFACT_BUILDTAG" != latest ] || { echo "FATAL: latest is not an immutable buildtag"; exit 64; }
+
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  CFG=$REPO/configs/stage256_offline_exact_v1.yaml
+  PLAN=$BASE/offline_arb_plans_v1/w4_smoke/plan
+  CAT=$BASE/offline_arb_catalog_v1
+  RUNNER=$REPO/scripts/offline_arb/run_offline_gpic_blob_semantic_ab.py
+  YAML_SELF=$REPO/jobs/offline_arb_gpic_blob_semantic_ab_PRODUCTION.yaml
+  HOST=$(hostname); IDX=${HOST##*-}; JOBTAG=${HOST%-*}
+  [ "$IDX" = 0 ] || { echo "FATAL: semantic gate requires one JCC worker"; exit 20; }
+  OUT=$BASE/offline_gpic_blob_semantic_ab_v1/$JOBTAG
+  test ! -e "$OUT" && test ! -L "$OUT" \
+    || { echo "FATAL: semantic output namespace already exists"; exit 65; }
+  mkdir -p "$OUT" /local/evan/cache/huggingface /local/evan/cache/torch
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/gpic_blob_semantic.$JOBTAG
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+
+  common=(--ranks 4 --fresh-steps 8 --resume-offset 4 --resume-steps 4 \
+    --config "$CFG" --plan-root "$PLAN" --catalog-root "$CAT" \
+    --artifact-root "$ARTIFACT_ROOT" --buildtag "$ARTIFACT_BUILDTAG" \
+    --manifest-sha256 "$MANIFEST_SHA256" --job-yaml "$YAML_SELF")
+
+  run_arm() {
+    backend=$1; prefix=$2
+    pids=()
+    for rank in 0 1 2 3; do
+      timeout --signal=TERM --kill-after=30s 10800s \
+        "$PY" "$RUNNER" capture --backend "$backend" --rank "$rank" \
+          "${common[@]}" --output "$OUT/$prefix.rank$rank.json" \
+          > "$OUT/$prefix.rank$rank.log" 2>&1 &
+      pids+=("$!")
+    done
+    rc=0
+    for pid in "${pids[@]}"; do wait "$pid" || rc=$?; done
+    if [ "$rc" -ne 0 ]; then
+      for rank in 0 1 2 3; do tail -200 "$OUT/$prefix.rank$rank.log" || true; done
+      echo "FATAL: semantic arm=$backend failed rc=$rc"; exit "$rc"
+    fi
+  }
+
+  # Source and blob never overlap, preventing one arm from perturbing the
+  # other's S3-mount concurrency while still using four CPU processes/arm.
+  run_arm source_files_v1 source
+  run_arm offline_gpic_blob_v1 blob
+  "$PY" "$RUNNER" compare --input-root "$OUT" --ranks 4 \
+    --output "$OUT/aggregate.json"
+  AGG_SHA=$(sha256sum "$OUT/aggregate.json" | awk '{print $1}')
+  printf 'PASS|%s|%s|%s|%s|%s\n' "$JOBTAG" "$ARTIFACT_BUILDTAG" \
+    "$MANIFEST_SHA256" "$AGG_SHA" "$(date -u +%Y%m%dT%H%M%SZ)" > "$OUT/_SUCCESS.tmp"
+  mv "$OUT/_SUCCESS.tmp" "$OUT/_SUCCESS"
+  echo "GPIC_BLOB_SEMANTIC_AB_JOB_PASS output=$OUT aggregate_sha256=$AGG_SHA"

@@ -1,0 +1,70 @@
+{
+ "key": "monet_real",
+ "facts": {
+  "1_存储形态": {
+   "结论": "MONET/synth 图像在源侧是 webdataset .tar(未压缩) + 同名 .parquet 配对；monet_real 采样manifest(rich_v1)另存一份，只含定位字段(src_root/src_shard/src_key)+width/height+采样元数据，不含图像/caption文本。",
+   "src_root_实际值": "/s3-mewtant-raw-datasets/jasperai/monet/v1.1.0 (mountpoint-s3, ro)。子源目录: cc12m/commoncatalog-cc-by/coyo/diffusion-aesthetic-4k/laion/megalith10m(6个，monet_real范围；'synthetic'子源在同一MROOT下但被 synthetic_v1 域单独取用，不属monet_real)。",
+   "证据_doc": "docs/AAA数据交付文档_GPIC+MONET+anime_v2_20260617.md:27,49,54,56 — 明确 src_root=/s3-mewtant-raw-datasets/jasperai/monet/v1.1.0，图像必须从 .tar 读(非384px thumbnail)，src_shard 形如 cc12m/0-0/000000.parquet 对应同名 .tar",
+   "证据_builder脚本": "/fsx/evan/mot_code/data_analysis/scripts/t5_build_rich_manifest.py:38-39 MROOT='/s3-mewtant-raw-datasets/jasperai/monet/v1.1.0'; :187-191 uid='monet:'+id, src_root=MROOT, src_shard=mm['shard'], src_key=mm['id']",
+   "抽样ls": "ls /s3-mewtant-raw-datasets/jasperai/monet/v1.1.0/cc12m/0-0/ → 000000.parquet+000000.tar 配对(逐shard均如此)；6个子源目录各有90个 '<N>-0' 子目录(命令: ls .../<sub>/ | wc -l → 均90)",
+   "tar是否压缩": "未压缩(POSIX ustar)。命令: head -c2 000000.tar | od -An -tx1 → '2e 2f'(非gzip魔数1f8b)；dd skip=257 count=8 | od -An -c → 'ustar\\0 00'(ustar魔数命中，标准非压缩tar header)。",
+   "tar大小": "非均一2.2GB。实测: cc12m/0-0/000000.tar=2,225,305,600B(~2.2GB，命中任务已知线索,但只是6子源之一); laion/0-0/000000.tar=3,966,474,240B(~3.97GB); coyo/0-0/000000.tar=5,463,244,800B(~5.46GB); megalith10m/0-0/000000.tar=3,971,809,280B(~3.97GB); diffusion-aesthetic-4k/0-0/000000.tar=1,415,567,360B(~1.4GB); commoncatalog-cc-by/0-0/000000.tar=13,637,785,600B(~13.6GB)。子源体量(见2_item身份的source_counts)显示 coyo/laion 各占40M行池的~34%(各13.56M行)，是真正的大头，其tar级别是~4-5.5GB非2.2GB — 任务给的'2.2GB级'线索只精确匹配cc12m(占9.9%行)。",
+   "每sample在tar里的member数": "1 sample = 多个 tar member(image+json+embedding pth三件套)，非1对1。证据(代码，非本机新扫tar，遵守'禁止全量扫tar'): training/dataline/image_fetch.py:106 stream_tar_images docstring '成员名形如 {key}.jpg / {key}.json / {key}.*.pth，只取 .jpg'；:113 'if not m.isfile() or not m.name.endswith(\".jpg\"): continue' 显式跳过非.jpg成员。docs/AAA数据交付文档...md:49 '已实测：.tar 成员名 {id}.jpg/.json/.embedding_*.pth...还带每图的 SANA-VAE latent'。当前消费入口只用.jpg，json/pth成员被读tar流时跳过但仍会被tarfile顺序扫过(header级)。"
+  },
+  "2_item身份": {
+   "稳定唯一ID": "uid 字段，格式 'monet:' + id（id 即 src_key 即源webdataset的 __key__）。跨5个域(anime/monet_real/gpic/synthetic/textatlas)因带域前缀而全局唯一；域内(单靠 src_key)据文档称'各源已抽验一致'唯一，但未在本次侦察中做全量40M行的去重验证(仅footer,未读全列)。",
+   "证据": "data_analysis/scripts/t5_build_rich_manifest.py:187-191 'uid': 'monet:' + mm['id'].astype(str), 'src_key': mm['id'].astype(str); docs/AAA数据交付文档...md:56 'src_key == id == __key__(各源已抽验一致)'",
+   "manifest路径": "/s3-pixai-test-uw2/evan/mot_filtering_v1/t5_manifest/rich_v1/monet/monet_{0000..0255}.parquet (256个shard文件)",
+   "schema_footer_monet_0000": "uid(large_string), dataset, sub_source, src_root, src_shard, src_key, width(int32), height(int32), res_bucket, aes(float), aes_scorer, cluster_id(int32), dominant_cat, caption_type, caption_tier(int8), has_t1..has_t4(int8), cap_i1/cap_original/cap_florence/cap_internvl/cap_sharegpt4v/cap_gemini(int8), tok_i1/tok_original/tok_florence/tok_internvl/tok_sharegpt4v/tok_gemini(int16), synthetic(int8), holdout(int8)。注意：无 elig_256/512/1024 列(REDESIGN变化)。",
+   "num_rows": "单shard156250行(monet_0000/0001/0002/0254/0255 均footer核实一致=156250)；256 shard × 156250 = 40,000,000 行整；且 monet_global_stats_rich_v1.json 的 source_counts 六项求和恰=40,000,000，交叉印证。",
+   "命令产出摘录": "/fsx/evan/mot_code/venv-gpu/bin/python -c 用ParquetFile(...).metadata.num_rows → monet_0000.parquet: num_rows=156250, num_row_groups=1",
+   "sub_source分布(来自stats cache非parquet全量读)": "source_counts (json文件 /fsx/evan/mot_code/data_analysis/outputs/monet_global_stats_rich_v1.json, 272KB纯文本, 已直接load): cc12m=3,945,126; commoncatalog-cc-by=5,497,680; coyo=13,562,099; diffusion-aesthetic-4k=11,688; laion=13,562,098; megalith10m=3,421,309；_n_shards指纹=256(与当前256shard吻合，cache未过期)"
+  },
+  "3_宽高元数据": {
+   "manifest带w_h": "是。rich_v1/monet schema 含 width(int32)/height(int32) 列（footer已确认，见上）。",
+   "代码用法_三loader": {
+    "load_real_synth_shard(manifest_index.py:285-363)": "line296注释:'rich_v1/synthetic_v1 无 elig_* 列 → 不读, 下面从 w/h 派生'；line303-310: if elig_256/512/1024 三列都在schema→直接读；否则(rich_v1即此分支) `_short=min(width,height)`，`e256=_short>=256`等 现算eligibility。line345-348 把 width/height 原样带出到返回dict(注释写'bucketdist快速审计用，免取图；其余路径不读'——但实际在无elig列的REDESIGN路径下，width/height是eligibility计算的直接输入，注释与当前REDESIGN分支行为不完全一致，偏stale)。",
+    "load_textatlas_shard(manifest_index.py:132-160)": "line143-151: w/h读出后直接算 elig_256 = short_dim>=256(sidecar只产elig_512/1024，256现算)；width/height同样注释'bucketdist快速审计用...其余路径不读'但同样被用于该次elig计算。",
+    "load_anime_shard(manifest_index.py:408-491)": "line447-449 读width/height算short_dim，line477-479 elig_256全1、elig_512=short_dim>=512、elig_1024=short_dim>=1024——w/h直接驱动三级eligibility。"
+   },
+   "iter_real_synth_shard消费elig": "complete_dataset.py:133 `elig = arr[f'elig_{image_size}']`; idxs=np.where(elig)[0] — 即最终按 image_size(256/512/1024) 用上面算出的 elig 位图筛选参与行，故 width/height(经短边阈值)直接决定该item在当前stage是否入池。",
+   "EXIF朝向": {
+    "结论": "代码全链路(training/dataline/*)零EXIF处理。decode_rgb (image_fetch.py:221-227) = `Image.open(io.BytesIO(raw)).convert('RGB')`，未调用 ImageOps.exif_transpose 或任何orientation逻辑；仓库grep 'exif|orientation|Orientation' 于 training/、scripts/、docs/AAA*.md 结果为空(零命中)。",
+    "manifest_w_h来源": "rich_v1 的 width/height 并非本仓库对图像重新解码得到，而是沿用上游 jasperai/monet 源数据集自带的 width/height 列(源parquet footer已核实存在 width(double)/height(double) 列，与 caption/embedding 等同源；t5_build_rich_manifest.py:130-141,174-191 从更上游的 monet_manifest/gpic_manifest_base 池直接取用 width/height，未见任何PIL重解码步骤)。",
+    "未决问题": "上游 jasperai/monet 数据集自身构建 width/height 时是否已应用EXIF方向校正，无法从本仓库代码判定(外部数据集属性)。仅有文档一句'已实测：...尺寸恰好等于manifest的width/height'(docs/AAA数据交付文档...md:49)作为团队此前抽样验证的说法，但这是文档断言非可复核的代码保证，且未注明抽样规模/方法。若Phase-1直接信任manifest w/h做bucket指派，此项EXIF一致性是当前唯一未被代码/自动化测试覆盖的假设点。"
+   }
+  },
+  "4_随机访问": {
+   "现状": "顺序流，非随机访问。stream_tar_images(image_fetch.py:103-130) 用 `tarfile.open(tar_path, 'r|')`(streaming模式，显式禁random seek，注释line109'流式，不建全量索引')，对某shard的wanted_keys集合，从tar头顺序往后扫，边扫边匹配边extractfile，直到wanted耗尽或tar结束；不是'按需seek到某item'。",
+   "调用链": "iter_real_synth_shard (complete_dataset.py:170-187) 对每个src_shard，把该shard内所有eligible行的src_key集合一次性传给stream_tar_images当wanted_keys —— 即'一个tar内所有想要的item一次性顺序扫出'，而非逐item随机fetch。",
+   "已有的随机单成员读类": "image_fetch.py:273-309 定义了 `TarMemberReader`(用 tarfile.open(tar_path,'r')建索引 + tf.getmember(key+'.jpg') 随机取单个成员)，但类文档自称'注意：首次getmember会扫全量header(S3上慢)，主路径请用stream_tar_images顺序读'。grep 'TarMemberReader' training/ 只命中其定义所在行(image_fetch.py:273)，complete_dataset.py 的 import 列表(complete_dataset.py:29-30)未包含TarMemberReader —— 确认当前生产路径完全未使用它，是未接线的dead code/预留能力。",
+   "offset_length索引是否已存在": "不存在。grep -rn 'TarInfo|tar_index|tarindex|member_offset|offset.*length|wids|getmembers' training/ 于training目录为0命中；rich_v1 manifest schema(见上)也不含任何offset/length类列。要做真正的'tar range-read'随机访问，需要新建一份 (uid或src_key) → (tar_path, byte_offset, length) 的独立索引，目前系统里没有任何持久化的此类数据。"
+  },
+  "5_静态vs动态": {
+   "结论": "静态、离线批产、训练只读。rich_v1/monet manifest 由独立脚本 t5_build_rich_manifest.py 一次性批跑生成到固定路径(/s3-pixai-test-uw2/evan/mot_filtering_v1/t5_manifest/rich_v1/monet/*.parquet + summary.json)，训练时 list_shards/load_real_synth_shard 只glob读取现成parquet，不在训练进程内重新生成或修改manifest。",
+   "证据": "t5_build_rich_manifest.py:1-16 docstring 'Outputs (to t5_manifest/rich_v1/): gpic/*.parquet, monet/*.parquet...'（离线batch job语义，环境变量RICH_OUT/N_OUT_SHARDS控制输出，非train-time触发）；manifest_index.py:list_shards(88-113) 只做 glob.glob 只读枚举。",
+   "源tar本身": "/s3-mewtant-raw-datasets 挂载为 'mountpoint-s3 on /s3-mewtant-raw-datasets type fuse (ro,...)' —— 只读挂载，训练/manifest构建都不可能写回，源数据集固定不变（除非上游jasperai/monet发布新版本v1.1.0→vX）。"
+  },
+  "6_现有fetch_cache": {
+   "monet_tar_path": "image_fetch.py:98-100 — `os.path.join(src_root, src_shard.replace('.parquet', '.tar'))`，从manifest的src_shard(.parquet结尾)派生同名.tar路径。",
+   "stream_tar_images": "image_fetch.py:103-130 — 主取图函数，'r|'流式顺序读，yield (key, jpg_bytes)；tar损坏/找不到(FileNotFoundError/tarfile.TarError/OSError)时: 采样打印(前20次或每100次一次)+计数进FETCH_STATS['tar_err:...']，然后 `return`(image_fetch.py:130) —— 即时中止本次generator，不重试、不抛异常。",
+   "caption回源(非图像但同机制)": "_load_monet_caption_src (complete_dataset.py:85-96) 每次访问某src_shard时，对源parquet(非采样manifest，是jasperai/monet原始parquet)整shard读取caption列建 id→caption dict，无跨调用缓存(每次producer轮到该shard都重新pq.read_table一次；~10000行/shard，非常轻)。",
+   "monet专属磁盘缓存": "无。cache_dir参数只存在于anime的fetch_url_bytes(image_fetch.py:133-215, cache_dir=anime_cache_dir)；gpic/monet/synthetic 三个走本地挂载/tar的域，image_fetch.py里对应函数(gpic_path/read_gpic_bytes/monet_tar_path/stream_tar_images)均无cache_dir形参，无disk cache层。",
+   "失败重试语义": "MONET/synth: 无item级重试。tar流式读中断时该shard剩余wanted key直接放弃(见上)；上层_Producer.run()(complete_dataset.py:348-421)对整个shard迭代器包一层try/except，任何异常(含tar错误传播的情况)都被捕获打印'shard {shard} 跳过'且不重试该shard，只有外层while循环下一次'shuffle(order)重新过一遍全部shard列表'(complete_dataset.py:366-367)时才会有机会重新完整访问同一shard —— 即重试粒度是'下一次生产者epoch'级，不是item或shard级即时重试。GPIC(read_gpic_bytes)同样返回None即跳过、无重试。对照组anime(fetch_url_bytes)才有真正的item级重试(最多3次、退避0.3*(i+1)s，4xx除408/429外直接放弃不重试)。"
+  }
+ },
+ "summary": "monet_real 图像源=/s3-mewtant-raw-datasets/jasperai/monet/v1.1.0(ro挂载)下6个子源(cc12m/commoncatalog-cc-by/coyo/diffusion-aesthetic-4k/laion/megalith10m)的webdataset .tar(未压缩ustar,已验证magic)+同名.parquet;tar大小差异大(1.4GB~13.6GB),任务提示的\"2.2GB级\"只精确对应cc12m(仅占9.9%行),真正大头coyo/laion(各34%,~40M行池)对应tar约4~5.5GB级。每sample在tar内是三件套{key}.jpg+.json+.*.pth,当前只消费.jpg(代码+文档证据,未做全量tar扫描)。\n采样manifest=rich_v1/monet,256个parquet分片,footer确认156250行/片×256=40,000,000行整,与stats cache的source_counts总和精确吻合。稳定ID=uid('monet:'+id),id即src_key即__key__。manifest含width/height(int32)列;REDESIGN(rich_v1)不带elig_*列,三个loader均从w/h现算elig_256/512/1024,w/h直接决定item在某stage是否入池——非仅\"审计用\"(代码注释与实际行为有出入)。\nEXIF朝向:全代码链路(decode_rgb等)零EXIF处理,grep零命中;manifest的w/h溯源到上游jasperai/monet源数据集自带列,非本仓库解码得出,故理论上自洽,但\"是否与实际JPEG解码尺寸/朝向一致\"仅有一句文档断言(\"已实测\"),未见可复核证据——这是Phase-1信任manifest w/h做桶指派的唯一未验证假设。\n随机访问:现状是顺序流(stream_tar_images用'r|'模式扫整tar到收齐wanted keys),非按item随机fetch;有一个TarMemberReader类支持随机单成员getmember读取,但确认complete_dataset.py完全未导入/使用,是未接线的dead code。任何tar member的offset/length索引在manifest或代码里都不存在,做range-read需要全新建索引。\n数据集是静态离线产物:rich_v1由独立脚本t5_build_rich_manifest.py批跑生成,训练只glob只读;源tar挂载为ro fuse。\n现有fetch:monet_tar_path/stream_tar_images(image_fetch.py:98-130),无MONET专属磁盘缓存(anime才有cache_dir);失败语义=tar损坏/丢失时放弃该shard剩余key、计数打日志、不重试,要等下一次producer epoch重洗shard列表才重新整体扫描,不是item级重试(对照anime有3次带退避的item级重试)。",
+ "needs_jcc": [
+  "用JCC job(禁本机)对monet .tar做少量(如5~10个shard、每个抽几十个key)的解压/PIL naive decode(不做exif_transpose,与decode_rgb一致)对比manifest width/height,量化EXIF朝向/像素尺寸不一致率——当前只有文档一句'已实测'断言,无可复核数据,直接关系Phase-1能否信任manifest w/h做bucket指派。",
+  "用JCC job统计monet_real全量40M行uid/src_key在(src_shard内及全池)的重复情况(全列groupby/dedup,超出本机footer-only限制),确认'稳定唯一ID'假设在全量数据上成立、无重复/冲突。",
+  "用JCC job对6个子源(cc12m/commoncatalog-cc-by/coyo/diffusion-aesthetic-4k/laion/megalith10m)做完整tar清点(数量+总字节),精确刻画monet_real物理存储总量与shard大小分布(本机只抽样了每子源1个tar,90个'<N>-0'子目录未展开),用于估算range-read/reshard两种fetch方案的I/O与存储代价。",
+  "用JCC job在实际mountpoint-s3(ro)挂载上测试真随机字节区间读(HTTP Range GET等价)相对于当前'r|'顺序流的延迟/吞吐,用数据支撑三选一(tar range-read / shard-aware分组 / 重新分片)的fetch adapter选型——本机不能做I/O benchmark。",
+  "若决定采用tar range-read方案,需要用JCC job实际构建一次(uid→tar_path,offset,length)的原型索引(需要顺序扫至少若干个完整tar建header索引,属于'全量扫tar'级操作,本机禁止),验证可行性与建索引耗时/存储开销。"
+ ],
+ "open_questions": [
+  "任务描述的'tar shards ~2.2GB级'线索似乎只精确匹配monet_real 6个子源里的cc12m(实测2,225,305,600B),但cc12m只占40M行池的9.9%;真正的大头coyo/laion(各~34%,13.56M行)对应的tar在抽样中是~4~5.5GB级,commoncatalog-cc-by抽样甚至到13.6GB——需要和Evan确认这个'2.2GB'线索的来源/代表性,是否需要按子源分别评估fetch adapter,而不是假设所有tar同一量级。",
+  "image_fetch.py里的TarMemberReader(支持tf.getmember随机单成员读)是刻意保留、准备给未来'随机访问'路线用的雏形,还是纯遗留死代码?若是前者,Phase-1的'shard-aware/reshard'选型讨论前应该先看一眼这个类当初写它的动机/commit历史,可能已有一部分设计思路。",
+  "上游jasperai/monet(HF数据集)构建width/height列时是否应用了EXIF方向校正,这是外部数据集属性,本仓库代码无法回答;文档AAA数据交付文档v2里的'已实测尺寸恰好等于manifest w/h'具体抽样了多少条、什么方法验证的,需要向team确认或找到原始验证记录/脚本(本次侦察在data_analysis/scripts里未定位到对应验证脚本)。",
+  "manifest_index.py里'width/height...其余路径不读'类注释(load_real_synth_shard:343-344、load_textatlas_shard:149-150)与REDESIGN分支下width/height实际被用来现算elig_*的行为有出入,是否是遗留自daily_v1(有elig_*列)时代的stale注释,建议后续任务顺手核实/更新以免误导后来者(本次侦察未改代码,仅记录此不一致)。"
+ ]
+}

@@ -99,7 +99,11 @@ def _worker(rank: int, args_dict: dict) -> None:
 
         fh = fh_path.open("w", encoding="utf-8")
         faulthandler.enable(file=fh, all_threads=True)
-        faulthandler.dump_traceback_later(args.dump_every_s, repeat=True, file=fh)
+        # dump_every_s<=0 → 不装周期 dump（A/B 证伪用：dump_traceback_later 在 Py3.12 下
+        # 从 watchdog 线程遍历【运行中】线程的帧栈本身就能 SIGSEGV——所有已观测崩溃均死于
+        # dump 写入中途）。faulthandler.enable 保留：真实段错误仍会打印 Fatal 栈。
+        if args.dump_every_s > 0:
+            faulthandler.dump_traceback_later(args.dump_every_s, repeat=True, file=fh)
     except Exception as exc:  # noqa: BLE001 diagnostics must not block stress
         fh = None
         _jsonl(rank_log, {"event": "faulthandler_setup_failed", "error": repr(exc), "ts": time.time()})
@@ -181,10 +185,14 @@ def _worker(rank: int, args_dict: dict) -> None:
             })
             del batch, pix
 
+        # PASS 语义收紧（2026-07-09 harness 保真）：旧版无条件记 PASS,init 吃掉预算时
+        # batches=0 也绿——现在 batches<max_batches 记 INCOMPLETE（rc 仍 0:慢≠崩,
+        # 崩溃判定看信号;慢用 INCOMPLETE 事件区分）。
         _jsonl(rank_log, {
-            "event": "PASS",
+            "event": "PASS" if batches >= args.max_batches else "INCOMPLETE",
             "rank": rank,
             "batches": batches,
+            "max_batches": args.max_batches,
             "elapsed_s": round(time.time() - started, 3),
             "ts": time.time(),
         })
@@ -242,7 +250,9 @@ def main() -> int:
     ap.add_argument("--stats-cache", default=None)
     ap.add_argument("--bucket-wait-timeout-s", type=float, default=None)
     ap.add_argument("--only-domains", default=None, help="Comma/space-separated domain subset for bisection.")
-    ap.add_argument("--dump-every-s", type=int, default=60)
+    # 默认 0=不装周期 dump（2026-07-09 根因实锤：dump_traceback_later 在 Py3.12 竞态 SIGSEGV,
+    # A/B: dump=0 → 5/5 case 零崩 / dump=5s → 5/5 case 必崩;faulthandler.enable 保留,真崩溃仍有 Fatal 栈）。
+    ap.add_argument("--dump-every-s", type=int, default=0)
     ap.add_argument("--join-grace-s", type=int, default=20)
     args = ap.parse_args()
 
@@ -301,16 +311,24 @@ def main() -> int:
                 })
                 if p.exitcode != 0:
                     failed = True
-        if failed or not alive:
+        # 2026-07-09 harness 保真：不再首败连坐提前 terminate——让所有 rank 跑满自己的预算,
+        # 崩溃率不被首个失败截尾（旧行为把「完成但被杀」「未观测」都记成 SIGTERM,污染统计）。
+        if not alive:
             break
         time.sleep(2.0)
 
+    # teardown 动作显式落 summary（2026-07-09）：SIGKILL 可归因（harness kill vs 内核 OOM）。
+    if any(p.is_alive() for p in procs):
+        _jsonl(summary, {"event": "deadline_reached", "still_alive": [p.name for p in procs if p.is_alive()],
+                         "ts": time.time()})
     for p in procs:
         if p.is_alive():
+            _jsonl(summary, {"event": "harness_terminate", "rank_name": p.name, "pid": p.pid, "ts": time.time()})
             p.terminate()
     for p in procs:
         p.join(timeout=10)
         if p.is_alive():
+            _jsonl(summary, {"event": "harness_kill", "rank_name": p.name, "pid": p.pid, "ts": time.time()})
             p.kill()
             p.join(timeout=5)
 

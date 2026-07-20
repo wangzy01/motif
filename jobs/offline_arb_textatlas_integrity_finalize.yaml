@@ -1,0 +1,44 @@
+name: evan-offarb-textatlas-integrity-finalize
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_arb_textatlas_finalize.$(hostname)
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  CATALOG=$BASE/offline_arb_catalog_v1
+  PLAN=$BASE/offline_arb_plans_v1/w64_prod/plan
+  OUT=$BASE/offline_arb_textatlas_integrity_audit_v1
+  RESULT=$OUT/integrity_audit.json
+  ALLOWLIST=$OUT/frozen_allowlist_suggestion.json
+  for INDEX in $(seq 0 7); do
+    test -f "$OUT/_PAYLOAD_SHARD_${INDEX}_SUCCESS" \
+      && test -f "$OUT/payload_shard_${INDEX}.json" \
+      || { echo "FATAL: payload shard $INDEX incomplete"; exit 34; }
+  done
+  test ! -e "$RESULT" && test ! -e "$ALLOWLIST" \
+    || { echo "FATAL: immutable final outputs already exist"; exit 34; }
+
+  "$PY" -m py_compile scripts/offline_arb/finalize_textatlas_integrity_audit.py
+  "$PY" scripts/offline_arb/finalize_textatlas_integrity_audit.py \
+    --audit-root "$OUT" \
+    --catalog-root "$CATALOG" \
+    --plan-root "$PLAN" \
+    --shard-count 8 \
+    --formal-steps 166667 \
+    --workers 16 \
+    --output "$RESULT" \
+    --allowlist-output "$ALLOWLIST"
+  sha256sum "$RESULT" "$ALLOWLIST" > "$OUT/integrity_audit.sha256"
+  touch "$OUT/_SUCCESS"

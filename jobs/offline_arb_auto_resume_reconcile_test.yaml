@@ -1,0 +1,24 @@
+# CPU-only known-answer/fault-injection gate for bounded FORMAL auto-resume.
+name: evan-offarb-auto-resume-reconcile-test
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 32
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_arb_auto_resume.$(hostname)
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  "$PY" -m py_compile \
+    training/auto_resume_reconcile.py \
+    scripts/offline_arb/test_auto_resume_reconcile.py \
+    train.py
+  "$PY" scripts/offline_arb/test_auto_resume_reconcile.py
+  echo "OFFLINE_ARB_AUTO_RESUME_RECONCILE_JCC_PASS host=$(hostname)"

@@ -1,0 +1,180 @@
+# Exact plan-only GPIC hotset analysis.  It performs no catalog-parquet or
+# image reads.  The two streaming W64-plan passes run only in this CPU16 JCC
+# job; large/in-progress state remains in RAM or under /local.
+name: evan-mot-crop-offlinearb-w64-gpic-hotset
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_arb_w64_gpic_hotset.$(hostname)
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  PLAN=$BASE/offline_arb_plans_v1/w64_prod/plan
+  FREEZE=$BASE/offline_arb_plans_v1/FREEZE_MANIFEST.json
+  CATALOG_HEADER=$BASE/offline_arb_catalog_v1/header.json
+  SCRIPT=$REPO/scripts/offline_arb/analyze_w64_gpic_hotset.py
+  YAML_SELF=$REPO/jobs/offline_arb_w64_gpic_hotset.yaml
+  EXPECTED_SCRIPT_BYTES=63045
+  EXPECTED_SCRIPT_SHA256=4fa9746b4a5a49a90c0b0327c60c0c507939619b6958ab5916d8c98460d2165d
+  RUN_ROOT=$BASE/offline_arb_w64_gpic_hotset_v1
+  WORK_ROOT=/local/evan/offline_arb_w64_gpic_hotset
+
+  HOST=$(hostname)
+  NODE_RANK=${HOST##*-}
+  JOBTAG=${HOST%-*}
+  [ "$NODE_RANK" = 0 ] && [ "$HOST" = "$JOBTAG-0" ] \
+    || { echo "FATAL: expected one-node JCC hostname ending in -0"; exit 21; }
+  case "$JOBTAG" in
+    (''|.|..|*[!A-Za-z0-9_.-]*) echo "FATAL: unsafe JCC jobtag"; exit 21 ;;
+  esac
+  [ "$(basename -- "$JOBTAG")" = "$JOBTAG" ] \
+    || { echo "FATAL: JCC jobtag is not a basename"; exit 21; }
+
+  for FILE in "$PLAN/header.json" "$PLAN/checksums.json" "$FREEZE" "$CATALOG_HEADER" "$SCRIPT" "$YAML_SELF"; do
+    [ -f "$FILE" ] && [ ! -L "$FILE" ] \
+      || { echo "FATAL: required regular non-symlink input missing: $FILE"; exit 22; }
+  done
+  [ "$(wc -c < "$SCRIPT")" = "$EXPECTED_SCRIPT_BYTES" ] \
+    && [ "$(sha256sum "$SCRIPT" | awk '{print $1}')" = "$EXPECTED_SCRIPT_SHA256" ] \
+    || { echo "FATAL: queued job script bytes/SHA pin mismatch"; exit 22; }
+  [ -d "$PLAN" ] && [ -d "$PLAN/blocks" ] && [ ! -L "$PLAN" ] && [ ! -L "$PLAN/blocks" ] \
+    || { echo "FATAL: canonical plan directories missing/symlinked"; exit 22; }
+  [ "$(find "$PLAN/blocks" -maxdepth 1 -type f -name 'block_*.npz' | wc -l)" = 168 ] \
+    || { echo "FATAL: W64 plan does not expose exactly 168 NPZ blocks"; exit 22; }
+  NW_DECL=$(grep -m1 '^numWorkers:' "$YAML_SELF" | awk '{print $2}')
+  GPU_DECL=$(grep -m1 '^gpuPerWorker:' "$YAML_SELF" | awk '{print $2}')
+  CPU_DECL=$(grep -m1 '^cpuPerWorker:' "$YAML_SELF" | awk '{print $2}')
+  [ "$NW_DECL" = 1 ] && [ "$GPU_DECL" = 0 ] && [ "$CPU_DECL" = 16 ] \
+    || { echo "FATAL: job topology declaration drift"; exit 23; }
+
+  mkdir -p "$RUN_ROOT" "$WORK_ROOT" "$PYTHONPYCACHEPREFIX"
+  [ -d "$RUN_ROOT" ] && [ ! -L "$RUN_ROOT" ] && [ "$(realpath -e "$RUN_ROOT")" = "$RUN_ROOT" ] \
+    || { echo "FATAL: run root must be canonical"; exit 23; }
+  ATTEMPT=$RUN_ROOT/$JOBTAG
+  mkdir "$ATTEMPT"
+  OUTPUT=$ATTEMPT/hotset_analysis.$JOBTAG.json
+  ARTIFACT_DIR=$ATTEMPT/count_ge_6_bitmap
+  [ ! -e "$OUTPUT" ] && [ ! -L "$OUTPUT" ] && [ ! -e "$ARTIFACT_DIR" ] && [ ! -L "$ARTIFACT_DIR" ] \
+    || { echo "FATAL: refusing to overwrite hotset evidence"; exit 24; }
+
+  "$PY" -m py_compile "$SCRIPT"
+  timeout --signal=TERM --kill-after=30s 600s \
+    "$PY" "$SCRIPT" --self-test --work-root "$WORK_ROOT"
+
+  SCRIPT_SHA_BEFORE=$(sha256sum "$SCRIPT" | awk '{print $1}')
+  YAML_SHA_BEFORE=$(sha256sum "$YAML_SELF" | awk '{print $1}')
+  FREEZE_SHA_BEFORE=$(sha256sum "$FREEZE" | awk '{print $1}')
+  HEADER_SHA_BEFORE=$(sha256sum "$PLAN/header.json" | awk '{print $1}')
+  CHECKSUMS_SHA_BEFORE=$(sha256sum "$PLAN/checksums.json" | awk '{print $1}')
+  CATALOG_HEADER_SHA_BEFORE=$(sha256sum "$CATALOG_HEADER" | awk '{print $1}')
+
+  timeout --signal=TERM --kill-after=60s 21600s \
+    "$PY" "$SCRIPT" \
+      --plan-root "$PLAN" \
+      --freeze "$FREEZE" \
+      --catalog-header "$CATALOG_HEADER" \
+      --job-yaml "$YAML_SELF" \
+      --output "$OUTPUT" \
+      --artifact-dir "$ARTIFACT_DIR" \
+      --work-root "$WORK_ROOT" \
+      --storage-bytes 98304,114688,131072,144296,163840,196608
+
+  [ -f "$OUTPUT" ] && [ ! -L "$OUTPUT" ] && [ -s "$OUTPUT" ] \
+    || { echo "FATAL: analyzer did not publish JSON evidence"; exit 25; }
+  [ -d "$ARTIFACT_DIR" ] && [ ! -L "$ARTIFACT_DIR" ] \
+    && [ -f "$ARTIFACT_DIR/gpic_count_ge_6.packbits" ] && [ ! -L "$ARTIFACT_DIR/gpic_count_ge_6.packbits" ] \
+    && [ -f "$ARTIFACT_DIR/manifest.json" ] && [ ! -L "$ARTIFACT_DIR/manifest.json" ] \
+    || { echo "FATAL: reusable bitmap evidence is incomplete"; exit 25; }
+  [ "$(sha256sum "$SCRIPT" | awk '{print $1}')" = "$SCRIPT_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$YAML_SELF" | awk '{print $1}')" = "$YAML_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$FREEZE" | awk '{print $1}')" = "$FREEZE_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$PLAN/header.json" | awk '{print $1}')" = "$HEADER_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$PLAN/checksums.json" | awk '{print $1}')" = "$CHECKSUMS_SHA_BEFORE" ] \
+    && [ "$(sha256sum "$CATALOG_HEADER" | awk '{print $1}')" = "$CATALOG_HEADER_SHA_BEFORE" ] \
+    || { echo "FATAL: bound source/plan/catalog metadata changed during analysis"; exit 26; }
+
+  "$PY" - "$OUTPUT" "$ARTIFACT_DIR" <<'PYEOF'
+  import hashlib
+  import json
+  import sys
+  from pathlib import Path
+
+  output = Path(sys.argv[1])
+  artifact_dir = Path(sys.argv[2])
+  payload = output.read_bytes()
+  result = json.loads(payload)
+  manifest_path = artifact_dir / "manifest.json"
+  bitmap_path = artifact_dir / "gpic_count_ge_6.packbits"
+  manifest_bytes = manifest_path.read_bytes()
+  manifest = json.loads(manifest_bytes)
+  bitmap = bitmap_path.read_bytes()
+
+  def require(condition, message):
+      if not condition:
+          raise SystemExit(f"FATAL: {message}")
+
+  require(result.get("schema_version") == "offline_arb_w64_gpic_hotset_v1", "schema drift")
+  require(result.get("status") == "PASS", "analysis is not PASS")
+  require(result["scope"]["formal_steps"] == {"start_inclusive": 0, "stop_exclusive": 166667, "count": 166667}, "formal interval drift")
+  require(result["scope"]["formal_global_exposures"] == 384000768, "formal exposure drift")
+  require(result["scope"]["formal_gpic_exposures"] == 99456552, "formal GPIC exposure drift")
+  require(result["scope"]["image_payload_reads"] == 0, "image-read contract drift")
+  require(result["scope"]["catalog_parquet_payload_reads"] == 0, "catalog-parquet-read contract drift")
+  require(result["scope"]["sample_paths_emitted"] == 0, "sample path emission drift")
+  require(result["inputs"]["all_plan_blocks_sha256_verified"] is True, "all-block verification absent")
+  require(result["inputs"]["all_plan_block_count"] == 168, "block count drift")
+  histogram = result["gpic_count_histogram"]
+  require(histogram["population_sum_expected_20m"] == 20000000, "histogram population drift")
+  require(histogram["weighted_exposure_sum_expected_99456552"] == 99456552, "histogram weighted sum drift")
+  require(histogram["maximum_observed_count"] <= 20 and histogram["R_max"] == 20, "R_max drift")
+  hotsets = result["hotsets"]
+  require([row["count_threshold_inclusive"] for row in hotsets] == [8, 7, 6, 5], "threshold order/set drift")
+  for row in hotsets:
+      require(len(row["per_node"]) == 8, "per-node result count drift")
+      require([h["horizon_steps"] for h in row["aggregate_node_windows"]] == [4, 16, 64], "horizon set drift")
+      for node in row["per_node"]:
+          require([h["horizon_steps"] for h in node["horizons"]] == [4, 16, 64], "node horizon set drift")
+          for horizon in node["horizons"]:
+              require(set(horizon["points"]) == {"min", "p0.1", "p1", "p5", "median_lower"}, "coverage quantile set drift")
+              require(len(horizon["worst_window_location_digest_sha256"]) == 64, "worst-window digest drift")
+
+  binding = result["reusable_count_ge_6_bitmap_artifact"]
+  require(binding["directory"] == str(artifact_dir), "artifact directory binding drift")
+  require(binding["bitmap"]["path"] == str(bitmap_path), "bitmap path binding drift")
+  require(binding["manifest"]["path"] == str(manifest_path), "manifest path binding drift")
+  require(manifest.get("schema_version") == "offline_arb_gpic_hotset_bitmap_v1", "bitmap manifest schema drift")
+  require(manifest["selection"]["count_threshold"] == 6, "bitmap threshold drift")
+  require(manifest["row_id_namespace"]["local_row_id_base"] == 0, "bitmap row base drift")
+  require(manifest["row_id_namespace"]["row_count"] == 20000000, "bitmap row count drift")
+  require(manifest["bitmap"]["encoding"] == "numpy.packbits" and manifest["bitmap"]["bitorder"] == "little", "bitmap encoding drift")
+  require(manifest["bitmap"]["file_name"] == bitmap_path.name, "bitmap file-name binding drift")
+  require(len(bitmap) == 2500000 == manifest["bitmap"]["bytes"], "bitmap byte count drift")
+  bitmap_sha = hashlib.sha256(bitmap).hexdigest()
+  require(bitmap_sha == manifest["bitmap"]["sha256"] == binding["bitmap"]["sha256"], "bitmap SHA binding drift")
+  manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+  require(manifest_sha == binding["manifest"]["sha256"], "manifest SHA binding drift")
+  selected_bits = sum(byte.bit_count() for byte in bitmap)
+  threshold6 = next(row for row in hotsets if row["count_threshold_inclusive"] == 6)
+  require(selected_bits == manifest["selection"]["selected_unique_row_ids"] == threshold6["selected_unique_row_ids"], "bitmap selected-bit count drift")
+  require(manifest["selection"]["selected_exposures"] == threshold6["selected_exposures"], "bitmap selected-exposure binding drift")
+
+  print(json.dumps({
+      "status": "PASS",
+      "output": str(output),
+      "output_sha256": hashlib.sha256(payload).hexdigest(),
+      "bitmap": str(bitmap_path),
+      "bitmap_sha256": bitmap_sha,
+      "count_ge_6_selected_unique": selected_bits,
+  }, sort_keys=True))
+  PYEOF

@@ -1,0 +1,81 @@
+# wait-fix 快速复验（2026-07-09 smoke#1 复盘后：bucket_wait_native_s 30→0 + AR最近桶兜底）。
+# 目的：证明 item_queue_wait_s 从「中位数恰=30.0s(死等)」降到秒级,吞吐相应上来;行为仍零崩溃。
+# 判定：零 SIGSEGV/非零退出,且 wait_s 中位数 < 5s（30s 死等消失的直接证据）。
+name: evan-mot-crop-naifu-arb-revalid-waitfix
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 64
+memGBPerWorker: 384
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 MALLOC_CHECK_=3
+  unset MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_ ARROW_DEFAULT_MEMORY_POOL LD_PRELOAD TCMALLOC_RELEASE_RATE
+  mkdir -p /local/evan/cache/huggingface /local/evan/cache/torch /local/evan/cache/triton /local/evan/anime_img_cache
+  RUN_TAG="$(date -u +%Y%m%dT%H%M%SZ)_${HOSTNAME:-local}_${RANDOM}"
+  ROOT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/naifu_arb_revalid_waitfix_$RUN_TAG
+  mkdir -p "$ROOT"
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  $PY -m py_compile scripts/stress_naifu_arb_real_dataline.py training/dataline/complete_dataset.py training/dataline/image_fetch.py training/dataline/multi_ar.py
+  SRC_STATS=/fsx/evan/mot_code/data_analysis/outputs/monet_global_stats_rich_v1.json
+  [ -s "$SRC_STATS" ] || { echo "FATAL: stats cache missing"; exit 32; }
+  WAITSTAT_PY='
+  import json,sys,statistics
+  ws=[]
+  for l in sys.stdin:
+      try: j=json.loads(l)
+      except Exception: continue
+      bf=j.get("buffer_fill") or {}
+      if isinstance(bf,dict) and "item_queue_wait_s" in bf: ws.append(bf["item_queue_wait_s"])
+  print(f"n={len(ws)} median={statistics.median(ws):.2f} p90={sorted(ws)[int(len(ws)*0.9)]:.2f} max={max(ws):.2f}" if ws else "n=0")
+  '
+  FAIL=0
+  run_case () {
+    local CASE="$1" DOMS="$2" WS="$3"
+    local OUT="$ROOT/${CASE}_ws${WS}"
+    mkdir -p "$OUT"
+    cp "$SRC_STATS" "$OUT/monet_global_stats_rich_v1.json"
+    set +e
+    timeout --preserve-status --signal=TERM --kill-after=120s 900s \
+      $PY scripts/stress_naifu_arb_real_dataline.py \
+        --config configs/stage256_redesign_naifu_arb_v1.yaml \
+        --out "$OUT" \
+        --stats-cache "$OUT/monet_global_stats_rich_v1.json" \
+        --world-size "$WS" \
+        --batch-size 144 \
+        --seconds 420 \
+        --max-batches 8 \
+        --buffer-size 512 \
+        --queue-size 128 \
+        --min-fill 64 \
+        --fetch-workers 8 \
+        --fetch-workers-anime 1 \
+        --no-producer-native-io-serial \
+        --anime-nrows 20000 \
+        --bucket-wait-timeout-s 120 \
+        --only-domains "$DOMS" \
+      2>&1 | tee "$OUT/stress.log"
+    local RC=${PIPESTATUS[0]}
+    set -e
+    echo "$RC" > "$OUT/rc.txt"
+    local NSEGV NBAD
+    NSEGV=$(grep -c 'signal:SIGSEGV\|signal:SIGABRT' "$OUT/summary.jsonl" || true)
+    NBAD=$(grep '"child_exit"' "$OUT/summary.jsonl" | grep -vc '"exit": "exit:0"' || true)
+    local WSTAT
+    WSTAT=$(cat "$OUT"/rank*.jsonl 2>/dev/null | $PY -c "$WAITSTAT_PY" || echo "n/a")
+    echo "case=$CASE ws=$WS rc=$RC segv=$NSEGV nonzero_exits=$NBAD wait_s[$WSTAT]" | tee -a "$ROOT/revalid_summary.txt"
+    if [ "$NSEGV" -ne 0 ] || [ "$NBAD" -ne 0 ]; then FAIL=1; fi
+  }
+  run_case fullmix16 "anime,monet_real,gpic,synthetic,textatlas" 16
+  run_case monet16   monet_real                                  16
+  run_case anime16   anime                                       16
+  echo "==== REVALIDATION VERDICT (waitfix) ===="
+  cat "$ROOT/revalid_summary.txt"
+  exit "$FAIL"

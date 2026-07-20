@@ -17,6 +17,8 @@
 > 历史完整背景见 [doc/mot/交接文档_模型训练代码_GPU_20260611.md](/fsx/evan/doc/mot/交接文档_模型训练代码_GPU_20260611.md)；架构改动依据见 [doc/mot/模型架构修改规划_v1_20260616.md](/fsx/evan/doc/mot/模型架构修改规划_v1_20260616.md)。
 >
 > **🆕 2026-06-30（stage256 四模型最终评测 + ab2 adapter 方向默认改 causal — 监控/eval 执行线）**：① 4 个 stage256 run 全停、跑完最终 4-模型评测（报告 [experiments/results/EVAL_final_4model_stage256.md](experiments/results/EVAL_final_4model_stage256.md)，含图表+样图网格）——**anime 概念跟随(tagger 3-seed)：ab2fusion > ab1causal > b1 ≫ ab3lora**；**DPG 通用提示词 b1≈ab1≈ab2 打平**(mPLUG 极差 0.21)、ab3lora 垫底；结论 ab3lora **no-go**、ab1causal>b1 **数据支持「保留 causal、停 b1」**、ab2fusion 优势是 anime 概念专项(非通用)。② **adapter 方向开关 `model.text_adapter.bidirectional`（正交于 `multi_layer_fusion`）**：`stage1a_t2i_256_v2.yaml` 默认从双向**改为 causal（`false`，Evan 偏好）**；⚠️ 现有 `s256v2_2x8_ab2fusion` ckpt 是 **bidir 训练**的（领跑结论=bidir+fusion），三处 eval 入口（`experiments/eval/sample_evalset.py`/`dpg/generate_dpg.py`/`jobs/eval_final_fixedsigma.yaml`）已显式钉 `bidirectional=true` 复现、防 train/test 错配；**causal+fusion 是未训未测的新组合，启用需重新训练验证**。（仅改 256_v2 ablation config + eval 脚本，未碰直播 worktree / live 采样 JSON / 重设计线的新 configs。）
+>
+> **🆕 2026-07-09（NAI-ARB SIGSEGV 根因定案 + dataline 重构 — cleanup_crop 隔离线）**：① **SIGSEGV 根因定案** = `faulthandler.dump_traceback_later(60s, repeat)` 周期探针在 **Python 3.12.3** 下从 watchdog 线程无锁遍历运行中线程帧栈 → 竞态段错误（CPython gh-140815，修复只 backport 到 3.13/3.14）。证据链：23/23 崩溃 rank 全死于 dump 写入中途、崩溃时刻与 dump 定时器相位锁定（tick+300.0±0.1s）、dump 内含垃圾行号（`tarfile.py` line 32547 等不存在行）、watchdog 屏蔽全信号故无 Fatal 段。**A/B 实锤**：同 5 个必崩 case，`--dump-every-s 0` → 零 SIGSEGV；5s → 5/5 必崩。`stream_tar_images` 缺锁假设已证伪（serial_native 全串行版照崩；tarfile 纯 Python 不可能自己段错误）；SIGKILL 全部是 harness/torchrun 清场杀，非 OOM。② 最初 2×8 smoke 失败历史修正：pre-diag smoke(vqfv) 实际训到 step 315/320 @3.6s/iter，死于退出阶段 exit-barrier；首批 monet/synth 饿死真实但可绕过(fallback 生效)。真 blocker = item_queue 硬 multinomial 计划对稀有桶结构性不可满足（需求 bs·P(d|B) > buffer 内 ~buffer_size·P_native(B|d)，实测 lxsr 运行 16/16 rank 死于首个调度桶 120s 超时 RuntimeError）。③ **修复全落 cleanup_crop**（py_compile + 28 项纯逻辑单测 ALL_UNIT_OK，job `evan-mot-crop-naifu-arb-fix-unittest-lp8c`）：`complete_dataset.py` 的 `_loader_item_queue` 重写为软计划三相（Phase1 ≤`bucket_wait_native_s` 等全 native；Phase2 ≤`bucket_wait_timeout_s` 等计划域总量，缺 native 槽位 re-resize；Phase3 计划封顶+present 重归一，只有全域断供才 fail-fast）；batch_count 只在 yield 后自增（修 continue 消耗 schedule 步号 → FSDP shape desync）；`_topup` 全域加 fill-limit 门（修无界增长）；首批填充改用 `first_fill_timeout_s`；新增 `_prune_scheduled_buckets` 调度剪枝（P(B)<`bucket_prob_floor` 稀有桶质量折进最近保留桶，恒等式 Σ P(B)P(d|B)=mix_d 精确）；monet/synth tar 整 shard dict 物化（2-5GB，首条记录前全量读完=首批饿死主因+内存大户）改为流式 yield + 256 条窗口打乱；`hash(d)` 播种改稳定 md5 摘要；square-only 护栏接进 `_put_record`。`multi_ar.py` 加 `nearest_allowed_bucket` + Bucketer 支持 allowed 桶集(producer 一次 resize 到保留桶) + BucketSchedule.pick ulp 越界防御；`image_fetch.py` anime 缓存 `.tmp` 加 pid+tid(修跨 rank 撕裂写) + 缓存读加图片魔数校验+坏条目清除 + FETCH_STATS 迭代收进锁 + tar 流式异常不再静默吞；`diagnostics.py`/`train.py` 周期 dump 定时器生命周期修复(close() 先 cancel→disable→关 fd) + trace/fh 双开互斥 + 诊断开启时补 `faulthandler.enable()`(on-fault 安全)；`stress_naifu_arb_real_dataline.py` `--dump-every-s` 默认改 **0** + teardown 动作显式落 summary(SIGKILL 可归因) + 不再首败连坐 + PASS/INCOMPLETE 语义收紧；`configs/stage256_redesign_naifu_arb_v1.yaml` 新增 `bucket_wait_native_s: 30` + `bucket_prob_floor: 0.01`，native_bucket_dist 用免取图快速审计重测(`scripts/audit_naifu_arb_bucketdist_fast.py`，50k 样本/域，替代旧 256 样本头部偏置版)，bucket_probs 换成新派生 P(B)(47 非零桶，floor 后保留 13 桶 ≈93.8% 质量，P(square)=0.121)。④ 新文件：`scripts/audit_naifu_arb_bucketdist_fast.py`、`scripts/test_naifu_arb_fixes.py`、`jobs/naifu_arb_bucketdist_fast_remeasure.yaml`、`jobs/naifu_arb_real_dataline_stress_cpu_ab_dump{0,5}.yaml`、`jobs/naifu_arb_fixes_unittest.yaml`。⑤ 验证路径（进行中）：JCC 单测✅ → CPU 压测复验(原 5 崩溃 case + formal_pressure) → 2×8 GPU smoke 120 步(无 dump 探针) → stage256 正式训练。⑥ ⚠️ **坑点新增**：`faulthandler.dump_traceback_later` 在 Py3.12 = 危险探针，任何 smoke/训练 yaml **禁设** `trainer.debug_faulthandler_dump_interval>0` / `debug_trace_dump_interval>0`；hang 诊断改用进程外 `py-spy`。
 
 ---
 
@@ -476,3 +478,165 @@ env $ENV $PY scripts/bench_sampler_cache.py --steps 30 --bs 2 --cfg 4.0
 - 新增独立 sampler `experiments/eval/sample_headcrop_matrix.py`：不 import/monkey-patch 既有 `sample_evalset.py`，支持三 run spec（`rd256_final` / `rd512a_g1` / `rd512a_latest`）、EMA、显式 `--height/--width` 非方图、完整 manifest（含 ckpt path/step、missing/unexpected key 片段、每图路径）。新增 prompt/rubric/评分聚合：`experiments/eval/prompts/anime_evalset_nl13_plain_headcrop.jsonl`、`experiments/eval/prompts/real_headcrop_12.jsonl`、`experiments/eval/headcrop_matrix_rubric.md`、`experiments/eval/headcrop_subagent_scoring_prompt.md`、`experiments/eval/aggregate_headcrop_scores.py`。
 - 新增 JCC 模板：`jobs/eval_headcrop_matrix_g2.yaml`（G2/latest 存在后生成三权重矩阵，预计 696 张：anime tag/NL plain/NL emphasis + real，square/portrait/landscape/tall/wide，seeds 7/1007）和 `jobs/eval_headcrop_matrix_g2_submitter.yaml`（0-GPU watcher，等 `gate_g2.pt` 后提交矩阵 job，state 防重复）。已提交 watcher `evan-mot-eval-headcrop-matrix-g2-submitter-d8x5`，当前 `Pending`；语法检查 job `evan-mot-eval-headcrop-matrix-pycompile-v2cw` 也 `Pending`，矩阵 job 自身开头含 `py_compile` 兜底。
 - 后续：G2/latest 样图生成后，按 `headcrop_matrix_rubric.md` 用 gpt-5.5 子代理逐图原图判读，汇总 `trunc_any/head_cut/foot_cut/complete_rate` 分 checkpoint/domain/prompt_style/AR/seed 的定量表，再写最终报告判断 512a 是否已基本修复、是否仍需重训 256。
+
+## 2026-07-09 —— 2×8 GPU smoke#1 复盘 + item_queue waitfix（cleanup_crop 隔离线）
+
+**症状**：2×8 smoke#1（job `evan-mot-crop-naifu-arb-2x8-smk144-clean-jcm5`，RUN_ID `stage256_naifu_arb_2x8_bs144_smoke_clean_20260709`）——训练本体完全健康（55+ 步零崩溃零 SIGSEGV，loss 2.01→1.88 正常下降，FSDP2 16 rank 稳定），但每步 ~35s 中 dataline wait(dw) 占 30-35s（85-90%），120 步排期在 2400s 墙钟内跑不完，被 timeout TERM（**非崩溃**）。
+
+**根因（实锤）**：item_queue 软计划 Phase-1「等全 native 计划齐」对中小 P(B) 桶结构性不可达——native 就绪判据 ≈ `buffer_size·P(B) ≥ bs·mix_d`，buffer 512 时只有最大桶满足；于是每批把 `bucket_wait_native_s=30s` 死等到满，且 `_topup` 被 `buffer_size` 封顶，补满后等待不再增加库存 = 纯烧墙钟。**证据**：GPU dw 紧密聚在 30-35s；CPU 复验 rank jsonl 里 `item_queue_wait_s` 中位数恰好 = 30.0（fullmix16/anime16/gpic16 三 case，n=128 each，anime16 max=30.1）；re-resize 率照样 ~53%（等待没换来原生纯度）。
+
+**修复（2026-07-09，已实现）**：
+- `configs/stage256_redesign_naifu_arb_v1.yaml`：`bucket_wait_native_s` 30→0（Phase-2 soft-ready 等待承担正确背压）；`buffer_size` 512→4096（native 纯度靠库存不靠等待，~4GB/rank 内存，900GB 节点无压力）。
+- `training/dataline/multi_ar.py`：新增 `buckets_by_ar_distance(bidx, buckets)`（全桶按 |Δlog-AR| 主序、|Δ面积| 次序升序，与 `nearest_allowed_bucket` 同度量）。
+- `training/dataline/complete_dataset.py`：re-resize 兜底从「全桶合并池（AR-blind，可能 9:16 硬裁 16:9）」改为「AR 最近桶优先逐桶取样」，裁剪幅度收敛到相邻桶级；`_merged_view` 移除。
+- `scripts/test_naifu_arb_fixes.py`：新增 T8（`buckets_by_ar_distance` 全排列/恰好一次/首元素=自身/序=暴力对照）。
+- `jobs/naifu_arb_2x8_smoke_clean_bs144.yaml`：timeout 2400→3600s，RUN_ID 加 `_r2` 后缀（r1 目录留证）。
+- `jobs/naifu_arb_revalidate_waitfix.yaml`（新）：3 case（fullmix16/monet16/anime16）CPU 复验，判定 = 零 SIGSEGV/非零退出 + `item_queue_wait_s` 中位数<5s。
+
+**验证门禁（进行中）**：单测 job `evan-mot-crop-naifu-arb-fix-unittest-2hkb` + waitfix 复验 `evan-mot-crop-naifu-arb-revalid-waitfix-tvjw`（提交于 ~15:20 UTC）→ 通过后重提 2×8 GPU smoke r2 → rc=0 后提正式训练（`jobs/naifu_arb_2x8_FORMAL.yaml`）。
+
+**衔接**：此前 CPU 复验 8/8 case 全绿（`revalid-crash-h6xm` + `revalid-full-lmgs`，零 SIGSEGV、全 rank 8 批跑满、`item_queue_degraded=0`）里程碑不受影响；smoke#1 是在其基础上首次跑 GPU 才暴露的新问题（等待型墙钟耗尽，非稳定性问题）。
+
+## 2026-07-10 —— OFFLINE_ARB_V1 离线重构：一夜打通 Phase 0-4
+
+**路线切换（2026-07-09 晚，Evan 拍板 D1）**：streaming item_queue 线（NAI-inspired）经**两轮 gpt-5.6 Sol 审计**坐实结构性问题——P0 buffer/deque 容量冲突 treadmill、square-only 泄漏、re-resize 常态化、代码未冻结；整体转向**离线 metadata bucket index**（catalog/assignment/plan/fetch 四层）。streaming 代码归档 `archive/streaming_arb_v1_20260709/`（README 附两轮审计结论指针）；规格 `docs/OFFLINE_ARB_V1_SPEC.md` + `docs/OFFLINE_ARB_PLANNER_DESIGN.md` 已成文冻结。
+
+**Phase-0 七条硬口径**（详见 SPEC §1）：re-resize 严格为零；square-only 绝对硬约束（synth/textatlas 非方计数构造性为零）；domain mix 按图片曝光计数；token/算力只旁路监控不影响 mix；坏 item fail-fast 不静默替换；anime `crop_v_anchor=0.15` 暂不变（等 Phase-6 视觉 A/B）；独立 run/checkpoint namespace，不续 streaming checkpoint。
+
+**桶表与 gate 拍板（2026-07-10 晨）**：D7 `bucket_prob_floor=0.005` → 20 桶，AR 0.524-2.0，折叠质量 2.3%，C6 可行（floor0 全表留作 Phase-4 压力档）；D8 gpic 接受 1.48× 裕度（88.2 img/s vs 真实需求 59.5/节点），后台继续调优上探 48 线程/双路径，不阻塞主线。
+
+**一夜关键数字**（Phase 1-4 全 GO）：
+
+| 项 | 数字 |
+|---|---|
+| 裁剪保留率 p5（项目立项理由） | 0.545→0.945+（anime/monet/gpic，vs 旧 square crop） |
+| monet/synth 供给 | 稀疏 range 79.6 → 密集 coalesced **1093.7 img/s**（13.7×） |
+| planner×独立验证器 | 对撞全绿：V1-V6 双构建同 hash、`--start-step` 后缀一致、不可行诊断完整 |
+| uid/w-h 元数据 | 95.7M 行零重复零跨域碰撞；5 域×2000 解码比对全 PASS（免解码桶指派成立） |
+
+**在跑 job**：`p4-fullscale-2pmd`（H=166,667 全规模 plan，floor0.005 主档+floor0 压力档，双构建+后缀重建+验证）；`p3a-taridx-6jnz`（全量 tar member 索引，断点续跑，cc12m 已完成 6.4M/714 tar）；`p2c-gpictune-gtnv`（gpic 48 线程混合复测）；phase5_build_catalog（§11 契约）编写中。
+
+**待 Evan 拍板（4 项）**：① textatlas /local staging 是否显式化（直读 S3 1635 img/s 已够，建议直读+staging 后备）；② R_max 默认（anime/monet/gpic 20，synth/textatlas 200）已用于全规模验证，formal 前请过目；③ gpic 48 线程若仍<90 img/s：维持 D8 或上 boto3 直连；④ Phase-6 视觉审计（头脚保留率人工对照）与 checkpoint save→resume smoke 未开始，loader 落地后执行。
+
+详细证据链见 `docs/OFFLINE_ARB_PROGRESS_20260710.md`。
+
+### 2026-07-10 晚(D10/D11 拍板 → formal 上线夜跑)
+
+**Evan 拍板**:D10(tar-miss 0.1% 容忍+精确 N 闭环 / AR band 0.8/1.25 冻结 / face gate 双口径并报);
+D11(全链绿才停 512a → 8×8 formal;global 2304=64rank×bs36;全新从头训;夜间确凿异常授权停 job)。
+
+**已交付+审查全绿**(实现者≠审查者,fable/sonnet 单审查人制):
+- Phase-5 loader(offline_dataset.py,fable 审 P0 零,GO 进冒烟;§7 resume off-by-one 仲裁=代码对,文档已改);
+- 视觉审计工具(quant 双口径+sheets,8/8 单测)+ catalog 构建器(P0-1 manifest 分片合并已修,有条件 GO);
+- **formal 四件套**:configs/stage256_offline_exact_v1.yaml(基线逐键 diff 零漂移,+gc/exit 运行时键)、
+  plans job(w4/w16/w64 三 plan,--catalog-header 真 hash 绑定)、2×8 gpuval(两轮含 resume;P0-1 max_steps
+  必须走 CLI --max-steps 已修)、8×8 FORMAL yaml(janitor/nodemon/rdzv 新鲜戳/FREEZE_MANIFEST 闸门)。复核 GO。
+
+**taridx r1 三分片超时全损**(教训):单流带宽墙实测 732MB/s/节点,commoncatalog 25.9TB/laion 16.8TB/
+coyo 7.4TB/synthetic 7.2TB;续跑粒度只有子源级。**r2 重排**:scanner 加 `--tar-shard K:N`(Sol 实现,
+sonnet 审 GO,self-test 含分片守恒/混N拒绝/whole优先),拆 10 个 16cpu job(jobs/offline_arb_phase3a_taridx_r2/,
+运维纪律见其 README),调度器恒 3 并行滚动(预计 ~7.5h)→ 终局 vfy 出 `_SUCCESS`。
+
+**夜间流水**(任一 gate 不绿即停,512a 不动):taridx r2 → catalog diag → 全量 catalog → 三 plan 构建+验证
+→ loader CPU 冒烟 → 2×8 gpuval → FREEZE_MANIFEST → 停 512a → 提 8×8 formal → 持续监控。
+
+### 2026-07-11 —— OFFLINE_ARB_V1 loader 收尾：caption I/O 根因与本地镜像方案
+
+- **全量静态产物均已绿**：catalog 94,986,755 行；w4/w16/w64 plan 全部验证通过；w64 global=2304、正式停点 166,667（约 384M 样本）。历史 CPU smoke 三次 PASS，2×8 resume 语义已证明，但性能门禁尚未放行。
+- **r4 GPU 取证**：loader 实际每 4 步补一个 window；115 步中所有 29 个 `>30s` 尖峰恰为 `step % 4 == 1`，尖峰均值约 76.4s，整段约 21.8s/step（远离 5 天目标）。window profile 将主因定位为 anime caption parquet 随机 row-group 回源，而非图片 HTTP。
+- **零语义漂移并发证据**：caption workers 1/4/8/16/32 五档的 4-rank smoke，逐 rank `trace/prompts/pixels` hash 完全一致；正式 config 暂定 anime/monet/gpic/synthetic workers=`8/8/4/2`，最终仍以 8-rank/node GPUVAL 决定。
+- **anime caption content-addressed /local staging 已落地**：17 个源 parquet 共 29,568,264,438 bytes；首轮节点实测 copy+source hash+local rehash 61.572s。4-rank formal-config proof 的 anime 4-step window 从约 75s 降至约 6.2–9.8s；monet/gpic 仍处在约 10.4s 消费周期边缘，不能凭 CPU proof 判 5 天吞吐，必须跑真实 2×8。
+- **首个 staging proof 仅在汇总尾端 FAIL**：`smoke_offline_loader.py` 仍引用已重命名的 `_anime_caption_workers`，数据面已跑完但该 FAIL 不计绿证据。现已改为 `_caption_workers`，并补齐 `trace/prompts/cfg_keep/pixels` 四类语义 hash 与 effective worker 输出；将用独立、原子证据日志重跑两次。
+- **冻结/竞态硬化进行中**：source manifest 新增 anime catalog exact-set 扫描、catalog 实体 SHA、animefreq raw-header SHA、17 源逐字节 SHA、flock+fsync 原子发布；stage 使用 content-addressed root、READY/hash 全验、坏 local cache 自动隔离重建；FORMAL/GPUVAL 在 stage 前后绑定同一 manifest。所有验证与生成均只走 16-CPU JCC。
+- **现役 512a 未动**：`evan-mot-redesign-512a-multiar-6x8-v3-qc6r-retry-bhdg` 仍 Running，约 step156k/166,667，常态 iter≈2.6–2.8s、dw≈4–8%，last.pt@156000。只有新的 CPU proof×2、2×8 r5 两轮 resume+吞吐、FREEZE 全绿后才停。
+- **当前执行点**：JCC manifest 重建 `evan-mot-crop-offlinearb-anime-caption-manifest-kl4z`；随后 stage proof×2 → 2×8 r5（稳态目标≈2.592s/step，≤2.85s 边缘可研判，>3.0s NO-GO）→ JCC freeze → 记录并停 512a → 立即提交 8×8 formal 并持续监控。
+
+#### 2026-07-11 23:10 UTC 追加：r5 真实 8-rank/node NO-GO，转 caption sidecar
+
+- 新 manifest `3c3832d8…d751b50` 已经 16-CPU JCC 全绿；两轮独立 12-step stage proof 均 PASS，逐 rank 的 `trace/prompts/cfg_keep/pixels` 四 hash 完全一致；另 6-step 与本地化前旧基线的 `trace/prompts/pixels` 完全一致，语义漂移为零。
+- r5 `evan-mot-crop-offline-exact-256-2x8-gpuval-66bx` 两节点 staging 52.3/54.4s 后正常启动，但 8-rank/node 稳态供给硬失败：step9–35 mean **6.799s/step**（384M 外推 **13.12天**），`step%4==1` mean **16.833s**；step9/13/17/21/29 为 22.16/18.14/21.00/19.82/25.27s。JCC postmortem 判 `CONFIRMED_NO_GO`，按授权在 step35 附近主动停止，512a 未动。
+- 跨16 rank window：monet 平均约19.7s/4步、gpic约31.3s/4步、anime约12.5s/4步，均高于5天消费预算10.37s；gpic最坏53.1s。问题是共享 source parquet/file I/O 与 row-group 放大，不是单rank线程不足。
+- 源 inventory：monet 9,440 files、源全集 **5.32TB**（不能全量local mirror），但所需5 caption列压缩体量约60.5GB；gpic 8,000 files、源全集30.3GB、caption列约11.7GB。monet RG最多1000行，gpic每源单RG约12.1–12.9k行；随机单条读取放大+文件打开即结构瓶颈。
+- `OFFLINE_ARB_PREFETCH_STEPS=20` 四 hash A/B 语义全绿，但数千源路径重合太低、CPU首包约65s，无法提供monet所需2×/gpic 2.6×，不继续浪费GPU微调。
+- 正在三线并行：①全五域 typed caption sidecar（catalog row_id对齐、65,536行文件、256行RG、source/decoded typed digest全量相等）；②runtime shared executor + configured sidecar fail-fast，并将gpic改为可配置内存直读以移除/local写读；③独立全量验证+回源抽样+四hash A/B。完成后重新CPU gate→全新2×8 GPUVAL→才允许freeze/停512a。
+
+#### 2026-07-12 00:30 UTC 追加：sidecar v3 门禁全绿，正式五域构建进行中
+
+- builder 契约升级为 `offline_arb_caption_sidecar_builder_v3_portable_closure`：五域 canonical nullable Arrow schema 显式冻结；Monet 合法的 physical-null 列安全提升到 string，其他类型漂移拒绝；work epoch 同时绑定 build ID 与 schema-contract SHA。
+- 恢复/发布已硬化：进程内 source 快照使用 dev/inode/size/mtime/ctime，跨节点 marker 只持久化 portable path/bytes/mtime；existing root 与新发布 root 都执行 exact set、bytes/SHA、footer/schema、256-row RG、全 physical row_id，以及末尾 controls/exact-set/五元 fingerprint closure。
+- JCC 证据：builder v3 selftest `...-m5m9` PASS；真实五域 diag `...-l54k` PASS 并原子发布；第二轮 `...-x99b` 五个 worker 均命中 `completed domain is reusable` 和 `identical output fully revalidated`，任务 Succeeded。
+- runtime 已强绑定 builder v3：exact 17-key header、domain/file key set、五域 catalog file 声明、total rows、非 diagnostic、canonical schema；两次 runtime JCC 自测最终版 `...-glrv` PASS。validator known-answer `9bd23247…c9dc72d` 已在目标镜像冻结，`...-4gwn` 完整自测 PASS。
+- validator v2 与三臂语义 A/B（source+旧GPIC stage / source+GPIC direct / sidecar+GPIC direct）经独立审查 P0=0/P1=0；逐 rank 比对 6/12-step `trace/prompts/pixels/cfg_keep`，并从冻结 plan 证明实际消费 GPIC。
+- freeze 升级为 `offline_arb_freeze_v3_caption_sidecar`：纳入 config、168 plan blocks、animefreq exact root、5 catalog parquet、全 sidecar、训练源码；统一 ctime-inclusive ledger closure 与 release digest。GPUVAL/FORMAL 使用 node0-only full verify、all-node fresh marker、JOBTAG/nonce/PASS `-nt`、JSON/freeze/release SHA 绑定；二者均 `maxRetries=0`，失败由监控线程用新 JCC jobtag 重提。独立复审 P0=0/P1=0。
+- 最终 static `evan-mot-crop-offlinearb-final-static-validate-zqv8` Succeeded：所有 sidecar/freeze/GPUVAL/FORMAL YAML 的 YAML+Bash gate，以及 builder/validator/runtime synthetic tests 全绿。
+- 正式构建 `evan-mot-crop-offlinearb-caption-sidecar-build-v3-m6qg`（5×CPU16）进行中：anime、gpic、synthetic、textatlas 已完成/PASS；Monet 为最后瓶颈。下一步：2×16CPU 独立全量 validator + 3×16CPU 三臂 A/B → freeze v3 JCC → 新 r6 2×8 GPUVAL → 门全绿才停512a并提交8×8。
+
+#### 2026-07-12 04:15 UTC 追加：r6/r7 性能门禁 NO-GO，根因收敛到 GPIC metadata
+
+- 五域 typed sidecar 已全量完成：94,986,755 rows / 1,452 files / 61,448,428,881 bytes，header SHA `55af5798…a395`。新的 L32-off/L16-off/L16-on 语义矩阵 `...-lw22` 与独立证据复算 `...-gmkm` 均 PASS；6/12-step、4 ranks 的 `trace/prompts/pixels/cfg_keep` 逐 rank 哈希全等，8 份 telemetry JSONL 的 identity/sequence/closure/SHA 全闭环，fatal/drop/runtime/rejected 全 0。
+- r6 2×8 A350+B500 功能/resume 成功（`...gpuval-tbx8`），但严格 postmortem `...-lwnw` 业务 `NO_GO` ：combined mean **4.6243s**、median 2.796s、p95 18.168s，384M 投影 **9.136 天**；checkpoint 开销仅 0.526%，不是根因。
+- r7-L16 2×8 telemetry capture `...-dhb8` 完整跑满192步，两节点 train/tee/collect rc=0，16-rank 证据 aggregate SHA `953d2ae1…c5b7f`。严格 analyzer `...-qrpx` 按设计 rc=3 / `NO_GO`：step41..192 mean **3.8181s**（投影 **7.365 天**）、median 2.877s、p95 11.565s、max 24.097s、15 个 >5s，time-weighted data-wait 48.4%。
+- r7 供给容量将根因锁到 GPIC：16 ranks 容量比仅 0.787–0.820（门为 1.111）；Monet 1.220–1.265 已全过。38 个 steady critical windows 中 31 个是 GPIC，mean 15.762s / p95 25.471s / max 34.593s。GPIC 实际 read 不是主因：608 个窗口的 thread time 中 `open+path_stat` 占81.78%，`read` 仅17.77%，两 worker 有效并发1.98/2。所有 >5s step 均在4k+1边界；rank0 看似 compute/NCCL 的尖刺可由 peer-rank GPIC I/O straggler 解释。
+- **H64 否决**：r6 L32→r7 L16 的 mean/p95/max 分别改善17.4%/36.3%/36.8%；历史同挂载 mixed gate 把 node concurrency 32→48 时总吞吐降21.7%、batch p99 恶化43.7%，独立32→64 sweep 也降20.5%。不再盲目加线程。
+- 当前下一门：先做不改生产语义的 2×CPU16、8 gloo ranks/node、W16 raw-only ABBA：L16[0,192)→L8[192,384)→L8[384,576)→L16[576,768)，每臂 fresh process/nonce，分别以后152步绝对门禁判定，禁止用平均掩盖单臂失败。若 L8 仍不达 GPIC capacity 1.111，再单独设计 FD-authoritative metadata 快路并重跑语义/负例门禁；不直接弱化 TOCTOU 完整性检查。
+- W64 raw capture 的独立 analyzer/JCC/static/freeze 绑定已补齐，但当前 winner 未决、fresh freeze 尚未重建，**未运行 W64，更未放行 FORMAL**。旧 512a `...-bhdg` 仍 6/6 Running，04:13 UTC 约 step163200，近期2.6–3.3s/step、dw 4–7%，无 Fatal/OOM/NCCL/NaN；last.pt@162000，全链绿前继续不动。
+
+#### 2026-07-12 08:05 UTC 追加：512a 自然完成；L8 稳定但绝对 NO-GO；转显式 fd-stable 折中
+
+- 旧 512a `evan-mot-redesign-512a-multiar-6x8-v3-qc6r-retry-bhdg` 已自然跑到 **166667/166667** 并 JCC `Succeeded`，没有人为提前 stop。node0 明确打印 `done at step 166667/166667`；末段日志无 Fatal/OOM/NCCL/NaN/Traceback，最后约500步 mean iter **2.914s**、mean dw **0.201s**。`last.pt` 26,328,353,144 bytes、mtime 07:08:29 UTC。后续 formal 前已不存在旧任务并跑风险。
+- W16 L16/L8/L8/L16 r4 capture `...-ztk7` 完整 `Succeeded`：四臂每臂 exact 3072 STEP + 16 RANK_PASS，总计12288/64；两节点 manifest/aggregate、telemetry、sidecar 前后 closure 全 PASS，master SHA `97307271…70c98`。三次早期失败均为验证基础设施问题（venv symlink、stdout多进程行原子性、FSx 1秒mtime），没有拿残缺数据冒充业务结论；r4 已用 deterministic nonce/SHA/content timestamp 与 PIPE_BUF 单写修正。
+- capture-bound analyzer 首跑暴露自身 schema bug（control/ledger 实际 `{path,sha}`，generic helper误要求 `{path,bytes,sha}`），不是数据失败。保留原 analyzer/FATAL 不动，另建只允许 NO-GO 的 posthoc recovery；CPU16 static `...-5mdj` Succeeded，recovery `...-gh4s` 按设计 rc=3/Failed，但 `POSTHOC_DIAGNOSTIC` envelope、attestation、最终 SHA closure 全齐（output `77c580b…fa6d`，attestation `82a5a813…d766`），`production_selector_eligible=false`。
+- 业务结论：L8 两臂 GPIC capacity **0.39308 / 0.38304**（门1.1111），pair drift **2.554%**，即重复性稳定但都绝对 NO-GO；L16 为0.36357/0.42055且漂移13.55%，同样 NO-GO。四臂 max runner 6.31–7.30s/step，wait over-target fraction均0.25；L8 不能进入语义/GPU/W64。
+- 用户允许参考现有实现并在量化后适当放松。只读审查 `troph-team_important_t2i_i2i/naifu` 与 `other_repos` 16仓：naifu 使用 immutable tar + `(offset,size)` range reader，BAGEL/OpenCLIP/Show-o 使用 Parquet/WebDataset shard；公开 direct-file 路径通常仅一次 open/read，均没有当前逐图两次 pathname stat。共同经验是把发布/索引校验移到离线层，热路径依赖稳定 FD/shard，而不是重复 pathname lookup。
+- 因此下一候选为显式 `strict_path` / `fd_stable`：fd 模式保持普通 open（含现有 symlink 语义）、前后 fstat 五元组、完整读、short/empty hard fail，只删除两次 pathname `os.stat`。准确 trade-off 是：open 后 pathname 被 rename/unlink/rebind 时接受已打开且自身稳定的旧 inode；不放松实际读取 FD 的字节/大小/原地变化检查。r4 GPIC steady thread time 中 path_stat 占约40.4–45.4%，理论单项加速1.68–1.83×，仍需真实 crossover/GPU 证明，不能凭理论放行。
+- 当前并行执行：一线实现 mode + deterministic tamper/语义测试；一线新建 strict-X→fd-X→fd-Y→strict-Y 的 W16 L16 crossover（mode进入 nonce/contract/telemetry/aggregate，fd 要求 path_stat call/time严格0）。若 CPU proxy 因共享FSx瞬时负载未过保守1.111门，但 fd 两臂有稳定大幅改善且语义/负例全绿，可按用户授权放宽为先跑短 2×8 GPU 端到端诊断；最终仍以384M约5天的真实步时决定是否继续 W64/freeze/GPUVAL/formal。
+- **08:33 UTC 线程口径补洞**：复核发现 r7/fd/W64 都锁 `GPIC threads/node=16`，但 GPUVAL/FORMAL 未设 env 时 loader 会回 legacy default32（而 r6→r7 已实证32更慢），会造成“门禁测16、正式跑32”。现已把 `dataset.gpic_threads_per_node: 16` 提升为正式 config 显式冻结字段；constructor 要求 config/env 同时存在时必须相等，并校验 `>=LOCAL_WORLD_SIZE` 且整除，`train.py` 再从 config 反查 runtime instance，GPUVAL/FORMAL 显式 unset env 以确保 config 是唯一 authority。CPU16 JCC runtime selftest `evan-offarb-sidecar-rt-selftest-85zx` Succeeded：strict/fd 原有正负例全绿，新增16↔32冲突/不可整除/过小/bool/0均按预期 hard fail。后续 crossover/semantic/W64 都必须同时绑定 config=16、env=16（诊断）、runtime=16、8-rank/node=2 workers/rank。
+
+#### 2026-07-12 14:30 UTC 追加：GPIC 频次热集被精确反证；FSx blob pilot 进入文件系统兼容修复
+
+- strict/fd 语义门、独立负例与 W16 crossover 已封存；去 pathname stat 没有把绝对 GPIC 容量推过 1.111门。JCC 直连 S3 GetObject 又被当前 IRSA/IAM（`ml-ducklake-readonly`）拒绝，用户明确两天内无法改权限；目前不等 IAM，转独立 blob overlay。
+- W64 精确 `/local` LRU 复用分析 `...cache-reuse-sgjz` PASS：正式 99,456,552 次 GPIC 曝光覆盖全20M行；每节点即使 512GiB 等大小 LRU hit 也仅11.80%，无法将基线0.787推过1.111（至少需消除29.17%源请求）。`/local` 只留作 index/滚动窗口缓冲，不作长期工作集。
+- 单节点隔离 GPIC concurrency-shape `...-jx2g` PASS：当前 16-thread 分片形态已有93.47 img/s，共享16线程59.11 img/s，A24/A32为123.35/119.84 img/s；七个互斥样本均超每节点1.25门36 img/s。因此 r7 赤字更像 GPU 节点五域/Mountpoint 竞争，不能凭空假定“共享 GPIC coordinator”能修复。
+- 频次热集假设被正式 plan 精确扫描推翻：`evan-mot-crop-offlinearb-w64-gpic-hotset-vknq` PASS，20M 行中 **543,448 行出现4次、19,456,552 行出现5次、最大仅5次**；`count>=6` 为0。`count>=5` 仍要打包97.283%对象，只省2.717%，明确不值得作频次热集。证据 JSON SHA `19be614c…aadd`。
+- 独立 ratio-overlay 精确扫描 `...ratio-overlay-mt8c` PASS（JSON SHA `15a2e1da…e23fc`）：对 `gpic_local_row_id % 20 < k`完整评估40%–85%。**60%** 在8节点所有4-step最坏窗仍失败（最小容量1.118）；**65%** 首次全过1.25，但最薄窗仅1.262；70%/75% 最薄1.415/1.654。以144,296B均值估算，65%/70%/75% 约1.876/2.020/2.164TB。部分 overlay 可作超排期备援，但默认仍倾向全量，因其会让 FUSE 冷路与双 backend 风险贯穿5天。
+- 参考仓审计：naifu 可借 `(URI,offset,size)→fetch` 分层；nano `local_access.py` 可借 PID/thread-aware FD + `os.pread`形态。但两者都有 skip/fallback/best-effort，Show-o/WebDataset 也有 resample/ignore failures，绝不能直接复制到 exact plan。生产集成只允许替换 `_image_payloads(domain=="gpic")` 的 raw-byte 传输，后续 decode/crop/caption/RNG/resume 不动，selected 失败禁止回退源。
+- `offline_gpic_blob_v1` pilot 已经独立 red-team 补齐：build/S3-build/fresh-replay/analyze 分 job；用 hashed kernel boot-id 拒绝同物理 cache host；首冷 capacity arm 在任何 full pass 前，16MiB guard 每区至多一段且隔离8MiB向前/向下对齐预读；warm full pass 只做全段SHA完整性，禁止进入容量统计；20k S3 永久标 `INCONCLUSIVE_FOR_PRODUCTION`。runner/YAML/receipt/manifest/report/jobtag 已闭包。
+- 首个 JCC static `...gpic-blob-pilot-static-ddgr` 按预期拦下真兼容问题：FSx/Lustre 对目录 `renameat2(RENAME_NOREPLACE)` 返回 `EINVAL`；任务 Failed，trap 已清理临时根，未发布任何 pilot 产物。正在改为 exclusive `mkdir` claim + regular-file hardlink + fsync + `_SUCCESS` last 的真 no-clobber 语义，补并发/崩溃负例后重跑 static。
+- 当前不可越过的下一序列：static r2 PASS → FSx 100k/20k pilot build → 可选自有S3 20k write-once pilot → 新物理节点 cold replay/analyze → 把全量FSx/部分比例/S3以及2.9TB preflight 重哈 trade-off 的量化选项交 Evan 拍板。尚未改生产 loader、未构建全量 blob、未提交 GPU/probation/FORMAL。
+
+#### 2026-07-12 15:35 UTC 追加：blob pilot 全链闭合；FSx 主路线成立，等待生产参数拍板
+
+- Lustre 发布兼容修复经独立 red-team `NO_BLOCKER` 后，CPU16 static r2 `evan-mot-crop-offlinearb-gpic-blob-pilot-static-2gl9` Succeeded：28 个 synthetic/负例全部 PASS。覆盖 exclusive-mkdir claim、并发抢占、hardlink 已创建 `_SUCCESS` 后 EIO、post-commit fsync 失败、rename 后 parent-fsync 失败、failed-root 禁止携带 `_SUCCESS`；marker 可见后只允许 `CommittedSyncUnconfirmed`，不会生成矛盾失败根。
+- 真实 FSx builder `...-build-m86c` Succeeded。互斥 ABBA source scan：8/16/24/32/48 线程为 48.98/98.63/130.26/125.55/111.86 img/s，反向为 111.87/123.18/129.02/105.36/53.86，稳定最优为24线程。100k 冷 source→hash→4GiB blobs→index→fsync 端到端 **125.605 img/s**，总 payload 约14.5GB；20k 1GiB/4GiB布局均发布成功，但受前序样本变暖，只作布局诊断。
+- 自有 S3 bounded build `...-s3-build-vhgz` Succeeded：20k / 2,918,720,568-byte blob、index、manifest、`_SUCCESS` 全部 fsync，FSx/S3 artifact vector `BYTE_IDENTICAL`。它证明当前 JCC Mountpoint 对该唯一 prefix 的 Put/multipart/List/Get 权限可用；仍不能绕过 pod 直连 S3 的 IRSA deny。
+- 首个 replay `...-rmd8` 被 analyzer 正确拒绝，因为 hashed boot-id 与 builders 相同；并行重提后保留不同物理宿主的 `...-nqmh`，停止同宿主冗余 `...-qbtv`。有效 fresh replay 全部 PASS：FSx cold-authority 1GiB/4GiB/full100k 为 **4223/3477/6559 img/s**，full-coverage integrity 为13.2k–14.5k img/s；所有 segment SHA闭合。S3 两次 cold结果116.5/347.7 img/s漂移巨大，且当前 Mountpoint官方配置允许每FD预取窗口自适应至2GiB，故物理GET放大不可观测，S3只保留备选诊断。
+- 最终绑定 analyzer `evan-mot-crop-offlinearb-gpic-blob-pilot-analyze-5jpc` Succeeded，analysis JSON SHA `9ab418be…bc7bd`。合同总状态仍是 `INCONCLUSIVE_FOR_PRODUCTION`（pilot明确禁止直接授权生产），不是数据/完整性失败。scan给出单节点理想42.85h、8节点理想5.36h；按真实100k build为单节点约44.2h、理想8节点约5.53h。
+- 排期独立审计指出不能直接除8拍板。正在新建独立 8×CPU16 扩展探针：ABBA 四臂每worker各100k（总3.2M），另worker0前后各60k控制；正式 `local_row_id % 8` 分区、worker内path sort、统一barrier、每60s source/HOL/write/fsync/RSS/FD telemetry。硬门为扩展效率≥0.75（目标≥0.85）、慢/快节点≤1.25，并用5分钟窗p10×1.20给 full/75% ETA。
+- 已向 Evan 请求三项生产拍板：默认建议全量 FSx overlay；显式 row-id 定宽 index（当前56B/行，约1.12GB）；发布时一次全量 verifier + 正式 preflight fingerprint/index/manifest、运行时逐segment SHA的快速 freeze。未获拍板前不启动全量2.9TB构建；扩展探针与安全实现准备继续并行。
+
+#### 2026-07-12 15:50 UTC 追加：FSx 800GB 硬约束，生产路线改为全量 S3 + node-local 全分区 staging
+
+- Evan 新增硬约束：项目 FSx 使用控制在800GB（当前约500GB）。全量FSx payload约2.9TB、75%也约2.16TB，均不合规；已明确拍板 **全量S3 blobs + 显式row-id index + 快速freeze**。FSx只允许index/manifest/telemetry/receipts等小控制面。
+- 8×CPU16 topology probe `evan-mot-crop-offlinearb-local-topology-94ns` Succeeded，8 workers落在8个不同hashed boot-id物理节点；`/local/evan`为node-local、跨节点不可见。每节点总容量均30,277,923,348,480 bytes，可用18.184–24.054TB；按`max(100GiB,20% total)`保留后，最差每节点仍有12,128,305,401,856 bytes安全staging。summary JSON SHA `27c48e9d…d73a`。
+- 因此生产builder不再只滚动一个blob：8个worker按`local_row_id % 8`各负责约2.5M行/约360–370GB，先在本节点`/local/evan`完成4GiB blobs、显式row-id index fragment、逐segment与blob SHA、fsync；之后上传各自唯一S3 keys并在同pod回读验证。失败可同pod重传，不必重读20M小图；不依赖local跨job持久性。
+- coordinator只在8个worker receipts全绿、分区20M行无重无洞后，在FSx合并约1.12GB index并发布双份控制manifest，最后写S3 `_SUCCESS`。全量payload仅在S3约2.9TB；FSx新增量目标<50GB，远低于800GB上限。
+- 训练默认先直接随机pread S3大blob并跑8节点正式形状门；若probation显示S3抖动，再在同一GPU job内启用更大的local mirror/cache。暂不预拷每节点完整2.9TB（8节点共23TB），避免GPU空等与无必要的数据复制。
+
+#### 2026-07-12 16:55 UTC 追加：modulo-8 + 全路径排序扩展崩溃，已止损并转互斥源目录分片
+
+- 真实8×CPU16 scale job `evan-mot-crop-offlinearb-gpic-scale-probe-pkln`在worker0单节点控制臂完成60,000张：**146.08 img/s**。随后8 worker同时执行当前`local_row_id % 8`选样+各自全路径排序的`source_a`，约300秒窗口各worker为12.63–15.79 img/s，合计 **116.286 img/s**，E8=**0.09951**。按此速度全量仅读取就需约47.77小时；任务已主动`Stopped`，未进入B臂/未写正式S3 namespace。
+- 取证发现GPIC源路径为`train/00000/...` 至 `train/07999/...`的8000个目录分片；Parquet每个row group的path min/max均跨`00000..07999`。因此当前8 worker各自全路径排序会同步从`00000`向后扫，高度疑似制造共享prefix/metadata热点；这比“8节点自然线性扩展”的原假设更符合实测。
+- 下一轮只诊断不写正式S3：对比2/4/8节点、互斥目录分片（候选`int(source_shard) % 8`）、当前同步形状及错峰启动。生产builder暂不冻结modulo-row分区；物理blob按互斥源shard顺序生成，显式row-id dense index仍恢复20M全局slot，语义ABI不变。
+
+#### 2026-07-12 17:10 UTC 追加：发现同源官方12.796TB大tar，生产source路线升级为tar-sequential
+
+- 同一只读挂载存在官方打包前源：`/s3-mewtant-raw-datasets/stanford-vision-lab/gpic/train/gpic_train_00000.tar` 至 `...07999.tar`。官方README明确为8000个train tar，每tar中按`key.json`、`key.jpg/png`交替存放。实际列举闭包为 **8000 files / 12,796,229,457,920 bytes**，平均1,599,528,682 bytes，min/max 1,524,428,800/1,669,652,480 bytes。
+- 目录编号与小图解压目录一一对应。已对一个真实catalog行`train/00000/0ab855...faf7f.jpg`做小图与tar member A/B，两者SHA-256同为`9515a89660fc6d03fb98b0ef3a0103dd4242b5f2eb1c72f7b8644bc9beaed587`。另一个tar首成员A/B亦完全一致；已证明它是当前小图的字节相同打包前身，不是另一数据版本。
+- 小文件prefix调参降为备援，当前优先走JCC跨多tar字节等价+顺序扫描吞吐pilot。若闭合，8个builder worker各负责1000互斥tar；先在`/local/evan`发布可按tar重试的selected chunk+sidecar，再仅本地顺序拼成4GiB runtime blobs并上传S3。预计每worker约360–370GB selected bytes，两阶段peak约<800GB；候选local硬门上调至1,000,000,000,000 bytes，仍远低于实测12.128TB/节点安全下限。FSx 50GB增量与项目800GB硬约束不变。
+- 8×CPU16只读快探针`evan-mot-crop-offlinearb-gpic-tar-seq-quick-vpfq` **Succeeded**，8个不同boot。每节点对互斥tar做整文件SHA-256的509.43–622.45MB/s，合计4.58380GB/s；完整`tar -tf`为571.84–777.66MB/s，合计5.17099GB/s。按官方全12.796TB外推，纯整文件字节扫描 **46.53分钟**，完整header枚举 **41.24分钟**；抽样tar各24,728–25,296成员。summary JSON SHA `8b5c3112…e29d0`，作业YAML SHA `1fa5fc9f…51faf9`。这已把tar路线从猜测提升为明确GO，后续开销为解析/筛选/哈希/local fsync，不再是源端metadata容量。
+
+#### 2026-07-12 17:30 UTC 追加：tar mapping/runtime/production protocol 三道静态门已绿
+
+- tar mapping synthetic static `...-7m2h` Succeeded；真实CPU16 probe `evan-mot-crop-offlinearb-gpic-tar-mapping-probe-wvsq` Succeeded。它扫完catalog全20M行/314 row groups，在16个源tar上各取16个row-group stratum（覆盖RG 0、138/157、295）；**256/256** catalog target在推导tar/member中找到，size/raw bytes/SHA-256全等。16个tar全成员JSON→image pairing均真，member为无目录前缀的exact basename。report raw SHA `11f680e7…3dc92`，`_COMPLETE`精确绑定该raw SHA。
+- production S3/local/index/approval/fresh-verifier协议的synthetic E2E static最终`evan-mot-crop-offlinearb-gpic-s3-production-static-7fcp` Succeeded；前两次失败仅暴露并修复static/verifier namespace parent唯一ownership，未冒充业务结论。发布schema最终冻结为：FSx独立`_SUCCESS`；S3唯一commit marker为root `_SUCCESS` absolute-last；S3 `controls/`仅`manifest.json`，不存在第三marker。
+- 训练runtime overlay独立红队修复后，CPU16 JCC `evan-mot-crop-offlinearb-gpic-blob-runtime-static-v5d2` Succeeded：33 runtime cases PASS，覆盖双marker、同FD mmap-hash/live-path TOCTOU、distributed fail-fast、稀疏blob ID、strict relative key/openat、RLIMIT/FD/RSS、short/EINTR、all-rank slowest supply及zero source fallback。receipt SHA `7d53b8f5…c3e0bc`。正式config尚未切overlay，必须等artifact+语义/W64/probation。

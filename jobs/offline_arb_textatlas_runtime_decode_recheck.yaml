@@ -1,0 +1,39 @@
+name: evan-offarb-textatlas-runtime-decode-recheck
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 4
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 128
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  HOST=$(hostname); SHARD_INDEX=${HOST##*-}; SHARD_COUNT=4
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_arb_textatlas_runtime_recheck.$SHARD_INDEX
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  ROOT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_textatlas_full_strict_decode_audit_v1
+  AUDIT=$ROOT/integrity_audit.json
+  BINDINGS=$ROOT/repaired_payload_bindings.json
+  IMAGE_FETCH=training/dataline/image_fetch.py
+  RESULT=$ROOT/runtime_recheck_shard_${SHARD_INDEX}.json
+  test -f "$ROOT/_SUCCESS" && test -f "$ROOT/_REPAIRED_BINDINGS_SUCCESS" \
+    || { echo "FATAL: prerequisite full audit/bindings incomplete"; exit 34; }
+  test ! -e "$RESULT" || { echo "FATAL: immutable shard output exists: $RESULT"; exit 34; }
+  "$PY" -m py_compile scripts/offline_arb/audit_textatlas_runtime_decode_candidates.py
+  "$PY" scripts/offline_arb/audit_textatlas_runtime_decode_candidates.py \
+    --audit "$AUDIT" \
+    --expected-audit-sha256 35c45f47e7a4af55da3eec22d5d4be5306f87ae589d5fd1d994aef6c346bdeac \
+    --bindings "$BINDINGS" \
+    --expected-bindings-sha256 e932637fe2a21227f12bbbb26d7f57021fe52d2ffda0adb1f08e60375119d1fa \
+    --image-fetch "$IMAGE_FETCH" \
+    --shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT" \
+    --timeout-seconds 900 \
+    --output "$RESULT"
+  sha256sum "$RESULT" > "$RESULT.sha256"
+  touch "$ROOT/_RUNTIME_RECHECK_SHARD_${SHARD_INDEX}_SUCCESS"

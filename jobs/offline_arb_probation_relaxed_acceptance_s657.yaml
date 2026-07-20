@@ -1,0 +1,181 @@
+# CPU-only independent policy-exception audit for the completed s657 8x8
+# probation.  It preserves the original strict FAIL and publishes a distinctly
+# named receipt only when every non-speed contract is still green.
+name: evan-offarb-prod-gpic-8x8-s657-relaxed-audit
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 128
+maxRetries: 0
+command: |
+  set -euo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  TARGET=evan-offarb-prod-gpic-8x8-one80omp4-probation-s657
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  STRICT=$BASE/offline_gpic_blob_8x8_probation_v1/$TARGET
+  CK=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/offline_gpic_blob_probation/evan-mot-crop-offlinearb-gpic-s3-production-build-zg8g/$TARGET
+  AUDIT_HOST=$(hostname)
+  AUDIT_JOBTAG=${AUDIT_HOST%-0}
+  OUT=$BASE/offline_gpic_blob_8x8_probation_relaxed_acceptance_v1/$TARGET/$AUDIT_JOBTAG
+  test ! -e "$OUT" && test ! -L "$OUT" \
+    || { echo "FATAL: relaxed audit output namespace exists: $OUT"; exit 2; }
+  mkdir -p "$(dirname "$OUT")"
+  mkdir "$OUT"
+
+  "$PY" - "$STRICT" "$CK" "$TARGET" "$OUT" "$AUDIT_JOBTAG" \
+    "$PWD/jobs/offline_arb_probation_relaxed_acceptance_s657.yaml" <<'PYEOF'
+  import hashlib
+  import json
+  import os
+  import re
+  import sys
+  from argparse import Namespace
+  from pathlib import Path
+
+  from scripts.offline_arb.analyze_offline_gpic_probation import analyze, canonical
+
+  strict_root = Path(sys.argv[1])
+  checkpoint_root = Path(sys.argv[2])
+  target_jobtag = sys.argv[3]
+  output_root = Path(sys.argv[4])
+  audit_jobtag = sys.argv[5]
+  policy_yaml = Path(sys.argv[6])
+  repo = Path("/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop")
+  base = Path("/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop")
+  buildtag = "evan-mot-crop-offlinearb-gpic-s3-production-build-zg8g"
+  manifest_sha256 = "a18ba1f1250e3b00abdc1051dc71e08a254b8855d5b61b9975e88d2e6ae2ee05"
+  artifact_root = base / "offline_gpic_blob_v1_release" / buildtag
+  probation_yaml = repo / "jobs/offline_exact_256_8x8_gpic_blob_probation_PRODUCTION.yaml"
+
+  args = Namespace(
+      artifact_root=artifact_root,
+      buildtag=buildtag,
+      manifest_sha256=manifest_sha256,
+      result_root=strict_root,
+      checkpoint_root=checkpoint_root,
+      jobtag=target_jobtag,
+      config=repo / "configs/stage256_offline_exact_v1.yaml",
+      plan_root=base / "offline_arb_plans_v1/w64_prod/plan",
+      catalog_root=base / "offline_arb_catalog_v1",
+      job_yaml=probation_yaml,
+      output=output_root / "unused.json",
+  )
+  fresh, passed = analyze(args)
+  if passed or fresh.get("status") != "FAIL":
+      raise SystemExit("FATAL: strict analyzer no longer reproduces FAIL")
+
+  strict_analysis = strict_root / "analysis.json"
+  strict_raw = strict_analysis.read_bytes()
+  if strict_raw != canonical(fresh):
+      raise SystemExit("FATAL: fresh strict analysis differs byte-for-byte")
+  strict_sha = hashlib.sha256(strict_raw).hexdigest()
+
+  status_path = strict_root / "analysis.status"
+  status_raw = status_path.read_bytes()
+  fields = status_raw.decode("ascii").strip().split("|")
+  if (
+      len(fields) != 4
+      or fields[0] != "3"
+      or fields[1] != target_jobtag
+      or re.fullmatch(r"[0-9a-f]{64}", fields[2]) is None
+      or fields[3] != strict_sha
+  ):
+      raise SystemExit("FATAL: malformed or unbound strict analysis.status")
+  if (strict_root / "_SUCCESS").exists() or (strict_root / "_SUCCESS").is_symlink():
+      raise SystemExit("FATAL: strict _SUCCESS must remain absent")
+
+  allowed_failures = {
+      "conservative_steady_mean_gt_2.75s",
+      "any_steady_p95_gt_5s",
+      "any_steady_gt5s_fraction_gt_0.05",
+  }
+  failures = set(fresh.get("failures", []))
+  if not failures or not failures <= allowed_failures:
+      raise SystemExit(f"FATAL: relaxed audit cannot override failures={sorted(failures)}")
+
+  gate = fresh["speed_gate"]
+  thresholds = {
+      "conservative_steady_mean_s_max": 3.20,
+      "max_steady_p95_s_max": 8.0,
+      "max_gt5s_fraction_max": 0.15,
+      "max_steady_data_wait_fraction_max": 0.25,
+      "predicted_formal_days_max": 6.20,
+  }
+  observations = {
+      "conservative_steady_mean_s": gate["conservative_steady_mean_s"],
+      "max_steady_p95_s": gate["max_steady_p95_s"],
+      "max_gt5s_fraction": gate["max_gt5s_fraction"],
+      "max_steady_data_wait_fraction": gate["max_steady_data_wait_fraction"],
+      "predicted_formal_days": gate["predicted_formal_days"],
+  }
+  comparisons = (
+      observations["conservative_steady_mean_s"] <= thresholds["conservative_steady_mean_s_max"],
+      observations["max_steady_p95_s"] <= thresholds["max_steady_p95_s_max"],
+      observations["max_gt5s_fraction"] <= thresholds["max_gt5s_fraction_max"],
+      observations["max_steady_data_wait_fraction"] <= thresholds["max_steady_data_wait_fraction_max"],
+      observations["predicted_formal_days"] <= thresholds["predicted_formal_days_max"],
+  )
+  if not all(comparisons):
+      raise SystemExit(f"FATAL: relaxed speed policy failed observations={observations}")
+
+  def sha256(path):
+      return hashlib.sha256(path.read_bytes()).hexdigest()
+
+  receipt = {
+      "schema_version": "offline_gpic_blob_probation_relaxed_acceptance_v1",
+      "status": "RELAXED_PASS",
+      "classification": "USER_AUTHORIZED_SPEED_TRADEOFF",
+      "strict_gate_preserved": True,
+      "target_jobtag": target_jobtag,
+      "audit_jobtag": audit_jobtag,
+      "buildtag": buildtag,
+      "manifest_sha256": manifest_sha256,
+      "strict_failures": sorted(failures),
+      "allowed_strict_speed_failures": sorted(allowed_failures),
+      "thresholds": thresholds,
+      "observations": observations,
+      "steady_windows": gate["windows"],
+      "strict_analysis_sha256": strict_sha,
+      "strict_analysis_status_sha256": hashlib.sha256(status_raw).hexdigest(),
+      "strict_analysis_nonce": fields[2],
+      "strict_bindings": fresh["bindings"],
+      "strict_overlay_health": fresh["overlay_health"],
+      "strict_round_contract": fresh["round_contract"],
+      "strict_supervisors": fresh["supervisors"],
+      "policy_yaml_sha256": sha256(policy_yaml),
+  }
+  receipt_raw = canonical(receipt)
+  receipt_path = output_root / "receipt.json"
+  temporary = output_root / f".receipt.json.tmp.{os.getpid()}"
+  with temporary.open("xb", buffering=0) as handle:
+      handle.write(receipt_raw)
+      handle.flush()
+      os.fsync(handle.fileno())
+  os.replace(temporary, receipt_path)
+  receipt_sha = hashlib.sha256(receipt_raw).hexdigest()
+  marker_raw = (
+      f"RELAXED_PASS|{target_jobtag}|{audit_jobtag}|{strict_sha}|{receipt_sha}\n"
+  ).encode("ascii")
+  marker_tmp = output_root / f"._RELAXED_SUCCESS.tmp.{os.getpid()}"
+  with marker_tmp.open("xb", buffering=0) as handle:
+      handle.write(marker_raw)
+      handle.flush()
+      os.fsync(handle.fileno())
+  os.replace(marker_tmp, output_root / "_RELAXED_SUCCESS")
+  directory_fd = os.open(output_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+  try:
+      os.fsync(directory_fd)
+  finally:
+      os.close(directory_fd)
+  print(
+      "OFFLINE_GPIC_8X8_RELAXED_ACCEPTANCE_PASS "
+      f"target={target_jobtag} audit={audit_jobtag} "
+      f"strict_sha256={strict_sha} receipt_sha256={receipt_sha}"
+  )
+  PYEOF

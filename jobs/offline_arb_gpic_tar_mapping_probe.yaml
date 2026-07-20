@@ -1,0 +1,72 @@
+# One-node CPU16 read-only catalog -> official-tar -> unzipped-byte mapping proof.
+# This job never writes to either source mount and publishes compact evidence
+# only under a unique FSx jobtag namespace.
+name: evan-mot-crop-offlinearb-gpic-tar-mapping-probe
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 64
+maxRetries: 0
+command: |
+  set -euo pipefail
+  umask 077
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1
+  export PYTHONFAULTHANDLER=1
+  export PYTHONHASHSEED=0
+  export PYTHONDONTWRITEBYTECODE=1
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/offline_gpic_tar_map.$(hostname)
+  export OMP_NUM_THREADS=1
+  export MKL_NUM_THREADS=1
+  export OPENBLAS_NUM_THREADS=1
+  export NUMEXPR_NUM_THREADS=1
+  export ARROW_NUM_THREADS=1
+
+  HOST=$(hostname)
+  [ "${HOST##*-}" = 0 ] || { echo "FATAL: tar-mapping probe must be one worker"; exit 2; }
+  JOBTAG=${HOST%-0}
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  RUNNER=$REPO/scripts/offline_arb/probe_gpic_tar_mapping.py
+  CORE=$REPO/scripts/offline_arb/run_offline_gpic_blob_pilot.py
+  SELF=$REPO/jobs/offline_arb_gpic_tar_mapping_probe.yaml
+  CATALOG=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_v1
+  TAR_ROOT=/s3-mewtant-raw-datasets/stanford-vision-lab/gpic/train
+  README=/s3-mewtant-raw-datasets/stanford-vision-lab/gpic/README.md
+  OUTPUT_PREFIX=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_gpic_tar_mapping_probe_20260712v1
+  EXPECTED_RUNNER_SHA=7cb5d6fb876da19ca480b11700051944796de5f48b64d61b6332e996136d1fc0
+
+  for FILE in "$RUNNER" "$CORE" "$SELF" "$CATALOG/header.json" "$CATALOG/gpic.parquet" "$README"; do
+    [ -f "$FILE" ] && [ ! -L "$FILE" ] && [ -s "$FILE" ] \
+      || { echo "FATAL: invalid tar-mapping input"; exit 2; }
+  done
+  [ -d "$TAR_ROOT" ] && [ ! -L "$TAR_ROOT" ] \
+    || { echo "FATAL: invalid read-only GPIC tar root"; exit 2; }
+  [ "$(sha256sum "$RUNNER" | awk '{print $1}')" = "$EXPECTED_RUNNER_SHA" ] \
+    || { echo "FATAL: tar-mapping runner SHA drift"; exit 2; }
+  mkdir -m 700 -p "$OUTPUT_PREFIX" "$PYTHONPYCACHEPREFIX"
+  [ ! -e "$OUTPUT_PREFIX/$JOBTAG" ] && [ ! -L "$OUTPUT_PREFIX/$JOBTAG" ] \
+    || { echo "FATAL: tar-mapping namespace is not fresh"; exit 2; }
+  "$PY" -m py_compile "$RUNNER"
+
+  timeout --preserve-status --signal=TERM --kill-after=30s 7200s \
+    "$PY" "$RUNNER" \
+      --catalog-root "$CATALOG" \
+      --tar-root "$TAR_ROOT" \
+      --readme "$README" \
+      --output-prefix "$OUTPUT_PREFIX" \
+      --jobtag "$JOBTAG" \
+      --tar-shards 0,1,7,31,127,511,1023,2047,3071,4095,5119,6143,7001,7500,7900,7999 \
+      --samples-per-tar 16 \
+      --tar-workers 8 \
+      --max-catalog-row-groups 314 \
+      --source-prefix /s3-mewtant-raw-datasets/stanford-vision-lab/gpic_umziped/images/train/ \
+      --read-authority offline-gpic-tar-mapping-read-only-v1 \
+      --job-spec "$SELF" \
+      --production-shape
+
+  echo "OFFLINE_GPIC_TAR_MAPPING_JCC_COMPLETE jobtag=$JOBTAG"

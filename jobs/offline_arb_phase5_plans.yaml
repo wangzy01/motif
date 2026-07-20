@@ -1,0 +1,62 @@
+# OFFLINE_ARB_V1 Phase-5:从正式 catalog(--catalog-header,真 hash 绑定)构建三份生产/验证 plan 并全部验证。
+#   w64_prod  : W=64 bs=36 H=172032(8×8 formal;global 2304 D11;停点 166667 步,尾部裕量不消费)
+#   w16_gpuval: W=16 bs=36 H=1024 (2×8 GPU 验证含 resume smoke)
+#   w4_smoke  : W=4  bs=36 H=128  (loader CPU 冒烟)
+# 前置:offline_arb_catalog_v1/header.json 存在且 self_checks 全 pass(缺失 exit 34)。
+# 输出:offline_arb_plans_v1/{w64_prod,w16_gpuval,w4_smoke}/{planner_input.json,plan/,validate_report.json}
+name: evan-mot-crop-offlinearb-p5-plans
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 16
+memGBPerWorker: 96
+maxRetries: 0
+command: |
+  set -euxo pipefail
+  cd /fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export PYTHONPATH=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  export CUDA_VISIBLE_DEVICES=""
+  export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export OMP_NUM_THREADS=8 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  BASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  CAT=$BASE/offline_arb_catalog_v1
+  NMX=$BASE/offline_arb_bucketstats_v1/N_matrix.parquet
+  ROOT=$BASE/offline_arb_plans_v1
+  test -f "$CAT/header.json" || { echo "FATAL: catalog header.json missing (exit 34)"; exit 34; }
+  "$PY" - "$CAT/header.json" <<'PYEOF'
+  import json, sys
+  with open(sys.argv[1], encoding="utf-8") as f:
+      h = json.load(f)
+  assert h.get("diagnostic_run") is False, "catalog header is a diag product"
+  checks = h.get("self_checks") or {}
+  bad = [k for k, v in checks.items() if isinstance(v, dict) and v.get("pass") is not True]
+  assert not bad, f"catalog self_checks failed: {bad}"
+  print("catalog preflight OK:", h.get("catalog_hash", "")[:16], "rows:", h.get("row_count"))
+  PYEOF
+  "$PY" -m py_compile scripts/offline_arb/make_planner_input.py scripts/offline_arb/build_plan.py scripts/offline_arb/validate_plan.py
+  mkdir -p "$ROOT"
+  build_one() {
+    local TAG=$1 W=$2 BS=$3 H=$4
+    local DIR=$ROOT/$TAG
+    mkdir -p "$DIR"
+    "$PY" scripts/offline_arb/make_planner_input.py \
+      --n-matrix "$NMX" \
+      --config configs/stage256_offline_exact_v1.yaml \
+      --catalog-header "$CAT/header.json" \
+      --total-steps "$H" --world-size "$W" --per-rank-bs "$BS" \
+      --seed 20260710 --plan-id "stage256_offline_exact_v1_${TAG}" \
+      --out "$DIR/planner_input.json"
+    rm -rf "$DIR/plan"
+    "$PY" scripts/offline_arb/build_plan.py --input "$DIR/planner_input.json" --out "$DIR/plan"
+    "$PY" scripts/offline_arb/validate_plan.py \
+      --input "$DIR/planner_input.json" --plan "$DIR/plan" \
+      --report "$DIR/validate_report.json"
+    echo "==== PLAN $TAG OK (W=$W bs=$BS H=$H) ===="
+  }
+  T0=$SECONDS
+  # 小 plan 先行:秒级失败快;w64 放最后(构建 ~15min 级)。
+  build_one w4_smoke   4  36 128
+  build_one w16_gpuval 16 36 1024
+  build_one w64_prod   64 36 172032
+  echo "==== OFFLINE_ARB PHASE5 PLANS ALL OK wall=$((SECONDS - T0))s ===="

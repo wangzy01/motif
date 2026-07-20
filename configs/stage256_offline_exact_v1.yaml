@@ -1,0 +1,173 @@
+# stage256 OFFLINE_ARB_V1 formal config(2026-07-10 晚,D11 拍板)
+# 基线 = stage256_redesign_naifu_arb_v1.yaml,声明的全部差异(独立审查逐键 diff 核过,其余零漂移):
+#   ① store_cls → OfflineExactDataset;② assignment_mode → offline_exact_v1;
+#   ③ 新增 offline_plan_root/offline_catalog_root;④ batch_size 48→36(8×8=64 ranks,global 2304 不变);
+#   ⑤ checkpoint_dir 全新 namespace(口径⑦:不续任何 streaming ckpt);
+#   ⑥ 删 multi_ar.bucket_probs/native_bucket_dist(streaming 遗物,offline 消费点为零,审查核过安全);
+#   ⑦ trainer 补运行时实证键(旧 formal 模板 DOTS 同款,审查 P1-3:gc 三件套治 iter_s 爬升根因
+#      2026-07-03/05;force_os_exit/skip_teardown 治收尾挂死)——写进 config 保证 gpuval 与 formal 同口径；
+#   ⑧ GPIC 节点总并发显式冻结16，禁止诊断 env 与正式 config 静默分叉。
+# 实际停点 = min(max_steps 250000, 384M expo/2304 = 166667 步)。plan H=172032(裕量 3.2%,尾部不消费)。
+# streaming 期字段(buffer/queue/fill 等)对 offline loader 惰性(构造器 **_ 吞掉),保留仅为 diff 可比。
+
+model_cls: networks.model_mot.MoTT2IModel
+target_device: cuda
+
+model:
+  pretrained_path: /fsx/models/Qwen3-VL-2B-Instruct
+  tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct
+  patch_size: 1
+  time_gap: 2048
+  timestep_multiplier: 1.0
+  text_max_length: 384
+  cfg_dropout_prob: 0.1
+  text_rich_cfg_dropout_prob: 0.0
+  prompt_template:
+    enabled: true
+  gradient_checkpointing: true
+  sandwich_norm: true
+  noise_condition: true
+  long_skip:
+    enabled: false
+    mode: A_full
+  text_adapter:
+    enabled: false
+    num_layers: 2
+    multi_layer_fusion:
+      enabled: false
+      num_layers: 12
+  und_lora:
+    enabled: false
+    num_layers: 8
+    rank: 32
+    alpha: 32
+    lr_scale: 0.3
+    target_modules: [q, k, v, o]
+  abs_sincos:
+    enabled: false
+
+vae:
+  name: flux2
+  pretrained_path: /fsx/models/FLUX.2-klein-4B/vae
+  dtype: bfloat16
+
+dataset:
+  store_cls: training.dataline_offline.offline_dataset.OfflineExactDataset
+  sampling_config: /fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json
+  stage: "256"
+  image_size: 256
+  offline_plan_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_plans_v1/w64_prod/plan
+  offline_catalog_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_v1
+  # anime 标签频率预计算表(2026-07-11 gpuval 实证冷扫尖刺后 Evan 拍板;值与运行时扫描逐字节一致)
+  offline_anime_freq_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_animefreq_v1
+  # catalog global row_id 对齐的 typed caption sidecar；配置后任何缺失/hash/catalog/read 漂移均 fail-fast，绝不回源。
+  offline_caption_sidecar_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_caption_sidecar_v1
+  caption_sidecar_workers: 16
+  # 以下四项仅供 sidecar_root=None 的回源 baseline/selftest；正式 sidecar 路径下惰性。
+  caption_workers_anime: 8
+  caption_workers_monet_real: 8
+  caption_workers_gpic: 4
+  caption_workers_synthetic: 2
+  # gpuval r2 实证(2026-07-11):构造器默认 1 线程,streaming 键 fetch_workers 对 offline 构造器无效
+  # → anime 单线程 ~2 img/s < 需求 ~3.9/rank,窗口边界周期性停 90-120s。8 线程/rank(2×8 与 8×8
+  # 下集群 CDN 并发均 ≤512,Phase-1 实测 64 并发/节点零限流口径内)。
+  fetch_workers_anime: 8
+  # gpuval r3 实证(2026-07-11):随机 plan 下窗口项散布 ~200 tar,串行逐 tar FUSE 读=每窗口
+  # 60-100s 停顿(每 ~20 步一次)→ 逐 tar 并行 8。
+  fetch_workers_tar: 8
+  # GPIC 直接保留 source bytes，省掉 rolling /local write→read→unlink；四类语义 hash 必须与旧路径相同。
+  gpic_payload_in_memory: true
+  # r6/r7 实证 32 threads/node 会加剧共享挂载竞争；正式冻结为16（8 ranks/node×2 workers/rank）。
+  # loader 会拒绝与此值不同的 OFFLINE_ARB_GPIC_THREADS_PER_NODE，防 W64/GPUVAL/FORMAL 口径漂移。
+  gpic_threads_per_node: 16
+  # 一致性策略必须显式冻结；性能候选 fd_stable 在独立 A/B 通过前不进入正式配置。
+  gpic_source_consistency_mode: strict_path
+  # ---- 以下 streaming 期字段对 offline loader 惰性(见文件头注释) ----
+  buffer_size: 4096
+  queue_size: 128
+  min_fill: 64
+  first_fill_policy: all_min
+  first_fill_timeout_s: 120
+  fetch_workers: 8
+  producer_native_io_serial: false
+  drain_mode: proportional
+  textatlas_local_root: /local/evan/textatlas5m
+  anime_nrows: 20000
+  anime_cache_dir: /local/evan/anime_img_cache
+  stats_cache: /fsx/evan/mot_code/data_analysis/outputs/monet_global_stats_rich_v1.json
+  tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct
+  use_latent_cache: false
+
+  crop_v_anchor:
+    anime: 0.15
+
+  multi_ar:
+    enabled: true
+    assignment_mode: offline_exact_v1
+    bucket_mode: adaptive
+    target_area: 65536
+    divisor: 16
+    adaptive_no_upscale: true
+    adaptive_min_area_ratio: 0.75
+    adaptive_max_aspect: 4.0
+    bucket_buffer_size: 256
+    bucket_min_fill: 1
+    bucket_wait_timeout_s: 120
+    bucket_wait_native_s: 0
+    bucket_prob_floor: 0.01
+    warmup_exposure_images: 0
+    warmup_steps: 0
+    square_only_domains: [synthetic, textatlas]
+
+sigma_sampling:
+  dist: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  shift: 1.0
+
+optimizer:
+  name: torch.optim.AdamW
+  params:
+    lr: 1.73e-4
+    weight_decay: 0.0
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+scheduler:
+  num_warmup_steps: 1000
+  decay: constant
+
+trainer:
+  seed: 42
+  amp_dtype: bfloat16
+  batch_size: 36
+  max_steps: 250000
+  max_exposure_images: 384000000
+  gradient_clip_val: 1.0
+  log_every: 10
+  dataline_metrics_every: 50
+  checkpoint_steps: 3000
+  checkpoint_keep_every: 50000
+  checkpoint_keep_max: 4
+  checkpoint_keep_format: weights_ema
+  checkpoint_dir: /fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage256_offline_exact_v1
+  resume: true
+  skip_distributed_teardown: true
+  force_os_exit_after_train: true
+  gc_gen2_threshold: 200
+  gc_freeze_after_steps: 50
+  gc_refreeze_every: 10000
+  debug_step_trace: false
+  debug_step_trace_dir: null
+  debug_trace_dump_interval: 0
+  batch_ready_barrier: false
+  batch_ready_barrier_dir: null
+  batch_ready_barrier_run_id: null
+  batch_ready_barrier_timeout_s: 300
+  ema:
+    enabled: true
+    decay: 0.9999
+  use_wandb: false
+  wandb_project: mot-pilot-v1
+  wandb_entity: null
+  wandb_mode: offline
