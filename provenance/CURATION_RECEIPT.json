@@ -1,0 +1,3585 @@
+{
+  "authorizations": {
+    "main_update": false,
+    "s3_or_fsx_deletion": false,
+    "stage512b_training": false
+  },
+  "builder_sha256": "dd178ce71e40a31b887a9ab362f01613e2411fff3569300db4a229f3caafc0aa",
+  "curated_overlays": {
+    "authorities": [
+      {
+        "ordered_transforms": [
+          {
+            "name": "bind_real_caption_band",
+            "new_fragment_bytes": 50,
+            "new_fragment_sha256": "e9984ac6bbb97a26a6714045e85e20c61dc47922b547537acf95b81f40fb4e4d",
+            "old_fragment_bytes": 47,
+            "old_fragment_sha256": "b3701dc4044f646c641d50275d8e4dc0b989233e72e178443548d3b496be7a6c",
+            "operation": "exact_bytes_replace_once",
+            "order": 1,
+            "post_bytes": 42335,
+            "post_sha256": "1c0aaa71ff2f8f56be614b70948be511c3d55e7798e7bf407dc1c7ad5b1bdb59",
+            "pre_bytes": 42332,
+            "pre_sha256": "75707fdcb32e69d7d9ffbbd755dcc12b9f059af65319edd06c06cfc54f0549aa",
+            "reason": "bind required real-domain caption_band=0 in legacy policy fixture",
+            "replacement_count": 1
+          }
+        ],
+        "python_compile_required": true,
+        "source_bytes": 42332,
+        "source_relative_path": "scripts/offline_arb/test_caption_sidecar_runtime.py",
+        "source_sha256": "75707fdcb32e69d7d9ffbbd755dcc12b9f059af65319edd06c06cfc54f0549aa",
+        "target_bytes": 42335,
+        "target_path": "scripts/offline_arb/test_caption_sidecar_runtime.py",
+        "target_sha256": "1c0aaa71ff2f8f56be614b70948be511c3d55e7798e7bf407dc1c7ad5b1bdb59",
+        "transform_count": 1
+      },
+      {
+        "ordered_transforms": [
+          {
+            "name": "bind_real_caption_band",
+            "new_fragment_bytes": 40,
+            "new_fragment_sha256": "08640bef909db967f3e06b7a702358884b7799342597cdc9dc4c5b82adc939bf",
+            "old_fragment_bytes": 37,
+            "old_fragment_sha256": "21743b00b18e9117bd3e9b6e8541d8d3f5bbfde797b9ec6cdee50cde6d6607eb",
+            "operation": "exact_bytes_replace_once",
+            "order": 1,
+            "post_bytes": 32771,
+            "post_sha256": "3b424b5a44e373fe3ce3857af388149eb96e34c52abe5917282dcea264d5f406",
+            "pre_bytes": 32768,
+            "pre_sha256": "f98cbc6ce4766b401f8c2484ac50433744553fdffb2cbbd0952b15f6fed512a9",
+            "reason": "bind required real-domain caption_band=0 in legacy policy fixture",
+            "replacement_count": 1
+          }
+        ],
+        "python_compile_required": true,
+        "source_bytes": 32768,
+        "source_relative_path": "scripts/offline_arb/test_gpic_blob_runtime.py",
+        "source_sha256": "f98cbc6ce4766b401f8c2484ac50433744553fdffb2cbbd0952b15f6fed512a9",
+        "target_bytes": 32771,
+        "target_path": "scripts/offline_arb/test_gpic_blob_runtime.py",
+        "target_sha256": "3b424b5a44e373fe3ce3857af388149eb96e34c52abe5917282dcea264d5f406",
+        "transform_count": 1
+      },
+      {
+        "ordered_transforms": [
+          {
+            "name": "bind_non_real_caption_band",
+            "new_fragment_bytes": 85,
+            "new_fragment_sha256": "5ea09fb616562944700a001f2fa1a316019c7f69494fcd013d50e9e945abd2d9",
+            "old_fragment_bytes": 56,
+            "old_fragment_sha256": "290844aa0d0b6e721ed08bdc10341b68673d7dea71f32ce758ed848132c210d9",
+            "operation": "exact_bytes_replace_once",
+            "order": 1,
+            "post_bytes": 12869,
+            "post_sha256": "c072f0b4d9dde4efea815480f5adf1a2a4a9299f796fb1d92b5ce497106c8f72",
+            "pre_bytes": 12840,
+            "pre_sha256": "eab72200c422e4eced62eeed033498ce644885112dc699d30e24a4148586cdc8",
+            "reason": "bind required non-real caption_band=-1 in legacy policy fixture",
+            "replacement_count": 1
+          },
+          {
+            "name": "initialize_anime_native_upsample_exceptions",
+            "new_fragment_bytes": 118,
+            "new_fragment_sha256": "d5554fa56104105c041f6bb8b292201a363b5a3a8c939176fb15d44f9a210cf6",
+            "old_fragment_bytes": 67,
+            "old_fragment_sha256": "7a45f3e150d4cccafcece13931f80f9fbdb60bb2cd094b7f66a6bd83752bdb56",
+            "operation": "exact_bytes_replace_once",
+            "order": 2,
+            "post_bytes": 12920,
+            "post_sha256": "aee264d5e792958cca8480b0b1ba5e871e7765c533f5453e2ebc3f1ced16d58f",
+            "pre_bytes": 12869,
+            "pre_sha256": "c072f0b4d9dde4efea815480f5adf1a2a4a9299f796fb1d92b5ce497106c8f72",
+            "reason": "initialize the exact runtime fixture attribute required by reviewed native anime upsample exception handling",
+            "replacement_count": 1
+          }
+        ],
+        "python_compile_required": true,
+        "source_bytes": 12840,
+        "source_relative_path": "scripts/offline_arb/test_image_exceptions_v1.py",
+        "source_sha256": "eab72200c422e4eced62eeed033498ce644885112dc699d30e24a4148586cdc8",
+        "target_bytes": 12920,
+        "target_path": "scripts/offline_arb/test_image_exceptions_v1.py",
+        "target_sha256": "aee264d5e792958cca8480b0b1ba5e871e7765c533f5453e2ebc3f1ced16d58f",
+        "transform_count": 2
+      }
+    ],
+    "immutable_source_release_modified": false,
+    "manifest_bytes": 3916,
+    "manifest_path": "provenance/curation_overlays.json",
+    "manifest_sha256": "5886829e9f828a9ea45caa963a4fdc1611cc0d1c90dd049f7b1f6e0fe43e9298",
+    "overlay_file_count": 3,
+    "schema": "mot_repo_curation_exact_overlay_v2",
+    "status": "PASS_EXACT_CURATED_OVERLAY_AUTHORITY",
+    "total_transform_count": 4
+  },
+  "evidence_publication": {
+    "directory_noreplace_probe": {
+      "receipt_final_and_prepared_same_inode_nlink_2": true,
+      "receipt_path": "/fsx/evan/mot_code/data_analysis/locks/mot_git_curation_20260731_v9_dir_noreplace_probe.json",
+      "receipt_prepared_file_persistent": true,
+      "receipt_prepared_path": "/fsx/evan/mot_code/data_analysis/locks/.mot_git_curation_20260731_v9_dir_noreplace_probe.json.prepared",
+      "receipt_publication": "prepared_file_fsync_then_atomic_hardlink_noreplace",
+      "receipt_raw_sha256": "7cc572a62f491b1ddcdfb302886484e32ea08b90b3468aff72e6b2ffe94d3ec4",
+      "receipt_self_sha256": "2a8a786bd01adf9b72531bcb05774d1f64a277634435c35957b8ad4af5180654"
+    },
+    "fallback_allowed_only_for": [
+      22,
+      38
+    ],
+    "fallback_errno": 22,
+    "filesystem": {
+      "device": 2985749804,
+      "lock_root_and_evidence_parent_same_device": true,
+      "probe_and_publication_on_same_filesystem": true
+    },
+    "fresh_control_identity_required_after_interrupted_sentinel": true,
+    "fresh_control_identity_required_after_partial_prepared_write": true,
+    "interrupted_target_sentinel_reservation_recovery_supported": false,
+    "lock": {
+      "atomic_mkdir": true,
+      "directory_and_parent_fsynced_at_creation": true,
+      "empty_child_closure": true,
+      "flock_exclusive_held_during_publication": true,
+      "identity": {
+        "bytes": 25600,
+        "ctime_ns": 1785477716000000000,
+        "device": 2985749804,
+        "inode": 216174056913764353,
+        "mode": 448,
+        "mtime_ns": 1785477716000000000,
+        "nlink": 2
+      },
+      "ignored_for_revalidation": [
+        "bytes"
+      ],
+      "kind": "atomic_mkdir_empty_directory_flock",
+      "mode": 448,
+      "owner_gid": 0,
+      "owner_uid": 0,
+      "path": "/fsx/evan/mot_code/data_analysis/locks/mot_git_curation_target_d90bfa4faa9b90513d1b6d65f7567b284d2b769d870a34965f6c7803ce04e195.lockdir",
+      "path_fd_full_identity_required": true,
+      "persistent": true,
+      "revalidation_bound_fields": [
+        "device",
+        "inode",
+        "mode",
+        "nlink",
+        "mtime_ns",
+        "ctime_ns"
+      ],
+      "target_path_sha256": "d90bfa4faa9b90513d1b6d65f7567b284d2b769d870a34965f6c7803ce04e195",
+      "target_specific": true
+    },
+    "method": "flock_plain_rename_fallback",
+    "persistent_final_receipt_partial_write_window": false,
+    "plain_rename_fallback_guard": "atomic_mkdir_exact_empty_sentinel_plus_held_descriptor_and_directory_flock",
+    "prepared_file_partial_write_recovery_supported": false,
+    "publication_staging_path_consumed_on_success": true,
+    "schema": "mot_git_curation_evidence_publication_authority_v9",
+    "source_deleted": false,
+    "staging_path": "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/.git_curation_20260731_v9.work",
+    "target_overwrite_authorized": false,
+    "target_path": "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/git_curation_20260731_v9",
+    "target_reservation": {
+      "atomic_mkdir": true,
+      "descriptor_held_through_plain_rename": true,
+      "directory_and_parent_fsynced": true,
+      "empty_child_closure_at_reservation": true,
+      "identity": {
+        "bytes": 1024,
+        "ctime_ns": 1785477716000000000,
+        "device": 2985749804,
+        "inode": 144117191208337409,
+        "mode": 448,
+        "mtime_ns": 1785477716000000000,
+        "nlink": 2
+      },
+      "ignored_for_revalidation": [
+        "bytes"
+      ],
+      "method": "publisher_owned_empty_directory_sentinel",
+      "mode": 448,
+      "owner_gid": 0,
+      "owner_uid": 0,
+      "path": "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/git_curation_20260731_v9",
+      "path_fd_full_identity_required": true,
+      "plain_rename_authorized_only_for_exact_sentinel": true,
+      "receipt_final_and_prepared_same_inode_nlink_2": true,
+      "receipt_path": "/fsx/evan/mot_code/data_analysis/locks/mot_git_curation_20260731_v9_target_sentinel.json",
+      "receipt_prepared_file_persistent": true,
+      "receipt_prepared_path": "/fsx/evan/mot_code/data_analysis/locks/.mot_git_curation_20260731_v9_target_sentinel.json.prepared",
+      "receipt_publication": "prepared_file_fsync_then_atomic_hardlink_noreplace",
+      "receipt_raw_sha256": "a6c2b724a902f9d8988721a52a6121641d0d837714156754e90de1db1ce44232",
+      "receipt_self_sha256": "6fdeae2cf420703614b128401854357f9b4915ff517c556a692b27a824588866",
+      "revalidation_bound_fields": [
+        "device",
+        "inode",
+        "mode",
+        "nlink",
+        "mtime_ns",
+        "ctime_ns"
+      ],
+      "status": "PASS_ATOMIC_MKDIR_EMPTY_SENTINEL_RESERVED"
+    }
+  },
+  "file_records": [
+    {
+      "bytes": 147,
+      "kind": "generated",
+      "origin": "curation_builder",
+      "sha256": "01cbb2790c9a244462b15adb9877fe24d7539e77c2c9f3426e85af554d7f9d8b",
+      "source_path": null,
+      "source_relative_path": null,
+      "source_stat": null,
+      "target_mode": 420,
+      "target_path": ".gitignore"
+    },
+    {
+      "bytes": 658,
+      "kind": "generated",
+      "origin": "curation_builder",
+      "sha256": "3537bd9e27f23aa0b50cdf85c614691b1b91b8ac53633aaedaafd7021c6f57de",
+      "source_path": null,
+      "source_relative_path": null,
+      "source_stat": null,
+      "target_mode": 420,
+      "target_path": "AGENTS.md"
+    },
+    {
+      "bytes": 391,
+      "kind": "generated",
+      "origin": "curation_builder",
+      "sha256": "9ed5d3feceb03b14246c485733ee8bfa3b2f3d734007af09e6e44771be075c3e",
+      "source_path": null,
+      "source_relative_path": null,
+      "source_stat": null,
+      "target_mode": 420,
+      "target_path": "README.md"
+    },
+    {
+      "bytes": 2686,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "d830649a5b5517f18e17a462f9887cddea8c6472f631eeb1d1c07f9c9b33ae35",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/configs/debug_tiny_cpu.yaml",
+      "source_relative_path": "configs/debug_tiny_cpu.yaml",
+      "source_stat": {
+        "bytes": 2686,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942613,
+        "mode": 292,
+        "mtime_ns": 1782304727000000000
+      },
+      "target_mode": 420,
+      "target_path": "configs/debug_tiny_cpu.yaml"
+    },
+    {
+      "bytes": 4611,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "611635fc13b04c6d62c20875eff541736afbe6e35cc17c1f81caafb7f823a380",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/configs/stage512a_20260722_weighted_w64_v1.yaml",
+      "source_relative_path": "configs/stage512a_20260722_weighted_w64_v1.yaml",
+      "source_stat": {
+        "bytes": 4611,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942610,
+        "mode": 292,
+        "mtime_ns": 1784732830000000000
+      },
+      "target_mode": 420,
+      "target_path": "configs/stage512a_20260722_weighted_w64_v1.yaml"
+    },
+    {
+      "bytes": 377,
+      "kind": "generated",
+      "origin": "curation_builder",
+      "sha256": "1c52cca56e842642961746b4a0caf31160f4550247c522c441ce966f197203f1",
+      "source_path": null,
+      "source_relative_path": null,
+      "source_stat": null,
+      "target_mode": 420,
+      "target_path": "data_analysis/README.md"
+    },
+    {
+      "bytes": 7079,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "07b618dba432ee9f687c13f9eca8064c43d3be96577baff5d8f6f0d298a66cac",
+      "source_path": "/fsx/evan/mot_code/data_analysis/configs/t5_sampling_weights_v1.json",
+      "source_relative_path": "configs/t5_sampling_weights_v1.json",
+      "source_stat": {
+        "bytes": 7079,
+        "ctime_ns": 1781719283000000000,
+        "device": 2985749804,
+        "inode": 144115881864078095,
+        "mode": 420,
+        "mtime_ns": 1781719283000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/configs/t5_sampling_weights_v1.json"
+    },
+    {
+      "bytes": 11446,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "ff28072e26ef79de2a322508317f5e854010c7c9fd33d19aea25c1261a2e746f",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t1_gpic_pass_s3.py",
+      "source_relative_path": "scripts/t1_gpic_pass_s3.py",
+      "source_stat": {
+        "bytes": 11446,
+        "ctime_ns": 1781149964000000000,
+        "device": 2985749804,
+        "inode": 144115777409179822,
+        "mode": 420,
+        "mtime_ns": 1781149964000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t1_gpic_pass_s3.py"
+    },
+    {
+      "bytes": 11107,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "407b090455c6d8d743d9cc79a7fca1b7c589be9232992c04f73f91684ee70293",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t1_gpic_pass_v2.py",
+      "source_relative_path": "scripts/t1_gpic_pass_v2.py",
+      "source_stat": {
+        "bytes": 11107,
+        "ctime_ns": 1781149952000000000,
+        "device": 2985749804,
+        "inode": 144115777409174227,
+        "mode": 420,
+        "mtime_ns": 1781149952000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t1_gpic_pass_v2.py"
+    },
+    {
+      "bytes": 7382,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "35ac9fa5374ad0fd82d472d94dc8803ee611b3b31f64ac7dd916c07256217750",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t1_gpic_postprocess_stats.py",
+      "source_relative_path": "scripts/t1_gpic_postprocess_stats.py",
+      "source_stat": {
+        "bytes": 7382,
+        "ctime_ns": 1781251870000000000,
+        "device": 2985749804,
+        "inode": 144115781938999558,
+        "mode": 420,
+        "mtime_ns": 1781251870000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t1_gpic_postprocess_stats.py"
+    },
+    {
+      "bytes": 4553,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "2533837395d4e134e8493b9ace6d664ee08eda37b179e8a7cede77d559d3bebc",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t2_monet_extract.py",
+      "source_relative_path": "scripts/t2_monet_extract.py",
+      "source_stat": {
+        "bytes": 4553,
+        "ctime_ns": 1781149932000000000,
+        "device": 2985749804,
+        "inode": 144115777409180195,
+        "mode": 420,
+        "mtime_ns": 1781149932000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t2_monet_extract.py"
+    },
+    {
+      "bytes": 9495,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "f913932fd757a35d9d339fcc1e94742713639b7883f5b22d7d88536446fc173a",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t2_monet_internal_bruteforce_check.py",
+      "source_relative_path": "scripts/t2_monet_internal_bruteforce_check.py",
+      "source_stat": {
+        "bytes": 9495,
+        "ctime_ns": 1781522545000000000,
+        "device": 2985749804,
+        "inode": 144115781939046690,
+        "mode": 420,
+        "mtime_ns": 1781522545000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t2_monet_internal_bruteforce_check.py"
+    },
+    {
+      "bytes": 16816,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "0055a1b777ca9a44cbc8bf0420bffb1fa9b9f92cc6939a64e0abc0b6c2ee78ad",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t2_monet_internal_cuvs_dedup.py",
+      "source_relative_path": "scripts/t2_monet_internal_cuvs_dedup.py",
+      "source_stat": {
+        "bytes": 16816,
+        "ctime_ns": 1781533302000000000,
+        "device": 2985749804,
+        "inode": 144115781939046928,
+        "mode": 420,
+        "mtime_ns": 1781533302000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t2_monet_internal_cuvs_dedup.py"
+    },
+    {
+      "bytes": 8944,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "5cd05ab441e0ed5d33d31917a483282a97a3d5dc728f150196628f6f32d46c1b",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t2_phash_exact_cross_source.py",
+      "source_relative_path": "scripts/t2_phash_exact_cross_source.py",
+      "source_stat": {
+        "bytes": 8944,
+        "ctime_ns": 1781252128000000000,
+        "device": 2985749804,
+        "inode": 144115781938999560,
+        "mode": 420,
+        "mtime_ns": 1781252128000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t2_phash_exact_cross_source.py"
+    },
+    {
+      "bytes": 21135,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "cf725c3b294cc5d1edc76bdd2c22f42ee924332adc51508c6dc4fe6b1f525d16",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t2_sscd_bruteforce_sharded.py",
+      "source_relative_path": "scripts/t2_sscd_bruteforce_sharded.py",
+      "source_stat": {
+        "bytes": 21135,
+        "ctime_ns": 1781536104000000000,
+        "device": 2985749804,
+        "inode": 144115781939046977,
+        "mode": 420,
+        "mtime_ns": 1781536104000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t2_sscd_bruteforce_sharded.py"
+    },
+    {
+      "bytes": 10636,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "e939d94f27d64c0809edc7afa9989a9320cd65868cf5fbdf6ac3db7ed545e434",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t2_sscd_validate_groundtruth.py",
+      "source_relative_path": "scripts/t2_sscd_validate_groundtruth.py",
+      "source_stat": {
+        "bytes": 10636,
+        "ctime_ns": 1781558239000000000,
+        "device": 2985749804,
+        "inode": 144115781939047026,
+        "mode": 420,
+        "mtime_ns": 1781558239000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t2_sscd_validate_groundtruth.py"
+    },
+    {
+      "bytes": 10508,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "9177fc7b17e8151eb44698d30d212c150b08b8e1f5d7fd57edf3ad73c112183e",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t3_monet_sweep.py",
+      "source_relative_path": "scripts/t3_monet_sweep.py",
+      "source_stat": {
+        "bytes": 10508,
+        "ctime_ns": 1781149923000000000,
+        "device": 2985749804,
+        "inode": 144115742059567498,
+        "mode": 420,
+        "mtime_ns": 1781149923000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t3_monet_sweep.py"
+    },
+    {
+      "bytes": 26769,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "286f502819b88d1b95dda9eaa9db1657ac627ca06d2e8b6096ba7a6a903c2ec3",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t4_clipb_joint_kmeans.py",
+      "source_relative_path": "scripts/t4_clipb_joint_kmeans.py",
+      "source_stat": {
+        "bytes": 26769,
+        "ctime_ns": 1781562996000000000,
+        "device": 2985749804,
+        "inode": 144115781939047049,
+        "mode": 420,
+        "mtime_ns": 1781562996000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t4_clipb_joint_kmeans.py"
+    },
+    {
+      "bytes": 10537,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "0fe3a93258c2ed8c58f6a637b29657e8fe1d541d079ddb09307c0937d8c6098c",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t4b_cluster_labels.py",
+      "source_relative_path": "scripts/t4b_cluster_labels.py",
+      "source_stat": {
+        "bytes": 10537,
+        "ctime_ns": 1781590957000000000,
+        "device": 2985749804,
+        "inode": 144115781939047096,
+        "mode": 420,
+        "mtime_ns": 1781590957000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t4b_cluster_labels.py"
+    },
+    {
+      "bytes": 11703,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "39ecea9013f4f8b2384968fb64e0ed589e7a61d8e236b2bf2ffa7ec8ef4d9db9",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t4b_photo_binary.py",
+      "source_relative_path": "scripts/t4b_photo_binary.py",
+      "source_stat": {
+        "bytes": 11703,
+        "ctime_ns": 1782750295000000000,
+        "device": 2985749804,
+        "inode": 144116087603072012,
+        "mode": 420,
+        "mtime_ns": 1782750295000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t4b_photo_binary.py"
+    },
+    {
+      "bytes": 12347,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "5f7d73838c485f37662293e41f34d4e47f339d4c0a46b6f59f87bcd8f03b014d",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t5_build_rich_manifest.py",
+      "source_relative_path": "scripts/t5_build_rich_manifest.py",
+      "source_stat": {
+        "bytes": 12347,
+        "ctime_ns": 1781620377000000000,
+        "device": 2985749804,
+        "inode": 144115881864069241,
+        "mode": 420,
+        "mtime_ns": 1781620377000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t5_build_rich_manifest.py"
+    },
+    {
+      "bytes": 9133,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "19dc3486c4ca28d6568ab6493d80ae2bf8a25915ffe2146b05953a9f89eb02a2",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t5_build_synthetic_manifest.py",
+      "source_relative_path": "scripts/t5_build_synthetic_manifest.py",
+      "source_stat": {
+        "bytes": 9133,
+        "ctime_ns": 1781621013000000000,
+        "device": 2985749804,
+        "inode": 144115881864069245,
+        "mode": 420,
+        "mtime_ns": 1781621013000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t5_build_synthetic_manifest.py"
+    },
+    {
+      "bytes": 4977,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "201c71b600e18901a238a687f751a2705d4d7710ca08ebd6179c27dd646d8ba2",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t5_gpic_meta_prep.py",
+      "source_relative_path": "scripts/t5_gpic_meta_prep.py",
+      "source_stat": {
+        "bytes": 4977,
+        "ctime_ns": 1781149941000000000,
+        "device": 2985749804,
+        "inode": 144115742059567499,
+        "mode": 420,
+        "mtime_ns": 1781149941000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t5_gpic_meta_prep.py"
+    },
+    {
+      "bytes": 10730,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "17f89b540f1b42cbf61abc97d0c9d8fbf50a040685f4da7072f96233ffc1dbaf",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t5_gpic_select.py",
+      "source_relative_path": "scripts/t5_gpic_select.py",
+      "source_stat": {
+        "bytes": 10730,
+        "ctime_ns": 1781598413000000000,
+        "device": 2985749804,
+        "inode": 144115881864069157,
+        "mode": 420,
+        "mtime_ns": 1781598413000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t5_gpic_select.py"
+    },
+    {
+      "bytes": 4299,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "177fddf3858564410d760356ea07e4173154519f31c7a5b1c4d66ed3aa16f0be",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t5_merge_manifest.py",
+      "source_relative_path": "scripts/t5_merge_manifest.py",
+      "source_stat": {
+        "bytes": 4299,
+        "ctime_ns": 1781611253000000000,
+        "device": 2985749804,
+        "inode": 144115881864069173,
+        "mode": 420,
+        "mtime_ns": 1781611253000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t5_merge_manifest.py"
+    },
+    {
+      "bytes": 9845,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "17b7e685d34b23f7201e5ccfc182cf1104bae24a367128390f2a76484bcd09c4",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t5_monet_select.py",
+      "source_relative_path": "scripts/t5_monet_select.py",
+      "source_stat": {
+        "bytes": 9845,
+        "ctime_ns": 1781611248000000000,
+        "device": 2985749804,
+        "inode": 144115881864069172,
+        "mode": 420,
+        "mtime_ns": 1781611248000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t5_monet_select.py"
+    },
+    {
+      "bytes": 6822,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "d3e0320fc2e412d378f4796acdd85980856f929f865869795845afade2ae328a",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t5_monet_subsource_breakdown.py",
+      "source_relative_path": "scripts/t5_monet_subsource_breakdown.py",
+      "source_stat": {
+        "bytes": 6822,
+        "ctime_ns": 1781610019000000000,
+        "device": 2985749804,
+        "inode": 144115881864069163,
+        "mode": 420,
+        "mtime_ns": 1781610019000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t5_monet_subsource_breakdown.py"
+    },
+    {
+      "bytes": 6827,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "be2cfa10e28895a7fdab20b131b4b430708c954a37e24ff5dddfcb8dd3c9836d",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t5_prep_survivor_pool.py",
+      "source_relative_path": "scripts/t5_prep_survivor_pool.py",
+      "source_stat": {
+        "bytes": 6827,
+        "ctime_ns": 1781588582000000000,
+        "device": 2985749804,
+        "inode": 144115781939047067,
+        "mode": 420,
+        "mtime_ns": 1781588582000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t5_prep_survivor_pool.py"
+    },
+    {
+      "bytes": 9097,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "e803e4206c7e6c5b40e71dc0f25c85e53bd09291883c99f390e3cf73f72c46c0",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t5_qc_audit.py",
+      "source_relative_path": "scripts/t5_qc_audit.py",
+      "source_stat": {
+        "bytes": 9097,
+        "ctime_ns": 1781615746000000000,
+        "device": 2985749804,
+        "inode": 144115881864069203,
+        "mode": 420,
+        "mtime_ns": 1781615745000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t5_qc_audit.py"
+    },
+    {
+      "bytes": 9529,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "dd27edd9a23173ef034f9d375a746243030d8fb3daea3fc8d9265c69863e9d0c",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t5_sampling_weights.py",
+      "source_relative_path": "scripts/t5_sampling_weights.py",
+      "source_stat": {
+        "bytes": 9529,
+        "ctime_ns": 1781619277000000000,
+        "device": 2985749804,
+        "inode": 144115881864069229,
+        "mode": 420,
+        "mtime_ns": 1781619277000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t5_sampling_weights.py"
+    },
+    {
+      "bytes": 3378,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "088b2ab07bfb59f8d3a637b89528a22776f40d31ba1a8af41ce58b6817511f0f",
+      "source_path": "/fsx/evan/mot_code/data_analysis/scripts/t5_verify_audit2.py",
+      "source_relative_path": "scripts/t5_verify_audit2.py",
+      "source_stat": {
+        "bytes": 3378,
+        "ctime_ns": 1781637464000000000,
+        "device": 2985749804,
+        "inode": 144115881864069310,
+        "mode": 420,
+        "mtime_ns": 1781637464000000000
+      },
+      "target_mode": 420,
+      "target_path": "data_analysis/scripts/t5_verify_audit2.py"
+    },
+    {
+      "bytes": 479,
+      "kind": "generated",
+      "origin": "curation_builder",
+      "sha256": "cd140f8cbbfebefda9546c51d835bfec2095981dbb552512266259aad7f6887f",
+      "source_path": null,
+      "source_relative_path": null,
+      "source_stat": null,
+      "target_mode": 420,
+      "target_path": "docs/DATA_PIPELINE.md"
+    },
+    {
+      "bytes": 428,
+      "kind": "generated",
+      "origin": "curation_builder",
+      "sha256": "50ad57534b865a1a5e57010d078c9ed548f315716f3431edf31ab97212238fea",
+      "source_path": null,
+      "source_relative_path": null,
+      "source_stat": null,
+      "target_mode": 420,
+      "target_path": "docs/EVALUATION_PROTOCOLS.md"
+    },
+    {
+      "bytes": 5882,
+      "kind": "copied",
+      "origin": "compact_docs",
+      "sha256": "1a947f83f9871dc41a5d73ef3d123d6341e5f9d7055c26f6a1c9de3326807245",
+      "source_path": "/fsx/evan/doc/mot/current/AI_HANDOFF.md",
+      "source_relative_path": "AI_HANDOFF.md",
+      "source_stat": {
+        "bytes": 5882,
+        "ctime_ns": 1785449936000000000,
+        "device": 2985749804,
+        "inode": 144117186863038600,
+        "mode": 292,
+        "mtime_ns": 1785449936000000000
+      },
+      "target_mode": 420,
+      "target_path": "docs/MOT_HANDOFF_CURRENT.md"
+    },
+    {
+      "bytes": 9892,
+      "kind": "copied",
+      "origin": "compact_docs",
+      "sha256": "a17d579d16b92edc18ed7af2ad39734bd8cadcad3b8835d3216f0edcd23110d5",
+      "source_path": "/fsx/evan/doc/mot/current/WORKSPACE_ARCHIVE_INDEX.md",
+      "source_relative_path": "WORKSPACE_ARCHIVE_INDEX.md",
+      "source_stat": {
+        "bytes": 9892,
+        "ctime_ns": 1785449936000000000,
+        "device": 2985749804,
+        "inode": 144117186863038604,
+        "mode": 292,
+        "mtime_ns": 1785449936000000000
+      },
+      "target_mode": 420,
+      "target_path": "docs/OPERATIONS_AND_SAFETY.md"
+    },
+    {
+      "bytes": 2115,
+      "kind": "copied",
+      "origin": "compact_docs",
+      "sha256": "7555c8d48df4c79c0823ca2c2d3fbe7b75155d679bc6fe05121296aa4c46192d",
+      "source_path": "/fsx/evan/doc/mot/current/README.md",
+      "source_relative_path": "README.md",
+      "source_stat": {
+        "bytes": 2115,
+        "ctime_ns": 1785449936000000000,
+        "device": 2985749804,
+        "inode": 144117186863038601,
+        "mode": 292,
+        "mtime_ns": 1785449936000000000
+      },
+      "target_mode": 420,
+      "target_path": "docs/README.md"
+    },
+    {
+      "bytes": 3567,
+      "kind": "copied",
+      "origin": "compact_docs",
+      "sha256": "4abbfce547cf08ef6df8da11beb2afe0852de54ba2ea5ffa13b9be5ec1592b8f",
+      "source_path": "/fsx/evan/doc/mot/current/STAGE512A_FINAL.md",
+      "source_relative_path": "STAGE512A_FINAL.md",
+      "source_stat": {
+        "bytes": 3567,
+        "ctime_ns": 1785449936000000000,
+        "device": 2985749804,
+        "inode": 144117186863038602,
+        "mode": 292,
+        "mtime_ns": 1785449936000000000
+      },
+      "target_mode": 420,
+      "target_path": "docs/STAGE512A_FINAL_AUTHORITY.md"
+    },
+    {
+      "bytes": 6017,
+      "kind": "copied",
+      "origin": "compact_docs",
+      "sha256": "e3333ad5eb3e3acc916749786c7e5993c7e4408dda184f01a7c0bad7f99ba882",
+      "source_path": "/fsx/evan/doc/mot/current/STAGE512B_REAL_BRIEF.md",
+      "source_relative_path": "STAGE512B_REAL_BRIEF.md",
+      "source_stat": {
+        "bytes": 6017,
+        "ctime_ns": 1785449936000000000,
+        "device": 2985749804,
+        "inode": 144117186863038603,
+        "mode": 292,
+        "mtime_ns": 1785449936000000000
+      },
+      "target_mode": 420,
+      "target_path": "docs/STAGE512B_REAL_RESEARCH_BRIEF.md"
+    },
+    {
+      "bytes": 572,
+      "kind": "generated",
+      "origin": "curation_builder",
+      "sha256": "8ebb6addd8cb80b5b7b52046cff80d8ea4eb8fb83598c9879650fdb49d463708",
+      "source_path": null,
+      "source_relative_path": null,
+      "source_stat": null,
+      "target_mode": 420,
+      "target_path": "docs/provenance/README.md"
+    },
+    {
+      "bytes": 1023,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "94c8510793c4fdc0481dc2b0995404a106c5f8c235a3d542726295eab7c3cefc",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/env/requirements.txt",
+      "source_relative_path": "env/requirements.txt",
+      "source_stat": {
+        "bytes": 1023,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942238,
+        "mode": 292,
+        "mtime_ns": 1782304727000000000
+      },
+      "target_mode": 420,
+      "target_path": "env/requirements.txt"
+    },
+    {
+      "bytes": 413,
+      "kind": "generated",
+      "origin": "curation_builder",
+      "sha256": "b19f21cff9228230ede673c2129253ddeb2103af8548ddeedfbcd986b1deefc7",
+      "source_path": null,
+      "source_relative_path": null,
+      "source_stat": null,
+      "target_mode": 420,
+      "target_path": "evaluation/README.md"
+    },
+    {
+      "bytes": 17054,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "be556ba459c1a4fa2635367fcbc5bc7fc7092fe909c059774a903ce0b31ec27b",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/dpg/README.md",
+      "source_relative_path": "experiments/eval/dpg/README.md",
+      "source_stat": {
+        "bytes": 17054,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942631,
+        "mode": 292,
+        "mtime_ns": 1782304727000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/dpg/README.md"
+    },
+    {
+      "bytes": 3290,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "943732e34084faf6742433c0c8b96fcf67e9691026c5dcc1d84a6a433d27d8f7",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/dpg/build_dpg_data.py",
+      "source_relative_path": "experiments/eval/dpg/build_dpg_data.py",
+      "source_stat": {
+        "bytes": 3290,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942632,
+        "mode": 292,
+        "mtime_ns": 1782304727000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/dpg/build_dpg_data.py"
+    },
+    {
+      "bytes": 7353826,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "68f507652a49aaa4f103f17bbf25e2322a9a318dc61380e6534b749fbf9317aa",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/dpg/dpg_bench.csv",
+      "source_relative_path": "experiments/eval/dpg/dpg_bench.csv",
+      "source_stat": {
+        "bytes": 7353826,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942633,
+        "mode": 292,
+        "mtime_ns": 1782304727000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/dpg/dpg_bench.csv"
+    },
+    {
+      "bytes": 2929237,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "5bf812bd1cdc6d061edb83be0184727d40cd4fe8d9e8a1e9a4e37f77bdbeba94",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/dpg/dpg_prompts.jsonl",
+      "source_relative_path": "experiments/eval/dpg/dpg_prompts.jsonl",
+      "source_stat": {
+        "bytes": 2929237,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942628,
+        "mode": 292,
+        "mtime_ns": 1782304727000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/dpg/dpg_prompts.jsonl"
+    },
+    {
+      "bytes": 11831,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "a29710ea856a554f3108e9d215516e021b677bd609ebef5b483095819e043167",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/dpg/generate_dpg.py",
+      "source_relative_path": "experiments/eval/dpg/generate_dpg.py",
+      "source_stat": {
+        "bytes": 11831,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942629,
+        "mode": 292,
+        "mtime_ns": 1782806693000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/dpg/generate_dpg.py"
+    },
+    {
+      "bytes": 900,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "8904489180f77268fafb1af0fe59815886da25c8c6bc7c7dd9e24b1baabca03b",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/dpg/generate_dpg_rd256.py",
+      "source_relative_path": "experiments/eval/dpg/generate_dpg_rd256.py",
+      "source_stat": {
+        "bytes": 900,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942625,
+        "mode": 292,
+        "mtime_ns": 1782975126000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/dpg/generate_dpg_rd256.py"
+    },
+    {
+      "bytes": 759,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "4a39bb9e6c7f74f08759db8fcc7f57ce6c085d7dc19e619ef881db772d8bcfb3",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/dpg/generate_dpg_rd256L.py",
+      "source_relative_path": "experiments/eval/dpg/generate_dpg_rd256L.py",
+      "source_stat": {
+        "bytes": 759,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942634,
+        "mode": 292,
+        "mtime_ns": 1783264981000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/dpg/generate_dpg_rd256L.py"
+    },
+    {
+      "bytes": 6435,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "af26a0630216f76e60ec5da251bf0b94690a92bd9737ac225b9ef261a27b36b5",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/dpg/run_dpg.py",
+      "source_relative_path": "experiments/eval/dpg/run_dpg.py",
+      "source_stat": {
+        "bytes": 6435,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942630,
+        "mode": 292,
+        "mtime_ns": 1782304727000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/dpg/run_dpg.py"
+    },
+    {
+      "bytes": 11947,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "56855b68d60fc4e2efe95cc03a3e96fb8279a458da23b991e982c8a9e2b644ad",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/dpg/score_dpg.py",
+      "source_relative_path": "experiments/eval/dpg/score_dpg.py",
+      "source_stat": {
+        "bytes": 11947,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942626,
+        "mode": 292,
+        "mtime_ns": 1782304727000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/dpg/score_dpg.py"
+    },
+    {
+      "bytes": 14489,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "51bda2da6a640b780b964331fc1e25c9ffa3dd244a7e64568f095cc4ab304c39",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/dpg/score_dpg_mplug.py",
+      "source_relative_path": "experiments/eval/dpg/score_dpg_mplug.py",
+      "source_stat": {
+        "bytes": 14489,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942627,
+        "mode": 292,
+        "mtime_ns": 1782304727000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/dpg/score_dpg_mplug.py"
+    },
+    {
+      "bytes": 72837,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "7a4060509aed033b93facc7a457319a4a3cc4830f17e52c71402fdf3678833b5",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/prompts/anime_evalset.jsonl",
+      "source_relative_path": "experiments/eval/prompts/anime_evalset.jsonl",
+      "source_stat": {
+        "bytes": 72837,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 144117017547374693,
+        "mode": 292,
+        "mtime_ns": 1782304727000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/prompts/anime_evalset.jsonl"
+    },
+    {
+      "bytes": 4657,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "62149c89b2789b5edc7690f07c5438c8779544a4478dde5a1ab1579e753ecb0a",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/prompts/anime_evalset_nl13_plain_headcrop.jsonl",
+      "source_relative_path": "experiments/eval/prompts/anime_evalset_nl13_plain_headcrop.jsonl",
+      "source_stat": {
+        "bytes": 4657,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 144117017547374695,
+        "mode": 292,
+        "mtime_ns": 1783431413000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/prompts/anime_evalset_nl13_plain_headcrop.jsonl"
+    },
+    {
+      "bytes": 9888,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "2f723b44033c6ba5f98aa90e4f625d9183f4100ba362be2e04c693915c3801b9",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/prompts/build_anime_evalset.py",
+      "source_relative_path": "experiments/eval/prompts/build_anime_evalset.py",
+      "source_stat": {
+        "bytes": 9888,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 144117017547374696,
+        "mode": 292,
+        "mtime_ns": 1782304727000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/prompts/build_anime_evalset.py"
+    },
+    {
+      "bytes": 3290,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "9f3796d7b8951168dbbd9289fdc159e34eb0e4a97ef32970f5d7d61d054d4ce9",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/prompts/real_headcrop_12.jsonl",
+      "source_relative_path": "experiments/eval/prompts/real_headcrop_12.jsonl",
+      "source_stat": {
+        "bytes": 3290,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 144117017547374694,
+        "mode": 292,
+        "mtime_ns": 1783430260000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/prompts/real_headcrop_12.jsonl"
+    },
+    {
+      "bytes": 5298,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "d24e83cc2bab6d98f7aa7fd8fdffde6ecaf3aaaa75d784e43df85fcf854cd886",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/scorers/clip_score.py",
+      "source_relative_path": "experiments/eval/scorers/clip_score.py",
+      "source_stat": {
+        "bytes": 5298,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942641,
+        "mode": 292,
+        "mtime_ns": 1782304727000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/scorers/clip_score.py"
+    },
+    {
+      "bytes": 14035,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "11e87f1f940ae8bea49892fa6567e9715a7c04256c10b414da4398003fee29a6",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/scorers/tagger_score.py",
+      "source_relative_path": "experiments/eval/scorers/tagger_score.py",
+      "source_stat": {
+        "bytes": 14035,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942640,
+        "mode": 292,
+        "mtime_ns": 1782652008000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/benchmarks/scorers/tagger_score.py"
+    },
+    {
+      "bytes": 3589,
+      "kind": "copied",
+      "origin": "stage512a_final_eval_release",
+      "sha256": "4148017e0d73f8b769522659efcc5d6618c49bf64372c723f98364ed5d42bce8",
+      "source_path": "/fsx/evan/mot_code/data_analysis/eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/anime_metrics_final.py",
+      "source_relative_path": "eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/anime_metrics_final.py",
+      "source_stat": {
+        "bytes": 3589,
+        "ctime_ns": 1785225381000000000,
+        "device": 2985749804,
+        "inode": 216173807134573084,
+        "mode": 292,
+        "mtime_ns": 1785221061000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/reference/stage512a_final_20260728/scripts/anime_metrics_final.py"
+    },
+    {
+      "bytes": 5406,
+      "kind": "copied",
+      "origin": "stage512a_final_eval_release",
+      "sha256": "658e0b62214351a005d0587540dc5c5b57fb086d9a641f518d87a8207a7caf55",
+      "source_path": "/fsx/evan/mot_code/data_analysis/eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/geneval_generate_shard.py",
+      "source_relative_path": "eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/geneval_generate_shard.py",
+      "source_stat": {
+        "bytes": 5406,
+        "ctime_ns": 1785225381000000000,
+        "device": 2985749804,
+        "inode": 216173807134573080,
+        "mode": 292,
+        "mtime_ns": 1785221262000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/reference/stage512a_final_20260728/scripts/geneval_generate_shard.py"
+    },
+    {
+      "bytes": 6296,
+      "kind": "copied",
+      "origin": "stage512a_final_eval_release",
+      "sha256": "2ab052d5373e89180dc812faf9be6a340f8b30c784fdbb7ae93c8a8cde45f308",
+      "source_path": "/fsx/evan/mot_code/data_analysis/eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/merge_geneval_shards.py",
+      "source_relative_path": "eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/merge_geneval_shards.py",
+      "source_stat": {
+        "bytes": 6296,
+        "ctime_ns": 1785225381000000000,
+        "device": 2985749804,
+        "inode": 216173807134573078,
+        "mode": 292,
+        "mtime_ns": 1785221262000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/reference/stage512a_final_20260728/scripts/merge_geneval_shards.py"
+    },
+    {
+      "bytes": 7788,
+      "kind": "copied",
+      "origin": "stage512a_final_eval_release",
+      "sha256": "4c3c07e7a078bd961ee7ac4caa4ca2fe977a14142f5002e25dde6278f97c8d8a",
+      "source_path": "/fsx/evan/mot_code/data_analysis/eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/merge_multiar_scores.py",
+      "source_relative_path": "eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/merge_multiar_scores.py",
+      "source_stat": {
+        "bytes": 7788,
+        "ctime_ns": 1785225381000000000,
+        "device": 2985749804,
+        "inode": 216173807134573076,
+        "mode": 292,
+        "mtime_ns": 1785221353000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/reference/stage512a_final_20260728/scripts/merge_multiar_scores.py"
+    },
+    {
+      "bytes": 9653,
+      "kind": "copied",
+      "origin": "stage512a_final_eval_release",
+      "sha256": "ab327b3344c66faa151c566b87c3dd1e3b21cc7174e1aa1cea1c31302926581f",
+      "source_path": "/fsx/evan/mot_code/data_analysis/eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/merge_sampling_shards.py",
+      "source_relative_path": "eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/merge_sampling_shards.py",
+      "source_stat": {
+        "bytes": 9653,
+        "ctime_ns": 1785225381000000000,
+        "device": 2985749804,
+        "inode": 216173807134573082,
+        "mode": 292,
+        "mtime_ns": 1785221179000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/reference/stage512a_final_20260728/scripts/merge_sampling_shards.py"
+    },
+    {
+      "bytes": 4350,
+      "kind": "copied",
+      "origin": "stage512a_final_eval_release",
+      "sha256": "7974594bd2b76cf236ab3726fb7281f1dfd84625f1279b558cacdd08176681c7",
+      "source_path": "/fsx/evan/mot_code/data_analysis/eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/sample_pair_final.py",
+      "source_relative_path": "eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/sample_pair_final.py",
+      "source_stat": {
+        "bytes": 4350,
+        "ctime_ns": 1785225381000000000,
+        "device": 2985749804,
+        "inode": 216173807134573081,
+        "mode": 292,
+        "mtime_ns": 1785221061000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/reference/stage512a_final_20260728/scripts/sample_pair_final.py"
+    },
+    {
+      "bytes": 1880,
+      "kind": "copied",
+      "origin": "stage512a_final_eval_release",
+      "sha256": "972f91ce00e954a6ea4655e4679b8ad7d648481870d1c81743d209008c6a409b",
+      "source_path": "/fsx/evan/mot_code/data_analysis/eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/score_multiar_final.py",
+      "source_relative_path": "eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/score_multiar_final.py",
+      "source_stat": {
+        "bytes": 1880,
+        "ctime_ns": 1785225381000000000,
+        "device": 2985749804,
+        "inode": 216173807134573077,
+        "mode": 292,
+        "mtime_ns": 1785221061000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/reference/stage512a_final_20260728/scripts/score_multiar_final.py"
+    },
+    {
+      "bytes": 6725,
+      "kind": "copied",
+      "origin": "stage512a_final_eval_release",
+      "sha256": "5ed7a08e45fa0182266f99cf4ab2379f80d0c9da919bb49ae02dc0538139a27b",
+      "source_path": "/fsx/evan/mot_code/data_analysis/eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/score_multiar_shard.py",
+      "source_relative_path": "eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/score_multiar_shard.py",
+      "source_stat": {
+        "bytes": 6725,
+        "ctime_ns": 1785225381000000000,
+        "device": 2985749804,
+        "inode": 216173807134573083,
+        "mode": 292,
+        "mtime_ns": 1785221353000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/reference/stage512a_final_20260728/scripts/score_multiar_shard.py"
+    },
+    {
+      "bytes": 3062,
+      "kind": "copied",
+      "origin": "stage512a_final_eval_release",
+      "sha256": "17c20e2ad58e2cf5c328f5265739457bbde076e0a9be731c7efb951c168145e0",
+      "source_path": "/fsx/evan/mot_code/data_analysis/eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/strict_eval_stage512a_final.py",
+      "source_relative_path": "eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts/strict_eval_stage512a_final.py",
+      "source_stat": {
+        "bytes": 3062,
+        "ctime_ns": 1785225381000000000,
+        "device": 2985749804,
+        "inode": 216173807134573079,
+        "mode": 292,
+        "mtime_ns": 1785221061000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/reference/stage512a_final_20260728/scripts/strict_eval_stage512a_final.py"
+    },
+    {
+      "bytes": 8129,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "21a0fc02a2fb47d2e3da499e31eca873b16f385039816eb718203f77f587b107",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/exp_scripts/fixed_sigma_eval.py",
+      "source_relative_path": "experiments/exp_scripts/fixed_sigma_eval.py",
+      "source_stat": {
+        "bytes": 8129,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942663,
+        "mode": 292,
+        "mtime_ns": 1782304727000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/runners/fixed_sigma_eval.py"
+    },
+    {
+      "bytes": 5095,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "07891aef387041a55511819a324d15b5f11c4af0468990a28fc0409c528db6eb",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/run_prompt_following.py",
+      "source_relative_path": "experiments/eval/run_prompt_following.py",
+      "source_stat": {
+        "bytes": 5095,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942620,
+        "mode": 292,
+        "mtime_ns": 1782651300000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/runners/run_prompt_following.py"
+    },
+    {
+      "bytes": 8386,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "cc3233bb146c0d523622de3a3e8a37b95031aebdafac8213bce92d2d0cc97262",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/experiments/eval/sample_evalset.py",
+      "source_relative_path": "experiments/eval/sample_evalset.py",
+      "source_stat": {
+        "bytes": 8386,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942638,
+        "mode": 292,
+        "mtime_ns": 1782806690000000000
+      },
+      "target_mode": 420,
+      "target_path": "evaluation/runners/sample_evalset.py"
+    },
+    {
+      "bytes": 0,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/networks/__init__.py",
+      "source_relative_path": "networks/__init__.py",
+      "source_stat": {
+        "bytes": 0,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374658,
+        "mode": 292,
+        "mtime_ns": 1782304728000000000
+      },
+      "target_mode": 420,
+      "target_path": "networks/__init__.py"
+    },
+    {
+      "bytes": 57774,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "ab80127206aa6a78b4920da373231898ef5fa6eb250a9765d026207ed87bfc05",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/networks/arch_mot.py",
+      "source_relative_path": "networks/arch_mot.py",
+      "source_stat": {
+        "bytes": 57774,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374660,
+        "mode": 292,
+        "mtime_ns": 1782305967000000000
+      },
+      "target_mode": 420,
+      "target_path": "networks/arch_mot.py"
+    },
+    {
+      "bytes": 4968,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "13725e154ccada03fb91c811b160fecec05df78f80900a068edc61036158233f",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/networks/arch_mot_utils.py",
+      "source_relative_path": "networks/arch_mot_utils.py",
+      "source_stat": {
+        "bytes": 4968,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374659,
+        "mode": 292,
+        "mtime_ns": 1782305928000000000
+      },
+      "target_mode": 420,
+      "target_path": "networks/arch_mot_utils.py"
+    },
+    {
+      "bytes": 24778,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "885c14264bb8ce5aa9ee748b3cd7c047ef823b0b4d8eeac92914ca2ee432a584",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/networks/model_mot.py",
+      "source_relative_path": "networks/model_mot.py",
+      "source_stat": {
+        "bytes": 24778,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374657,
+        "mode": 292,
+        "mtime_ns": 1782304728000000000
+      },
+      "target_mode": 420,
+      "target_path": "networks/model_mot.py"
+    },
+    {
+      "bytes": 8013,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "3a3596f94df25767037b09a799c45d0475fd264d72ec8b4c48732923dbe8a3ea",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/networks/vae.py",
+      "source_relative_path": "networks/vae.py",
+      "source_stat": {
+        "bytes": 8013,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374656,
+        "mode": 292,
+        "mtime_ns": 1782304728000000000
+      },
+      "target_mode": 420,
+      "target_path": "networks/vae.py"
+    },
+    {
+      "bytes": 475,
+      "kind": "generated",
+      "origin": "curation_builder",
+      "sha256": "3baea5301088a4af7c373e069e35c216466826f365aaf454d98e9f8524e0abc1",
+      "source_path": null,
+      "source_relative_path": null,
+      "source_stat": null,
+      "target_mode": 420,
+      "target_path": "provenance/compact_docs.sha256"
+    },
+    {
+      "bytes": 3916,
+      "kind": "generated",
+      "origin": "curation_builder",
+      "sha256": "5886829e9f828a9ea45caa963a4fdc1611cc0d1c90dd049f7b1f6e0fe43e9298",
+      "source_path": null,
+      "source_relative_path": null,
+      "source_stat": null,
+      "target_mode": 420,
+      "target_path": "provenance/curation_overlays.json"
+    },
+    {
+      "bytes": 4244,
+      "kind": "generated",
+      "origin": "curation_builder",
+      "sha256": "049b339c0bcfdabe0e553bffec66cf1e3d767ac33c94a7efbdf1f270ed415482",
+      "source_path": null,
+      "source_relative_path": null,
+      "source_stat": null,
+      "target_mode": 420,
+      "target_path": "provenance/data_analysis_core.sha256"
+    },
+    {
+      "bytes": 20423,
+      "kind": "copied",
+      "origin": "data_analysis",
+      "sha256": "07a0b46fa9ebb840ecf7f97cc7fccc0ec68e44c47368ae13c450bcfe81a4fd48",
+      "source_path": "/fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json",
+      "source_relative_path": "configs/t5_sampling_redesign_v1.json",
+      "source_stat": {
+        "bytes": 20423,
+        "ctime_ns": 1782836757000000000,
+        "device": 2985749804,
+        "inode": 144116087603072314,
+        "mode": 420,
+        "mtime_ns": 1782836757000000000
+      },
+      "target_mode": 420,
+      "target_path": "provenance/frozen_inputs/stage512a/t5_sampling_redesign_v1.json"
+    },
+    {
+      "bytes": 12783,
+      "kind": "generated",
+      "origin": "curation_builder",
+      "sha256": "7acf211120ef840303f7b3e9c7da3fdb49a83d28b390af497287552bac7d3857",
+      "source_path": null,
+      "source_relative_path": null,
+      "source_stat": null,
+      "target_mode": 420,
+      "target_path": "provenance/stage512a_v7_core.sha256"
+    },
+    {
+      "bytes": 16373,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "08ebf922de256c032cb6be68d80efd66d51aeaa7baa18511c8225e0251e86be5",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/README.md",
+      "source_relative_path": "scripts/offline_arb/README.md",
+      "source_stat": {
+        "bytes": 16373,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942700,
+        "mode": 292,
+        "mtime_ns": 1783635775000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/README.md"
+    },
+    {
+      "bytes": 11245,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "b9eb6d25ec0b094d39847a0ffcb3ffc57f42ae563759eb3250abbaf56e96f6eb",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/README_VALIDATOR.md",
+      "source_relative_path": "scripts/offline_arb/README_VALIDATOR.md",
+      "source_stat": {
+        "bytes": 11245,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942698,
+        "mode": 292,
+        "mtime_ns": 1783651585000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/README_VALIDATOR.md"
+    },
+    {
+      "bytes": 23458,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "a3eb3eb6644e0a0b500c3f018fe4c5e7d12a3e90931664ceaced9b6f3978ee45",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/audit_planned_caption_availability.py",
+      "source_relative_path": "scripts/offline_arb/audit_planned_caption_availability.py",
+      "source_stat": {
+        "bytes": 23458,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942776,
+        "mode": 292,
+        "mtime_ns": 1784128420000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/audit_planned_caption_availability.py"
+    },
+    {
+      "bytes": 17432,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "62972f2e1a27f689f2d1f45c4fdb7a7616cab5fd642f12a5f1206c31f077eb71",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/audit_textatlas_plan_rows.py",
+      "source_relative_path": "scripts/offline_arb/audit_textatlas_plan_rows.py",
+      "source_stat": {
+        "bytes": 17432,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942672,
+        "mode": 292,
+        "mtime_ns": 1784320119000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/audit_textatlas_plan_rows.py"
+    },
+    {
+      "bytes": 15680,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "836d88bc50f42286ebf1a7024e1934cd83ac677264c229b17ccd2f31e1165a75",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/audit_textatlas_planned_payloads.py",
+      "source_relative_path": "scripts/offline_arb/audit_textatlas_planned_payloads.py",
+      "source_stat": {
+        "bytes": 15680,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942780,
+        "mode": 292,
+        "mtime_ns": 1784016061000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/audit_textatlas_planned_payloads.py"
+    },
+    {
+      "bytes": 12791,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "3633d89da5b9176ef4acc82f1a3b43a6e453f037828c96dd1c8ac28cbc9ef90c",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/audit_textatlas_runtime_decode_candidates.py",
+      "source_relative_path": "scripts/offline_arb/audit_textatlas_runtime_decode_candidates.py",
+      "source_stat": {
+        "bytes": 12791,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942758,
+        "mode": 292,
+        "mtime_ns": 1784017524000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/audit_textatlas_runtime_decode_candidates.py"
+    },
+    {
+      "bytes": 77232,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "8c2ae62d7303db1b8e9b7e4c34186587ee062b8e713e5489806b4566c0531891",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/build_caption_sidecar.py",
+      "source_relative_path": "scripts/offline_arb/build_caption_sidecar.py",
+      "source_stat": {
+        "bytes": 77232,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942705,
+        "mode": 292,
+        "mtime_ns": 1783814144000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/build_caption_sidecar.py"
+    },
+    {
+      "bytes": 117681,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "6f015558b38231e6398eb26a7b3267178f81ec47d8c95b5666bdfedfef8716cd",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/build_offline_gpic_s3_production.py",
+      "source_relative_path": "scripts/offline_arb/build_offline_gpic_s3_production.py",
+      "source_stat": {
+        "bytes": 117681,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942725,
+        "mode": 292,
+        "mtime_ns": 1783881009000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/build_offline_gpic_s3_production.py"
+    },
+    {
+      "bytes": 6147,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "c355f7210896e39389cbf94f2efa86ed7b497a9d4b860c148af5a37be7933e18",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/build_plan.py",
+      "source_relative_path": "scripts/offline_arb/build_plan.py",
+      "source_stat": {
+        "bytes": 6147,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942744,
+        "mode": 292,
+        "mtime_ns": 1783651056000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/build_plan.py"
+    },
+    {
+      "bytes": 12204,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "8c1b24ea3514f3a30e0a5c8500f8ab2a629186dcdb4e0dac93669e7065035501",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/caption_sidecar_contract.py",
+      "source_relative_path": "scripts/offline_arb/caption_sidecar_contract.py",
+      "source_stat": {
+        "bytes": 12204,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942724,
+        "mode": 292,
+        "mtime_ns": 1783814111000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/caption_sidecar_contract.py"
+    },
+    {
+      "bytes": 24798,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "81511ff049fb47ee320426b4a2703e250923e9c183eb0866ed54bb234e4880f2",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/completion_publication.py",
+      "source_relative_path": "scripts/offline_arb/completion_publication.py",
+      "source_stat": {
+        "bytes": 24798,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942682,
+        "mode": 292,
+        "mtime_ns": 1784329087000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/completion_publication.py"
+    },
+    {
+      "bytes": 3837,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "f52487b57a46aeaa9796b8d4ff7dbf39256d8deacc7c55496b0d6558c443ff9a",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/emit_textatlas_repaired_payload_bindings.py",
+      "source_relative_path": "scripts/offline_arb/emit_textatlas_repaired_payload_bindings.py",
+      "source_stat": {
+        "bytes": 3837,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942669,
+        "mode": 292,
+        "mtime_ns": 1784015774000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/emit_textatlas_repaired_payload_bindings.py"
+    },
+    {
+      "bytes": 62216,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "416f76acef41eddfae088ba88051ec5aa581268cd30da5eab563a541a6849138",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/finalize_stage512a_w64_exception_gate.py",
+      "source_relative_path": "scripts/offline_arb/finalize_stage512a_w64_exception_gate.py",
+      "source_stat": {
+        "bytes": 62216,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942707,
+        "mode": 292,
+        "mtime_ns": 1784324494000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/finalize_stage512a_w64_exception_gate.py"
+    },
+    {
+      "bytes": 41293,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "519020b9a75949b08de42d3dad53d5c38d52c3c81cdabf658d3e6c3f36a7d254",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/finalize_textatlas_integrity_audit.py",
+      "source_relative_path": "scripts/offline_arb/finalize_textatlas_integrity_audit.py",
+      "source_stat": {
+        "bytes": 41293,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942737,
+        "mode": 292,
+        "mtime_ns": 1784152354000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/finalize_textatlas_integrity_audit.py"
+    },
+    {
+      "bytes": 9356,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "def38427c8c371d3c1bf632f4e58a61035b206140beda76d22f29fba42b07a6b",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/finalize_textatlas_runtime_decode_recheck.py",
+      "source_relative_path": "scripts/offline_arb/finalize_textatlas_runtime_decode_recheck.py",
+      "source_stat": {
+        "bytes": 9356,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942681,
+        "mode": 292,
+        "mtime_ns": 1784017524000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/finalize_textatlas_runtime_decode_recheck.py"
+    },
+    {
+      "bytes": 57795,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "e19efd6dd7063b835636e91b2f1c4c988bb55bdbe1b0f00fc779e4538a9e23dd",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/immutable_review_evidence.py",
+      "source_relative_path": "scripts/offline_arb/immutable_review_evidence.py",
+      "source_stat": {
+        "bytes": 57795,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942703,
+        "mode": 292,
+        "mtime_ns": 1784323396000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/immutable_review_evidence.py"
+    },
+    {
+      "bytes": 13292,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "bc4d6266b469976fb972e0f4d0dc236d580978313ea2f6f940ae7c2b3df49053",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/inventory_caption_sources.py",
+      "source_relative_path": "scripts/offline_arb/inventory_caption_sources.py",
+      "source_stat": {
+        "bytes": 13292,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942687,
+        "mode": 292,
+        "mtime_ns": 1783810915000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/inventory_caption_sources.py"
+    },
+    {
+      "bytes": 12051,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "4c1b3845c4248d58ad99ec58fbde779797ac399fbf70f0c8f25cf455fc39f034",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/make_anime_caption_source_manifest.py",
+      "source_relative_path": "scripts/offline_arb/make_anime_caption_source_manifest.py",
+      "source_stat": {
+        "bytes": 12051,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942729,
+        "mode": 292,
+        "mtime_ns": 1783809540000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/make_anime_caption_source_manifest.py"
+    },
+    {
+      "bytes": 83406,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "69d9e36f49210956b46d9df85ef620683a4459a302f24bb8f3aa3c3416f71893",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/make_freeze_manifest.py",
+      "source_relative_path": "scripts/offline_arb/make_freeze_manifest.py",
+      "source_stat": {
+        "bytes": 83406,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942787,
+        "mode": 292,
+        "mtime_ns": 1784326887000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/make_freeze_manifest.py"
+    },
+    {
+      "bytes": 14958,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "dd786bfd199f438082e9054ac5af457cef7c47480fdea6a574d4cdc85eaf5f5a",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/make_planner_input.py",
+      "source_relative_path": "scripts/offline_arb/make_planner_input.py",
+      "source_stat": {
+        "bytes": 14958,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942784,
+        "mode": 292,
+        "mtime_ns": 1784134016000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/make_planner_input.py"
+    },
+    {
+      "bytes": 27848,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "1f31ee29409fad2e44f240e03fb4a78ada732bc288441ae670cdbef3b11c2485",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/offline_gpic_s3_production_common.py",
+      "source_relative_path": "scripts/offline_arb/offline_gpic_s3_production_common.py",
+      "source_stat": {
+        "bytes": 27848,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942777,
+        "mode": 292,
+        "mtime_ns": 1783879894000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/offline_gpic_s3_production_common.py"
+    },
+    {
+      "bytes": 42981,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "5a32fbec3fa8b164f8e2ca4192cd861da5206cf8cfe7e9dd91269b8b7a5bd06e",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/offline_gpic_tar_sequential.py",
+      "source_relative_path": "scripts/offline_arb/offline_gpic_tar_sequential.py",
+      "source_stat": {
+        "bytes": 42981,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942693,
+        "mode": 292,
+        "mtime_ns": 1783878156000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/offline_gpic_tar_sequential.py"
+    },
+    {
+      "bytes": 49322,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "02d64fb65eb4a28bdfe394efc2470a47c97403f7f3537fcd223bbd042bbfc4e6",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/phase1_io_probe.py",
+      "source_relative_path": "scripts/offline_arb/phase1_io_probe.py",
+      "source_stat": {
+        "bytes": 49322,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942716,
+        "mode": 292,
+        "mtime_ns": 1783635714000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/phase1_io_probe.py"
+    },
+    {
+      "bytes": 46120,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "121809200030c94ab0b341a5ea57341ebf74d432d69a11de2e138bf8f36269d7",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/phase1_meta_validate.py",
+      "source_relative_path": "scripts/offline_arb/phase1_meta_validate.py",
+      "source_stat": {
+        "bytes": 46120,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942701,
+        "mode": 292,
+        "mtime_ns": 1783635742000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/phase1_meta_validate.py"
+    },
+    {
+      "bytes": 77626,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "493db91ac3304a46df2813b8baca9b32b99ce027f1f4726c68b8300f92cac424",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/phase2_shootout.py",
+      "source_relative_path": "scripts/offline_arb/phase2_shootout.py",
+      "source_stat": {
+        "bytes": 77626,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942774,
+        "mode": 292,
+        "mtime_ns": 1783641901000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/phase2_shootout.py"
+    },
+    {
+      "bytes": 71506,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "2be732107bb8ecef3505214aef67e0a54757ec5e33bcdbd8ee8bb53252cbf435",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/phase2b_shootout.py",
+      "source_relative_path": "scripts/offline_arb/phase2b_shootout.py",
+      "source_stat": {
+        "bytes": 71506,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942678,
+        "mode": 292,
+        "mtime_ns": 1783649615000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/phase2b_shootout.py"
+    },
+    {
+      "bytes": 57140,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "fe8aefbcd560a3c519641c0bf08474efe1da7bb9be2845b96fde7962d4293e73",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/phase3a_bucket_stats.py",
+      "source_relative_path": "scripts/offline_arb/phase3a_bucket_stats.py",
+      "source_stat": {
+        "bytes": 57140,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942795,
+        "mode": 292,
+        "mtime_ns": 1784126198000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/phase3a_bucket_stats.py"
+    },
+    {
+      "bytes": 53683,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "86efe650a7fe2d52b82d6b92c3b6750c6ba142698d6434f259326f2b977902d5",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/phase3a_tar_index.py",
+      "source_relative_path": "scripts/offline_arb/phase3a_tar_index.py",
+      "source_stat": {
+        "bytes": 53683,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942778,
+        "mode": 292,
+        "mtime_ns": 1783706695000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/phase3a_tar_index.py"
+    },
+    {
+      "bytes": 93756,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "8d690eee4d0a480e84817f4ce36b6913022d11e6b72774702857641721f7024b",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/phase5_build_catalog.py",
+      "source_relative_path": "scripts/offline_arb/phase5_build_catalog.py",
+      "source_stat": {
+        "bytes": 93756,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942697,
+        "mode": 292,
+        "mtime_ns": 1784116714000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/phase5_build_catalog.py"
+    },
+    {
+      "bytes": 120988,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "ca7fa04e795eefd1976b28a0423ec36815af94b60ebe9d95420475ddfa4d1fe4",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/phase6_visual_audit.py",
+      "source_relative_path": "scripts/offline_arb/phase6_visual_audit.py",
+      "source_stat": {
+        "bytes": 120988,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942733,
+        "mode": 292,
+        "mtime_ns": 1783702836000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/phase6_visual_audit.py"
+    },
+    {
+      "bytes": 12024,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "018c37a7b2c54f3d84253ecf7243b7ff5fb540ef9ea479a7aaa2199db1507e21",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/precompute_anime_freq.py",
+      "source_relative_path": "scripts/offline_arb/precompute_anime_freq.py",
+      "source_stat": {
+        "bytes": 12024,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942747,
+        "mode": 292,
+        "mtime_ns": 1784146200000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/precompute_anime_freq.py"
+    },
+    {
+      "bytes": 20060,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "4ff046c597e83ab33e42785b4d1b1fa293e2a6c15a0ccde59d15fd855020edb4",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/publish_offline_gpic_runtime_view.py",
+      "source_relative_path": "scripts/offline_arb/publish_offline_gpic_runtime_view.py",
+      "source_stat": {
+        "bytes": 20060,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942772,
+        "mode": 292,
+        "mtime_ns": 1783889342000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/publish_offline_gpic_runtime_view.py"
+    },
+    {
+      "bytes": 35919,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "0e552154d2c93955a693deccfdced281e0f64baaefb4d21e000fde508f7cef5c",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/smoke_offline_loader.py",
+      "source_relative_path": "scripts/offline_arb/smoke_offline_loader.py",
+      "source_stat": {
+        "bytes": 35919,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942792,
+        "mode": 292,
+        "mtime_ns": 1783809106000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/smoke_offline_loader.py"
+    },
+    {
+      "bytes": 10561,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "d3393425dbd89485c135a4237438642f38fc0a0ab9fca14fbc724993d1589d87",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/stage512a_w64_exception_contract.py",
+      "source_relative_path": "scripts/offline_arb/stage512a_w64_exception_contract.py",
+      "source_stat": {
+        "bytes": 10561,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942728,
+        "mode": 292,
+        "mtime_ns": 1784324495000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/stage512a_w64_exception_contract.py"
+    },
+    {
+      "bytes": 12053,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "999693b1a833b3703f85b5c66e8e9884e09f04d7fda32f67f88d8fd8878163c8",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_auto_resume_reconcile.py",
+      "source_relative_path": "scripts/offline_arb/test_auto_resume_reconcile.py",
+      "source_stat": {
+        "bytes": 12053,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942753,
+        "mode": 292,
+        "mtime_ns": 1784017391000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_auto_resume_reconcile.py"
+    },
+    {
+      "bytes": 7259,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "a289c7dfa01cfa7093ff4f8d7f69bf8ec2c9f8013f069f66bf43dc3d858145d1",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_caption_exceptions_v1.py",
+      "source_relative_path": "scripts/offline_arb/test_caption_exceptions_v1.py",
+      "source_stat": {
+        "bytes": 7259,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942694,
+        "mode": 292,
+        "mtime_ns": 1784113848000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_caption_exceptions_v1.py"
+    },
+    {
+      "bytes": 42335,
+      "kind": "curated_overlay",
+      "origin": "stage512a_v7_curated_overlay",
+      "overlay_authority": {
+        "ordered_transforms": [
+          {
+            "name": "bind_real_caption_band",
+            "new_fragment_bytes": 50,
+            "new_fragment_sha256": "e9984ac6bbb97a26a6714045e85e20c61dc47922b547537acf95b81f40fb4e4d",
+            "old_fragment_bytes": 47,
+            "old_fragment_sha256": "b3701dc4044f646c641d50275d8e4dc0b989233e72e178443548d3b496be7a6c",
+            "operation": "exact_bytes_replace_once",
+            "order": 1,
+            "post_bytes": 42335,
+            "post_sha256": "1c0aaa71ff2f8f56be614b70948be511c3d55e7798e7bf407dc1c7ad5b1bdb59",
+            "pre_bytes": 42332,
+            "pre_sha256": "75707fdcb32e69d7d9ffbbd755dcc12b9f059af65319edd06c06cfc54f0549aa",
+            "reason": "bind required real-domain caption_band=0 in legacy policy fixture",
+            "replacement_count": 1
+          }
+        ],
+        "python_compile_required": true,
+        "source_bytes": 42332,
+        "source_relative_path": "scripts/offline_arb/test_caption_sidecar_runtime.py",
+        "source_sha256": "75707fdcb32e69d7d9ffbbd755dcc12b9f059af65319edd06c06cfc54f0549aa",
+        "target_bytes": 42335,
+        "target_path": "scripts/offline_arb/test_caption_sidecar_runtime.py",
+        "target_sha256": "1c0aaa71ff2f8f56be614b70948be511c3d55e7798e7bf407dc1c7ad5b1bdb59",
+        "transform_count": 1
+      },
+      "sha256": "1c0aaa71ff2f8f56be614b70948be511c3d55e7798e7bf407dc1c7ad5b1bdb59",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_caption_sidecar_runtime.py",
+      "source_relative_path": "scripts/offline_arb/test_caption_sidecar_runtime.py",
+      "source_stat": {
+        "bytes": 42332,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942677,
+        "mode": 292,
+        "mtime_ns": 1783845019000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_caption_sidecar_runtime.py"
+    },
+    {
+      "bytes": 18195,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "db9fc6407b5597d05b779020cb84771313e843c4605234cda25006a714a0474a",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_completion_publication.py",
+      "source_relative_path": "scripts/offline_arb/test_completion_publication.py",
+      "source_stat": {
+        "bytes": 18195,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942719,
+        "mode": 292,
+        "mtime_ns": 1784329087000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_completion_publication.py"
+    },
+    {
+      "bytes": 23798,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "2b64501489da44af13b54578719213d1473ca787e0d2e2aef44cd27d8fb837dc",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_freeze_stage_source_profiles.py",
+      "source_relative_path": "scripts/offline_arb/test_freeze_stage_source_profiles.py",
+      "source_stat": {
+        "bytes": 23798,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942736,
+        "mode": 292,
+        "mtime_ns": 1784326888000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_freeze_stage_source_profiles.py"
+    },
+    {
+      "bytes": 7215,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "154008764931d709d3c24be2c30480247fbf427adaff92eef8ed2465d9c0f830",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_generic_coordinate_evidence.py",
+      "source_relative_path": "scripts/offline_arb/test_generic_coordinate_evidence.py",
+      "source_stat": {
+        "bytes": 7215,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942711,
+        "mode": 292,
+        "mtime_ns": 1784320121000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_generic_coordinate_evidence.py"
+    },
+    {
+      "bytes": 32771,
+      "kind": "curated_overlay",
+      "origin": "stage512a_v7_curated_overlay",
+      "overlay_authority": {
+        "ordered_transforms": [
+          {
+            "name": "bind_real_caption_band",
+            "new_fragment_bytes": 40,
+            "new_fragment_sha256": "08640bef909db967f3e06b7a702358884b7799342597cdc9dc4c5b82adc939bf",
+            "old_fragment_bytes": 37,
+            "old_fragment_sha256": "21743b00b18e9117bd3e9b6e8541d8d3f5bbfde797b9ec6cdee50cde6d6607eb",
+            "operation": "exact_bytes_replace_once",
+            "order": 1,
+            "post_bytes": 32771,
+            "post_sha256": "3b424b5a44e373fe3ce3857af388149eb96e34c52abe5917282dcea264d5f406",
+            "pre_bytes": 32768,
+            "pre_sha256": "f98cbc6ce4766b401f8c2484ac50433744553fdffb2cbbd0952b15f6fed512a9",
+            "reason": "bind required real-domain caption_band=0 in legacy policy fixture",
+            "replacement_count": 1
+          }
+        ],
+        "python_compile_required": true,
+        "source_bytes": 32768,
+        "source_relative_path": "scripts/offline_arb/test_gpic_blob_runtime.py",
+        "source_sha256": "f98cbc6ce4766b401f8c2484ac50433744553fdffb2cbbd0952b15f6fed512a9",
+        "target_bytes": 32771,
+        "target_path": "scripts/offline_arb/test_gpic_blob_runtime.py",
+        "target_sha256": "3b424b5a44e373fe3ce3857af388149eb96e34c52abe5917282dcea264d5f406",
+        "transform_count": 1
+      },
+      "sha256": "3b424b5a44e373fe3ce3857af388149eb96e34c52abe5917282dcea264d5f406",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_gpic_blob_runtime.py",
+      "source_relative_path": "scripts/offline_arb/test_gpic_blob_runtime.py",
+      "source_stat": {
+        "bytes": 32768,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942779,
+        "mode": 292,
+        "mtime_ns": 1783889536000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_gpic_blob_runtime.py"
+    },
+    {
+      "bytes": 6687,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "2206959456ea2ec72b8f82903ba6378645a3088a008eb0a911327b1628ac3ae1",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_gpic_blob_static.py",
+      "source_relative_path": "scripts/offline_arb/test_gpic_blob_static.py",
+      "source_stat": {
+        "bytes": 6687,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942762,
+        "mode": 292,
+        "mtime_ns": 1783889573000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_gpic_blob_static.py"
+    },
+    {
+      "bytes": 10067,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "f824408e42d509d28d18644047f3a191b99152c5ada6f987726bb91bfd4e227b",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_gpic_payload_reuse_runtime.py",
+      "source_relative_path": "scripts/offline_arb/test_gpic_payload_reuse_runtime.py",
+      "source_stat": {
+        "bytes": 10067,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942764,
+        "mode": 292,
+        "mtime_ns": 1784126649000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_gpic_payload_reuse_runtime.py"
+    },
+    {
+      "bytes": 12920,
+      "kind": "curated_overlay",
+      "origin": "stage512a_v7_curated_overlay",
+      "overlay_authority": {
+        "ordered_transforms": [
+          {
+            "name": "bind_non_real_caption_band",
+            "new_fragment_bytes": 85,
+            "new_fragment_sha256": "5ea09fb616562944700a001f2fa1a316019c7f69494fcd013d50e9e945abd2d9",
+            "old_fragment_bytes": 56,
+            "old_fragment_sha256": "290844aa0d0b6e721ed08bdc10341b68673d7dea71f32ce758ed848132c210d9",
+            "operation": "exact_bytes_replace_once",
+            "order": 1,
+            "post_bytes": 12869,
+            "post_sha256": "c072f0b4d9dde4efea815480f5adf1a2a4a9299f796fb1d92b5ce497106c8f72",
+            "pre_bytes": 12840,
+            "pre_sha256": "eab72200c422e4eced62eeed033498ce644885112dc699d30e24a4148586cdc8",
+            "reason": "bind required non-real caption_band=-1 in legacy policy fixture",
+            "replacement_count": 1
+          },
+          {
+            "name": "initialize_anime_native_upsample_exceptions",
+            "new_fragment_bytes": 118,
+            "new_fragment_sha256": "d5554fa56104105c041f6bb8b292201a363b5a3a8c939176fb15d44f9a210cf6",
+            "old_fragment_bytes": 67,
+            "old_fragment_sha256": "7a45f3e150d4cccafcece13931f80f9fbdb60bb2cd094b7f66a6bd83752bdb56",
+            "operation": "exact_bytes_replace_once",
+            "order": 2,
+            "post_bytes": 12920,
+            "post_sha256": "aee264d5e792958cca8480b0b1ba5e871e7765c533f5453e2ebc3f1ced16d58f",
+            "pre_bytes": 12869,
+            "pre_sha256": "c072f0b4d9dde4efea815480f5adf1a2a4a9299f796fb1d92b5ce497106c8f72",
+            "reason": "initialize the exact runtime fixture attribute required by reviewed native anime upsample exception handling",
+            "replacement_count": 1
+          }
+        ],
+        "python_compile_required": true,
+        "source_bytes": 12840,
+        "source_relative_path": "scripts/offline_arb/test_image_exceptions_v1.py",
+        "source_sha256": "eab72200c422e4eced62eeed033498ce644885112dc699d30e24a4148586cdc8",
+        "target_bytes": 12920,
+        "target_path": "scripts/offline_arb/test_image_exceptions_v1.py",
+        "target_sha256": "aee264d5e792958cca8480b0b1ba5e871e7765c533f5453e2ebc3f1ced16d58f",
+        "transform_count": 2
+      },
+      "sha256": "aee264d5e792958cca8480b0b1ba5e871e7765c533f5453e2ebc3f1ced16d58f",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_image_exceptions_v1.py",
+      "source_relative_path": "scripts/offline_arb/test_image_exceptions_v1.py",
+      "source_stat": {
+        "bytes": 12840,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942692,
+        "mode": 292,
+        "mtime_ns": 1784113848000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_image_exceptions_v1.py"
+    },
+    {
+      "bytes": 11308,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "1e2e0d680068a58576f874e61439a87fc42884f1b7298790fadccffda24e9085",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_offline_gpic_compact_controls_static.py",
+      "source_relative_path": "scripts/offline_arb/test_offline_gpic_compact_controls_static.py",
+      "source_stat": {
+        "bytes": 11308,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942727,
+        "mode": 292,
+        "mtime_ns": 1783889825000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_offline_gpic_compact_controls_static.py"
+    },
+    {
+      "bytes": 36737,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "fc9060b05719c57719c03731ca1c08f0eb807781195c16e36087d4837dacc3a8",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_offline_gpic_s3_production_static.py",
+      "source_relative_path": "scripts/offline_arb/test_offline_gpic_s3_production_static.py",
+      "source_stat": {
+        "bytes": 36737,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942745,
+        "mode": 292,
+        "mtime_ns": 1783881049000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_offline_gpic_s3_production_static.py"
+    },
+    {
+      "bytes": 15908,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "74e99dfd15bc9b65021d021de3740eca0da03858d860bdb869c8a56b20919ec0",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_offline_gpic_tar_sequential_static.py",
+      "source_relative_path": "scripts/offline_arb/test_offline_gpic_tar_sequential_static.py",
+      "source_stat": {
+        "bytes": 15908,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942731,
+        "mode": 292,
+        "mtime_ns": 1783878085000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_offline_gpic_tar_sequential_static.py"
+    },
+    {
+      "bytes": 12513,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "03aecf72dfe9e11c41176f80dd2173d98d3284bb9540aea0c91b94427fffa22f",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_offline_stage_identity.py",
+      "source_relative_path": "scripts/offline_arb/test_offline_stage_identity.py",
+      "source_stat": {
+        "bytes": 12513,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 216173859143942675,
+        "mode": 292,
+        "mtime_ns": 1784115201000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_offline_stage_identity.py"
+    },
+    {
+      "bytes": 7920,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "b7cff6b78611ce102e95cdc2be690c0980e0bb3eda9375dc09018532d72c7c27",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_stage512a_planner_v2.py",
+      "source_relative_path": "scripts/offline_arb/test_stage512a_planner_v2.py",
+      "source_stat": {
+        "bytes": 7920,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942708,
+        "mode": 292,
+        "mtime_ns": 1784134018000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_stage512a_planner_v2.py"
+    },
+    {
+      "bytes": 27303,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "d414fb37b76b5c0fd6cc81954964dac0e1a876d3a5f61a188043c677bcf76bba",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_stage512a_prep_contract.py",
+      "source_relative_path": "scripts/offline_arb/test_stage512a_prep_contract.py",
+      "source_stat": {
+        "bytes": 27303,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942712,
+        "mode": 292,
+        "mtime_ns": 1784227278000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_stage512a_prep_contract.py"
+    },
+    {
+      "bytes": 18236,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "6a1fa479f92749d7db85c184eb1cc80f6fd105296859dabc7d97abc5455a00b3",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_stage512a_w64_reviewed_exceptions.py",
+      "source_relative_path": "scripts/offline_arb/test_stage512a_w64_reviewed_exceptions.py",
+      "source_stat": {
+        "bytes": 18236,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942761,
+        "mode": 292,
+        "mtime_ns": 1784324494000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_stage512a_w64_reviewed_exceptions.py"
+    },
+    {
+      "bytes": 10007,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "ab080a959e6773208229185edd2d977c0acd4827cdb77023355dafc0c1d45185",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/test_stage512a_w64_runtime_profiles.py",
+      "source_relative_path": "scripts/offline_arb/test_stage512a_w64_runtime_profiles.py",
+      "source_stat": {
+        "bytes": 10007,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942793,
+        "mode": 292,
+        "mtime_ns": 1784324494000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/test_stage512a_w64_runtime_profiles.py"
+    },
+    {
+      "bytes": 70792,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "334d2fdd6fa3406259ddc6480bbbb14c84b554c59e4d9650aa1ff571d84e80c2",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/validate_plan.py",
+      "source_relative_path": "scripts/offline_arb/validate_plan.py",
+      "source_stat": {
+        "bytes": 70792,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942768,
+        "mode": 292,
+        "mtime_ns": 1784115611000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/validate_plan.py"
+    },
+    {
+      "bytes": 67515,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "a3b3f9b0071a238e570cd7d8d83de8660b7f08a819486e04b3c2199857c3c1dd",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/verify_caption_sidecar.py",
+      "source_relative_path": "scripts/offline_arb/verify_caption_sidecar.py",
+      "source_stat": {
+        "bytes": 67515,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942783,
+        "mode": 292,
+        "mtime_ns": 1783814038000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/verify_caption_sidecar.py"
+    },
+    {
+      "bytes": 21781,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "c24d22fe68c100c09c8dd145a6013a2bd359b8d3ca493d804604579953d6686e",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/verify_offline_gpic_compact_controls.py",
+      "source_relative_path": "scripts/offline_arb/verify_offline_gpic_compact_controls.py",
+      "source_stat": {
+        "bytes": 21781,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942775,
+        "mode": 292,
+        "mtime_ns": 1783889622000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/verify_offline_gpic_compact_controls.py"
+    },
+    {
+      "bytes": 42575,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "8c6bf815d47e0b929b5146b7005d986bf79e01af2438f10e53b693cb0c5062eb",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/scripts/offline_arb/verify_offline_gpic_s3_production.py",
+      "source_relative_path": "scripts/offline_arb/verify_offline_gpic_s3_production.py",
+      "source_stat": {
+        "bytes": 42575,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942723,
+        "mode": 292,
+        "mtime_ns": 1783879415000000000
+      },
+      "target_mode": 420,
+      "target_path": "scripts/offline_arb/verify_offline_gpic_s3_production.py"
+    },
+    {
+      "bytes": 4979,
+      "kind": "generated",
+      "origin": "curation_builder",
+      "sha256": "ad36a1c2cf7638546a5cf57518c20ba6e2da7f88da326ab95c599f184eceb967",
+      "source_path": null,
+      "source_relative_path": null,
+      "source_stat": null,
+      "target_mode": 420,
+      "target_path": "scripts/run_exact_policy_tests.py"
+    },
+    {
+      "bytes": 2898,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "59a33d7705119e0b0ff379ef76ff1bba8595e34acc54a8dc6034133d9fc61eae",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/test_weighted_loader_binding_v1.py",
+      "source_relative_path": "test_weighted_loader_binding_v1.py",
+      "source_stat": {
+        "bytes": 2898,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 144117017547374691,
+        "mode": 292,
+        "mtime_ns": 1784731692000000000
+      },
+      "target_mode": 420,
+      "target_path": "test_weighted_loader_binding_v1.py"
+    },
+    {
+      "bytes": 2741,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "373172f1a70bd4436edf3269a710f150def09dec17ac657eb68f767df2eef1cb",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/tests/test_anime_source_bound_native_mismatch_v1.py",
+      "source_relative_path": "tests/test_anime_source_bound_native_mismatch_v1.py",
+      "source_stat": {
+        "bytes": 2741,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 144117017547374741,
+        "mode": 292,
+        "mtime_ns": 1784872742000000000
+      },
+      "target_mode": 420,
+      "target_path": "tests/test_anime_source_bound_native_mismatch_v1.py"
+    },
+    {
+      "bytes": 1834,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "3b257ca034ad1f29e3097a902ccde4a9d08ae39b325986d87ba2e2ce8861da3c",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/tests/test_weighted_anime_native_upsample_v1.py",
+      "source_relative_path": "tests/test_weighted_anime_native_upsample_v1.py",
+      "source_stat": {
+        "bytes": 1834,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374653,
+        "mode": 292,
+        "mtime_ns": 1784828277000000000
+      },
+      "target_mode": 420,
+      "target_path": "tests/test_weighted_anime_native_upsample_v1.py"
+    },
+    {
+      "bytes": 39868,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "38cf641682dec5174f4f783fbf833eb8e7145e4819f70108bd316803ab616e88",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/train.py",
+      "source_relative_path": "train.py",
+      "source_stat": {
+        "bytes": 39868,
+        "ctime_ns": 1784872741000000000,
+        "device": 2985749804,
+        "inode": 144117017547374688,
+        "mode": 292,
+        "mtime_ns": 1784016583000000000
+      },
+      "target_mode": 420,
+      "target_path": "train.py"
+    },
+    {
+      "bytes": 0,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/__init__.py",
+      "source_relative_path": "training/__init__.py",
+      "source_stat": {
+        "bytes": 0,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942185,
+        "mode": 292,
+        "mtime_ns": 1782304728000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/__init__.py"
+    },
+    {
+      "bytes": 18747,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "785717a095527010a3593375a777399e093a3136e9755146cbd9a7c00c4af8ec",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/auto_resume_reconcile.py",
+      "source_relative_path": "training/auto_resume_reconcile.py",
+      "source_stat": {
+        "bytes": 18747,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942203,
+        "mode": 292,
+        "mtime_ns": 1784017391000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/auto_resume_reconcile.py"
+    },
+    {
+      "bytes": 17276,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "af0039161adafd555d0a69af0df389eeadc9010b0af24bb5333f2c025e655409",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/checkpoint.py",
+      "source_relative_path": "training/checkpoint.py",
+      "source_stat": {
+        "bytes": 17276,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942186,
+        "mode": 292,
+        "mtime_ns": 1782836929000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/checkpoint.py"
+    },
+    {
+      "bytes": 21912,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "3c0c7b2a767b504ed4d6d91c7c896e33e2c3059fbd574012c76629fbcb8c8cdd",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/config_schema.py",
+      "source_relative_path": "training/config_schema.py",
+      "source_stat": {
+        "bytes": 21912,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942201,
+        "mode": 292,
+        "mtime_ns": 1783876722000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/config_schema.py"
+    },
+    {
+      "bytes": 0,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline/__init__.py",
+      "source_relative_path": "training/dataline/__init__.py",
+      "source_stat": {
+        "bytes": 0,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374624,
+        "mode": 292,
+        "mtime_ns": 1782304728000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline/__init__.py"
+    },
+    {
+      "bytes": 13251,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "d4282dd1a31121350601adfcb386f5e4e31b7c5c32cc6ae1f0400c77290ae5e3",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline/caption_build.py",
+      "source_relative_path": "training/dataline/caption_build.py",
+      "source_stat": {
+        "bytes": 13251,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374620,
+        "mode": 292,
+        "mtime_ns": 1782818460000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline/caption_build.py"
+    },
+    {
+      "bytes": 106162,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "bff5f4d13ab0abbb296fcd05c96f5f46099c64c548f39ba727df442e7a15afd1",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline/complete_dataset.py",
+      "source_relative_path": "training/dataline/complete_dataset.py",
+      "source_stat": {
+        "bytes": 106162,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374621,
+        "mode": 292,
+        "mtime_ns": 1783620687000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline/complete_dataset.py"
+    },
+    {
+      "bytes": 14004,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "7541f803002d15566175b4958bae6ed09e437c9e030fed46aad9394a626fe5cb",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline/config.py",
+      "source_relative_path": "training/dataline/config.py",
+      "source_stat": {
+        "bytes": 14004,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374615,
+        "mode": 292,
+        "mtime_ns": 1782836699000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline/config.py"
+    },
+    {
+      "bytes": 15727,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "21ab43f6de35ac5ed30ab3be7151a6341015841e1620017c1d467eb41e6c00a6",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline/image_fetch.py",
+      "source_relative_path": "training/dataline/image_fetch.py",
+      "source_stat": {
+        "bytes": 15727,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374619,
+        "mode": 292,
+        "mtime_ns": 1783586045000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline/image_fetch.py"
+    },
+    {
+      "bytes": 4520,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "2c0c892661ca450871f7a10003b1c430d782b4075742c41debcc5d9d10a40643",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline/latent_cache.py",
+      "source_relative_path": "training/dataline/latent_cache.py",
+      "source_stat": {
+        "bytes": 4520,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374625,
+        "mode": 292,
+        "mtime_ns": 1782304728000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline/latent_cache.py"
+    },
+    {
+      "bytes": 28771,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "63a1a4c7bbb2baff4e6132d6c291d585e84428fd4f137be1c621bcb55858bb99",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline/manifest_index.py",
+      "source_relative_path": "training/dataline/manifest_index.py",
+      "source_stat": {
+        "bytes": 28771,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374623,
+        "mode": 292,
+        "mtime_ns": 1783585404000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline/manifest_index.py"
+    },
+    {
+      "bytes": 13942,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "0695f52078638aa5a9fa12ba41620c4a37b6a16ca7c9827001dbf7b3b7e68737",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline/multi_ar.py",
+      "source_relative_path": "training/dataline/multi_ar.py",
+      "source_stat": {
+        "bytes": 13942,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374622,
+        "mode": 292,
+        "mtime_ns": 1783620637000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline/multi_ar.py"
+    },
+    {
+      "bytes": 435,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "1cc0a109561dcc132fe32cc7df8e1b508646bc85bb72d2f3394ef7d820fd69ed",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline/native_safety.py",
+      "source_relative_path": "training/dataline/native_safety.py",
+      "source_stat": {
+        "bytes": 435,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374616,
+        "mode": 292,
+        "mtime_ns": 1783535913000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline/native_safety.py"
+    },
+    {
+      "bytes": 521,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "df670691fea7916213fd9c398cd69821ed1f34e4904e9ef8f6035d60785e65d0",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline/pil_safety.py",
+      "source_relative_path": "training/dataline/pil_safety.py",
+      "source_stat": {
+        "bytes": 521,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374617,
+        "mode": 292,
+        "mtime_ns": 1783534390000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline/pil_safety.py"
+    },
+    {
+      "bytes": 11725,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "6ecc49e5be83da256fee2347b396bb1a64746241ea185e6155f640e1dbf94a8c",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline/sampler.py",
+      "source_relative_path": "training/dataline/sampler.py",
+      "source_stat": {
+        "bytes": 11725,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 144117017547374618,
+        "mode": 292,
+        "mtime_ns": 1783359194000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline/sampler.py"
+    },
+    {
+      "bytes": 546,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "4bfd1ac2abf3eabf4463a5524d95f174300a14b24fd6aedb19534be4fb5bba9f",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline_offline/__init__.py",
+      "source_relative_path": "training/dataline_offline/__init__.py",
+      "source_stat": {
+        "bytes": 546,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942189,
+        "mode": 292,
+        "mtime_ns": 1783637491000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline_offline/__init__.py"
+    },
+    {
+      "bytes": 12583,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "2784dd3c8f882e72b1d5ad77d3bf178f2045098a2a99f4d72ce727e8b1fbb727",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline_offline/anime_native_upsample_exceptions_weighted_v1.py",
+      "source_relative_path": "training/dataline_offline/anime_native_upsample_exceptions_weighted_v1.py",
+      "source_stat": {
+        "bytes": 12583,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942193,
+        "mode": 292,
+        "mtime_ns": 1784828277000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline_offline/anime_native_upsample_exceptions_weighted_v1.py"
+    },
+    {
+      "bytes": 7979,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "c5e1f06ef079c815054d30ef932e73ac731264f00446f2284284cedee6d9dbaf",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline_offline/caption_exceptions_v1.py",
+      "source_relative_path": "training/dataline_offline/caption_exceptions_v1.py",
+      "source_stat": {
+        "bytes": 7979,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942198,
+        "mode": 292,
+        "mtime_ns": 1784324494000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline_offline/caption_exceptions_v1.py"
+    },
+    {
+      "bytes": 33763,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "4d02517f924f033ae509a5e25a8c004959d3ea3141cbae231cb45da46e0c532a",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline_offline/caption_sidecar.py",
+      "source_relative_path": "training/dataline_offline/caption_sidecar.py",
+      "source_stat": {
+        "bytes": 33763,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942190,
+        "mode": 292,
+        "mtime_ns": 1783815360000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline_offline/caption_sidecar.py"
+    },
+    {
+      "bytes": 63765,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "96500eb8c2f472fb65f1d00755bd1c159435332c230300800e1e56d0ba12902c",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline_offline/gpic_blob.py",
+      "source_relative_path": "training/dataline_offline/gpic_blob.py",
+      "source_stat": {
+        "bytes": 63765,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942195,
+        "mode": 292,
+        "mtime_ns": 1784126544000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline_offline/gpic_blob.py"
+    },
+    {
+      "bytes": 27633,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "0311d1d397a668c7cbd93fa4c7d1ef95dd1982e4be9ae24bf271c4130f1dabad",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline_offline/gpic_release_view.py",
+      "source_relative_path": "training/dataline_offline/gpic_release_view.py",
+      "source_stat": {
+        "bytes": 27633,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942196,
+        "mode": 292,
+        "mtime_ns": 1783889342000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline_offline/gpic_release_view.py"
+    },
+    {
+      "bytes": 17008,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "84283f8df9487e2bb7510748919418cab57b8d30348a634cf4f2c280cbecdfdc",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline_offline/image_exceptions_v1.py",
+      "source_relative_path": "training/dataline_offline/image_exceptions_v1.py",
+      "source_stat": {
+        "bytes": 17008,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942200,
+        "mode": 292,
+        "mtime_ns": 1784734887000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline_offline/image_exceptions_v1.py"
+    },
+    {
+      "bytes": 179402,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "ad52b1f984d1960aa437faae046356ab094b60f97248c7d3ecafa75584fefbc9",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline_offline/offline_dataset.py",
+      "source_relative_path": "training/dataline_offline/offline_dataset.py",
+      "source_stat": {
+        "bytes": 179402,
+        "ctime_ns": 1784872742000000000,
+        "device": 2985749804,
+        "inode": 216173859143942808,
+        "mode": 292,
+        "mtime_ns": 1784872742000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline_offline/offline_dataset.py"
+    },
+    {
+      "bytes": 123491,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "7a155e3f15ec61f416086a07fd16e8f28940bcbad1354ac44bcc65ed346fb694",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline_offline/planner_v1.py",
+      "source_relative_path": "training/dataline_offline/planner_v1.py",
+      "source_stat": {
+        "bytes": 123491,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942192,
+        "mode": 292,
+        "mtime_ns": 1784115611000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline_offline/planner_v1.py"
+    },
+    {
+      "bytes": 17554,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "9e9274744ff6fad0f36262b4f8076af3497d6e2bdffbd5a2b7c82c7aca459e7f",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline_offline/weighted_plan_reader_v1.py",
+      "source_relative_path": "training/dataline_offline/weighted_plan_reader_v1.py",
+      "source_stat": {
+        "bytes": 17554,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942194,
+        "mode": 292,
+        "mtime_ns": 1784731679000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline_offline/weighted_plan_reader_v1.py"
+    },
+    {
+      "bytes": 36150,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "b72afd62f581e3f0e2a86d6348685775f49973e90d7f32f023a626fcd0bee54f",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline_offline/weighted_plan_v1.py",
+      "source_relative_path": "training/dataline_offline/weighted_plan_v1.py",
+      "source_stat": {
+        "bytes": 36150,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942197,
+        "mode": 292,
+        "mtime_ns": 1784731683000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline_offline/weighted_plan_v1.py"
+    },
+    {
+      "bytes": 19036,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "6afaec30972d40fd34a6f8430c6af329be381098b1e1921b0864afea12d9d6b6",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/dataline_offline/weighted_streams_v1.py",
+      "source_relative_path": "training/dataline_offline/weighted_streams_v1.py",
+      "source_stat": {
+        "bytes": 19036,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942199,
+        "mode": 292,
+        "mtime_ns": 1784731688000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/dataline_offline/weighted_streams_v1.py"
+    },
+    {
+      "bytes": 15051,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "354a41f7be92caca510bb7f6e4f813631d2ead12efac718aceab7a2f5da65320",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/diagnostics.py",
+      "source_relative_path": "training/diagnostics.py",
+      "source_stat": {
+        "bytes": 15051,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942202,
+        "mode": 292,
+        "mtime_ns": 1783604681000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/diagnostics.py"
+    },
+    {
+      "bytes": 3244,
+      "kind": "copied",
+      "origin": "stage512a_v7",
+      "sha256": "14375176ccb53dec488598698a7ca7f88596f49d64d6fd8909d798c21d3c1926",
+      "source_path": "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7/training/stub_data.py",
+      "source_relative_path": "training/stub_data.py",
+      "source_stat": {
+        "bytes": 3244,
+        "ctime_ns": 1784872738000000000,
+        "device": 2985749804,
+        "inode": 216173859143942187,
+        "mode": 292,
+        "mtime_ns": 1782304728000000000
+      },
+      "target_mode": 420,
+      "target_path": "training/stub_data.py"
+    }
+  ],
+  "file_records_scope": "all_payload_files_except_receipt_itself",
+  "final_eval_scripts_closure": {
+    "canonical_sorted_newline_script_names_sha256": "bb1d10cb9f3a82be0f2f5131c02ecf0f9cc07a13313e704dabe263f4d54fe623",
+    "entire_scripts_inventory_scanned_for_object_safety": true,
+    "release_relative_path": "eval_releases/stage512a_final_weighted_vs_streaming_20260728v1",
+    "script_count": 9,
+    "script_names": [
+      "anime_metrics_final.py",
+      "geneval_generate_shard.py",
+      "merge_geneval_shards.py",
+      "merge_multiar_scores.py",
+      "merge_sampling_shards.py",
+      "sample_pair_final.py",
+      "score_multiar_final.py",
+      "score_multiar_shard.py",
+      "strict_eval_stage512a_final.py"
+    ],
+    "scripts_relative_path": "eval_releases/stage512a_final_weighted_vs_streaming_20260728v1/scripts",
+    "status": "PASS_EXACT_FINAL_STAGE512A_EVAL_SCRIPTS_CLOSURE"
+  },
+  "git": {
+    "base": "21dfd7a4c2bc9f9a94344d1a35d724def9b45738",
+    "branch": "codex/stage512b-real-core-20260730",
+    "commit_performed_by_builder": false,
+    "origin": "git@github.com:wangzy01/motif.git",
+    "push_performed_by_builder": false,
+    "tag_performed_by_builder": false
+  },
+  "payload": {
+    "file_count_excluding_receipt": 169,
+    "jobs_file_count": 0,
+    "max_file_bytes": 100000000,
+    "tree_sha256_excluding_receipt": "54ddb915fb794a2355ef34c95021a3af7a2de6a05bb0df5bd31c778be40033d8"
+  },
+  "policy": {
+    "schema": "mot_repo_curation_v1",
+    "sha256": "84ca822633ba0be225077ddd19934e16f96ce8e432ab217a58ee5367b0b54cca"
+  },
+  "policy_command_exclusions": {
+    "exclusions": [
+      {
+        "excluded_reason": "requires omitted historical jobs; curated payload jobs_file_count=0",
+        "excluded_reason_code": "historical_fixture_missing_jobs",
+        "executed_as_policy": false,
+        "path": "scripts/offline_arb/test_stage512a_prep_contract.py",
+        "source_bytes": 27303,
+        "source_modified": false,
+        "source_retained_as_historical_reference": true,
+        "source_sha256": "d414fb37b76b5c0fd6cc81954964dac0e1a876d3a5f61a188043c677bcf76bba"
+      }
+    ],
+    "jobs_file_count": 0,
+    "schema": "mot_repo_curation_policy_command_exclusions_v1",
+    "status": "PASS_EXACT1_HISTORICAL_REFERENCE_EXCLUDED"
+  },
+  "policy_local_import_closure": {
+    "canonical_sorted_newline_paths_sha256": "552bf45b4d141166342f0d4eb070309d6dd7408bed169eb71affaa978c380338",
+    "dynamic_or_ambiguous_repo_local_imports": 0,
+    "entrypoints": [
+      "scripts/offline_arb/finalize_stage512a_w64_exception_gate.py"
+    ],
+    "exact_path_count": 3,
+    "files": {
+      "scripts/offline_arb/finalize_stage512a_w64_exception_gate.py": {
+        "bytes": 62216,
+        "sha256": "416f76acef41eddfae088ba88051ec5aa581268cd30da5eab563a541a6849138"
+      },
+      "scripts/offline_arb/immutable_review_evidence.py": {
+        "bytes": 57795,
+        "sha256": "e19efd6dd7063b835636e91b2f1c4c988bb55bdbe1b0f00fc779e4538a9e23dd"
+      },
+      "scripts/offline_arb/stage512a_w64_exception_contract.py": {
+        "bytes": 10561,
+        "sha256": "d3393425dbd89485c135a4237438642f38fc0a0ab9fca14fbc724993d1589d87"
+      }
+    },
+    "local_import_edges": {
+      "scripts/offline_arb/finalize_stage512a_w64_exception_gate.py": [
+        "scripts/offline_arb/immutable_review_evidence.py",
+        "scripts/offline_arb/stage512a_w64_exception_contract.py"
+      ],
+      "scripts/offline_arb/immutable_review_evidence.py": [],
+      "scripts/offline_arb/stage512a_w64_exception_contract.py": []
+    },
+    "schema": "mot_repo_curation_policy_import_closure_v1",
+    "status": "PASS_EXACT3_STATIC_LOCAL_IMPORT_CLOSURE"
+  },
+  "policy_suite_requirement": {
+    "contract": {
+      "closure_bindings": {
+        "historical_command_exclusion": {
+          "exclusions": [
+            {
+              "excluded_reason": "requires omitted historical jobs; curated payload jobs_file_count=0",
+              "excluded_reason_code": "historical_fixture_missing_jobs",
+              "executed_as_policy": false,
+              "path": "scripts/offline_arb/test_stage512a_prep_contract.py",
+              "source_bytes": 27303,
+              "source_modified": false,
+              "source_retained_as_historical_reference": true,
+              "source_sha256": "d414fb37b76b5c0fd6cc81954964dac0e1a876d3a5f61a188043c677bcf76bba"
+            }
+          ],
+          "jobs_file_count": 0,
+          "schema": "mot_repo_curation_policy_command_exclusions_v1",
+          "status": "PASS_EXACT1_HISTORICAL_REFERENCE_EXCLUDED"
+        },
+        "overlay_file_count": 3,
+        "overlay_manifest_sha256": "5886829e9f828a9ea45caa963a4fdc1611cc0d1c90dd049f7b1f6e0fe43e9298",
+        "overlay_total_transform_count": 4,
+        "policy_local_import_closure_count": 3,
+        "policy_local_import_closure_paths_sha256": "552bf45b4d141166342f0d4eb070309d6dd7408bed169eb71affaa978c380338"
+      },
+      "command_count": 13,
+      "commands": [
+        {
+          "argv": [
+            "<current-python>",
+            "-m",
+            "compileall",
+            "-q",
+            "train.py",
+            "networks",
+            "training",
+            "scripts",
+            "data_analysis",
+            "evaluation",
+            "tests"
+          ],
+          "label": "compileall"
+        },
+        {
+          "argv": [
+            "<current-python>",
+            "scripts/run_exact_policy_tests.py"
+          ],
+          "label": "exact_zero_arg_policy_tests"
+        },
+        {
+          "argv": [
+            "<current-python>",
+            "test_weighted_loader_binding_v1.py"
+          ],
+          "label": "weighted_loader_binding"
+        },
+        {
+          "argv": [
+            "<current-python>",
+            "scripts/offline_arb/test_auto_resume_reconcile.py"
+          ],
+          "label": "auto_resume_reconcile"
+        },
+        {
+          "argv": [
+            "<current-python>",
+            "scripts/offline_arb/test_caption_exceptions_v1.py"
+          ],
+          "label": "caption_exceptions"
+        },
+        {
+          "argv": [
+            "<current-python>",
+            "scripts/offline_arb/test_caption_sidecar_runtime.py"
+          ],
+          "label": "caption_sidecar_runtime"
+        },
+        {
+          "argv": [
+            "<current-python>",
+            "scripts/offline_arb/test_gpic_blob_runtime.py"
+          ],
+          "label": "gpic_blob_runtime"
+        },
+        {
+          "argv": [
+            "<current-python>",
+            "scripts/offline_arb/test_image_exceptions_v1.py"
+          ],
+          "label": "image_exceptions"
+        },
+        {
+          "argv": [
+            "<current-python>",
+            "scripts/offline_arb/test_offline_stage_identity.py"
+          ],
+          "label": "offline_stage_identity"
+        },
+        {
+          "argv": [
+            "<current-python>",
+            "scripts/offline_arb/test_stage512a_planner_v2.py"
+          ],
+          "label": "stage512a_planner"
+        },
+        {
+          "argv": [
+            "<current-python>",
+            "scripts/offline_arb/test_stage512a_w64_runtime_profiles.py"
+          ],
+          "label": "stage512a_runtime_profiles"
+        },
+        {
+          "argv": [
+            "<current-python>",
+            "scripts/offline_arb/test_stage512a_w64_reviewed_exceptions.py"
+          ],
+          "label": "stage512a_reviewed_exceptions"
+        },
+        {
+          "argv": [
+            "<current-python>",
+            "-c",
+            "<frozen static smoke>"
+          ],
+          "label": "static_import_and_final_config_parse"
+        }
+      ],
+      "exact_policy_execution_marker": {
+        "mode": 384,
+        "nlink": 1,
+        "persisted_in_evidence": false,
+        "raw_bytes": 32,
+        "raw_sha256": "f060dcabf907d18d709e92a7a672278002854bd253ab589893ae9a500084075e",
+        "validated_execution_count": 3
+      },
+      "execution_environment": {
+        "caption_sidecar_selftest_root": "<external-fresh-empty-dir>",
+        "closed_allowlist": true,
+        "cuda_visible_devices": "",
+        "git_config_closed": true,
+        "home": "/nonexistent",
+        "locale": "C",
+        "network_offline_flags": true,
+        "path": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "python_dont_write_bytecode": "1",
+        "python_pycache_prefix": "<external-fresh-pycache>",
+        "pythonpath": "<fresh-checkout>",
+        "tmpdir": "<external-fresh-tmp>",
+        "umask": 63,
+        "wandb_mode": "disabled"
+      },
+      "result_requirements": {
+        "all_status": "PASS",
+        "fresh_bundle_mirror_and_worktree_required": true,
+        "pre_and_post_worktree_clean": true,
+        "stdout_stderr_bytes_and_sha256_bound": true,
+        "stdout_stderr_content_persisted": false
+      },
+      "schema": "mot_repo_curation_policy_suite_contract_v1",
+      "static_import_smoke": {
+        "bytes": 824,
+        "sha256": "ea2ee0b08770e29d4ec1a901ad97733088efb20d344dddff2d33773ddce08936",
+        "source": "\nfrom pathlib import Path\nfrom omegaconf import OmegaConf\nfrom training.config_schema import validate_config\n\nconfig_path = Path(\"configs/stage512a_20260722_weighted_w64_v1.yaml\")\nassert config_path.is_file()\ncfg = OmegaConf.load(config_path)\nassert str(cfg.model_cls)\nassert str(cfg.dataset.store_cls)\nassert validate_config(cfg, log=lambda _message: None) is not None\n\nimport train\ntrain_source = Path(\"train.py\").read_text(encoding=\"utf-8\")\nassert 'parser.add_argument(\"--config\", required=True)' in train_source\nassert \"OmegaConf.load(args.config)\" in train_source\ntrain.get_class(str(cfg.model_cls))\ntrain.get_class(str(cfg.dataset.store_cls))\nimport training.dataline.complete_dataset\nimport training.dataline_offline.planner_v1\n\nraw = config_path.read_text(encoding=\"utf-8\")\nassert \"stage512b_redesign_v1\" not in raw\n"
+      }
+    },
+    "contract_sha256": "cff38980b5a35890b6c2cd930e14c93dbcb3f06b14438c5e575a2e9f617e7494",
+    "execution_claimed_by_builder_receipt": false,
+    "execution_evidence_required_in": [
+      "controller_REPORT.json",
+      "controller__SUCCESS",
+      "independent_verifier_REPORT.json",
+      "independent_verifier__SUCCESS"
+    ],
+    "fresh_bundle_execution_evidence": false,
+    "status": "REQUIRED_NOT_YET_RUN"
+  },
+  "protected_worktrees": {
+    "fsx_canonical_fingerprint_sha256": "97738852f6367fca655d94f08adf0f075f4ddfec2ed13ebcc37956c419777fe2",
+    "mac_cache_fingerprint_sha256": "44e0d247f705ec03576e505aaa7e9f764fdff1a6fa681e7fa0e15dd30a05a01d",
+    "read_or_modified_by_builder": false
+  },
+  "receipt_scope": "pre_commit_tree_definition",
+  "receipt_self_sha256": "27c99a4314b929f8447732ee227f3e972b73b4e2e7f150276e847233980ca12e",
+  "schema": "mot_repo_curation_builder_preparation_receipt_v9",
+  "source_counts": {
+    "compact_docs": 5,
+    "data_analysis": 26,
+    "stage512a_final_eval_release": 9,
+    "stage512a_v7": 113,
+    "stage512a_v7_curated_overlay": 3
+  },
+  "source_release": {
+    "ignored_unmanifested_runtime_cache": {
+      "canonical_sorted_newline_paths_sha256": "f62133cd45a8d5447e03c071a8800a372ef3b956a5e3e281dcc993d14c36a626",
+      "count": 17,
+      "paths": [
+        "experiments/eval/scorers/__pycache__/clip_score.cpython-312.pyc",
+        "experiments/eval/scorers/__pycache__/tagger_score.cpython-312.pyc",
+        "networks/__pycache__/__init__.cpython-312.pyc",
+        "networks/__pycache__/arch_mot.cpython-312.pyc",
+        "networks/__pycache__/arch_mot_utils.cpython-312.pyc",
+        "networks/__pycache__/model_mot.cpython-312.pyc",
+        "networks/__pycache__/vae.cpython-312.pyc",
+        "training/__pycache__/__init__.cpython-312.pyc",
+        "training/__pycache__/checkpoint.cpython-312.pyc",
+        "training/__pycache__/diagnostics.cpython-312.pyc",
+        "training/dataline/__pycache__/__init__.cpython-312.pyc",
+        "training/dataline/__pycache__/caption_build.cpython-312.pyc",
+        "training/dataline/__pycache__/config.cpython-312.pyc",
+        "training/dataline/__pycache__/image_fetch.cpython-312.pyc",
+        "training/dataline/__pycache__/manifest_index.cpython-312.pyc",
+        "training/dataline/__pycache__/native_safety.cpython-312.pyc",
+        "training/dataline/__pycache__/pil_safety.cpython-312.pyc"
+      ]
+    },
+    "manifest_sha256": "7256d093ac54f913fd50ab68c66a87667bcb8f0305c6ba4d5ae165afff6b2445",
+    "release_digest": "ff1d185229c8392f8b83bf612c288cbdbbdcffa28db67b46819e62f8d2a710ea",
+    "schema": "stage512a_weighted_source_release_v7"
+  },
+  "status": "BUILDER_PREPARATION_RECEIPT"
+}

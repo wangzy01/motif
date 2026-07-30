@@ -12,6 +12,7 @@ import json
 import os
 import random
 import shutil
+import stat
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,8 +64,28 @@ def _reset_output_dir(output_dir: Path) -> None:
             child.unlink()
 
 
-def _read_catalog_hash(catalog_path: Path) -> str:
+def _require_regular_non_symlink(path: Path, label: str) -> None:
+    try:
+        value = path.lstat()
+    except OSError as exc:
+        raise RuntimeError(f"cannot stat {label} {path}: {exc}") from exc
+    if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
+        raise RuntimeError(f"{label} must be a regular non-symlink file: {path}")
+
+
+def _validate_catalog_input(catalog_path: Path) -> Path:
+    if catalog_path.suffix != ".parquet":
+        raise RuntimeError(
+            f"anime catalog input must be a .parquet file, got: {catalog_path}"
+        )
+    _require_regular_non_symlink(catalog_path, "anime catalog")
     header_path = catalog_path.parent / "header.json"
+    _require_regular_non_symlink(header_path, "catalog header")
+    return header_path
+
+
+def _read_catalog_hash(catalog_path: Path) -> str:
+    header_path = _validate_catalog_input(catalog_path)
     try:
         header = json.loads(header_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -76,6 +97,41 @@ def _read_catalog_hash(catalog_path: Path) -> str:
         int(catalog_hash, 16)
     except ValueError as exc:
         raise RuntimeError(f"catalog header has invalid catalog_hash: {header_path}") from exc
+
+    anime_file = header.get("files", {}).get("anime")
+    if not isinstance(anime_file, dict):
+        raise RuntimeError(f"catalog header lacks files.anime: {header_path}")
+    expected_name = anime_file.get("name")
+    expected_bytes = anime_file.get("bytes")
+    expected_sha256 = anime_file.get("sha256")
+    if expected_name != catalog_path.name:
+        raise RuntimeError(
+            f"catalog header anime filename differs from CLI input: "
+            f"{expected_name!r} != {catalog_path.name!r}"
+        )
+    if type(expected_bytes) is not int or expected_bytes < 0:
+        raise RuntimeError(f"catalog header has invalid anime bytes: {expected_bytes!r}")
+    actual_bytes = catalog_path.stat().st_size
+    if actual_bytes != expected_bytes:
+        raise RuntimeError(
+            f"anime catalog bytes differ from header: {actual_bytes} != {expected_bytes}"
+        )
+    if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
+        raise RuntimeError(
+            f"catalog header has invalid anime sha256: {expected_sha256!r}"
+        )
+    try:
+        int(expected_sha256, 16)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"catalog header has invalid anime sha256: {expected_sha256!r}"
+        ) from exc
+    actual_sha256 = _sha256_file(catalog_path)
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError(
+            f"anime catalog SHA-256 differs from header: "
+            f"{actual_sha256} != {expected_sha256}"
+        )
     return catalog_hash
 
 
@@ -197,7 +253,6 @@ def main() -> int:
     args = parse_args()
     catalog_path = Path(args.catalog).expanduser()
     output_dir = Path(args.output_dir).expanduser()
-    _reset_output_dir(output_dir)
 
     catalog_hash = _read_catalog_hash(catalog_path)
     shards = _distinct_shards(catalog_path)
@@ -213,6 +268,11 @@ def main() -> int:
                 f"anime shard basename collision for {artifact_name}: "
                 f"{previous!r} and {shard_path!r}"
             )
+
+    # Do not create or clear the output namespace until every catalog-side
+    # preflight above has succeeded. This keeps a bad CLI path or malformed
+    # catalog from leaving an empty publication root behind.
+    _reset_output_dir(output_dir)
 
     files: dict[str, dict[str, str]] = {}
     worker_count = min(args.workers, len(shards))

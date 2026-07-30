@@ -211,17 +211,54 @@ def _scan_block(
         with np.load(path, allow_pickle=False) as archive:
             if set(archive.files) != {"bucket_of_step", "item_row", "domain_counts"}:
                 raise AuditError(f"plan block dataset set drift: {path}: {archive.files!r}")
-            full = archive["item_row"]
-            if full.ndim != 3 or full.shape[1:] != (world_size, per_rank_bs):
-                raise AuditError(f"plan block item_row shape drift: {path}: {full.shape}")
-            if full.dtype != np.dtype(np.int64):
-                raise AuditError(f"plan block item_row dtype drift: {path}: {full.dtype}")
-            rows = np.asarray(full[:take], dtype=np.int64)
+            full_rows = archive["item_row"]
+            full_buckets = archive["bucket_of_step"]
+            full_domain_counts = archive["domain_counts"]
+            if (
+                full_rows.ndim != 3
+                or full_rows.shape[0] < take
+                or full_rows.shape[1:] != (world_size, per_rank_bs)
+            ):
+                raise AuditError(
+                    f"plan block item_row shape drift: {path}: {full_rows.shape}"
+                )
+            full_steps = int(full_rows.shape[0])
+            if full_rows.dtype != np.dtype(np.int64):
+                raise AuditError(
+                    f"plan block item_row dtype drift: {path}: {full_rows.dtype}"
+                )
+            if full_buckets.shape != (full_steps,) or full_buckets.dtype != np.dtype(np.int16):
+                raise AuditError(
+                    "plan block bucket_of_step shape/dtype drift: "
+                    f"{path}: shape={full_buckets.shape}, dtype={full_buckets.dtype}"
+                )
+            if (
+                full_domain_counts.shape != (full_steps, len(DOMAINS))
+                or full_domain_counts.dtype != np.dtype(np.int32)
+            ):
+                raise AuditError(
+                    "plan block domain_counts shape/dtype drift: "
+                    f"{path}: shape={full_domain_counts.shape}, "
+                    f"dtype={full_domain_counts.dtype}"
+                )
+            rows = np.asarray(full_rows[:take])
+            if rows.shape != (take, world_size, per_rank_bs):
+                raise AuditError(
+                    f"plan block item_row truncated slice: {path}: {rows.shape}"
+                )
     except AuditError:
         raise
     except Exception as exc:
         raise AuditError(f"cannot read plan block {path}: {exc}") from exc
 
+    if bad_ids.size == 0:
+        return {
+            "index": index,
+            "steps": take,
+            "counts": {},
+            "first": {},
+            "last": {},
+        }
     positions = np.searchsorted(bad_ids, rows)
     in_range = positions < bad_ids.size
     safe_positions = np.minimum(positions, bad_ids.size - 1)
@@ -260,8 +297,6 @@ def _scan_plan(
     if requested_steps > total_steps:
         raise AuditError(f"requested steps {requested_steps} exceed plan total_steps {total_steps}")
     bad_ids = np.array(sorted(set(int(value) for value in bad_row_ids)), dtype=np.int64)
-    if bad_ids.size == 0:
-        raise AuditError("catalog audit found no unavailable rows; refusing vacuous plan scan")
 
     needed_blocks = (requested_steps + block_steps - 1) // block_steps
     paths = [plan_root / "blocks" / f"block_{index:06d}.npz" for index in range(needed_blocks)]
@@ -530,6 +565,7 @@ def main() -> int:
         "provenance": {
             "plan_root": str(plan_root),
             "plan_id": plan_header.get("plan_id"),
+            "plan_hash": plan_header.get("plan_hash"),
             "plan_header_sha256": _sha256(plan_header_path),
             "catalog_root": str(catalog_root),
             "catalog_hash": catalog_header.get("catalog_hash"),

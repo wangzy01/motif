@@ -64,8 +64,8 @@ O(95*5 + 2000*5)，与 95.7M 行总量无关。
 bucket_decision_report.diag.json / bucket_decision_summary.diag.md），绝不覆盖全量 run 的正式
 三件套。
 
-本 job 不设自动 PASS/FAIL 门槛（产出是决策材料，不是 stop/go gate）；只有当某个域**完全**扫描
-失败（0 个 shard 成功）时脚本才非零退出，其余情况一律退出 0，请求人工据 report 复核 coverage。
+本 job 是后续 immutable catalog 的全量输入门禁：任何一个 shard 失败都必须非零退出。
+报告仍会保留 failed_shards 诊断，但不允许用部分 N[B,d] 继续构建 catalog。
 
 硬约束：数据源只读；输出仅 --output-dir（固定为上面的规范路径）；无周期 faulthandler；venv
 python；不改任何既有文件；PYTHONPATH 指 crop 仓库。
@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import math
 import multiprocessing as mp
@@ -89,6 +90,7 @@ from typing import Any
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from omegaconf import OmegaConf
 
@@ -101,22 +103,41 @@ from training.dataline.multi_ar import (
     square_index,
 )
 
-CANONICAL_OUTPUT_DIR = Path(
-    "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_bucketstats_v1"
+OUTPUT_BASE = Path(
+    "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop"
 )
+CANONICAL_OUTPUT_DIRS = {
+    "256": OUTPUT_BASE / "offline_arb_bucketstats_v1",
+    "512a": OUTPUT_BASE / "offline_arb_bucketstats_stage512a_v1",
+}
+CANONICAL_OUTPUT_DIR = CANONICAL_OUTPUT_DIRS["256"]
 DEFAULT_PIPELINE_CONFIG = "configs/stage256_redesign_naifu_arb_v1.yaml"
-STAGE = "256"
 DOMAINS = ("anime", "monet_real", "gpic", "synthetic", "textatlas")   # N[B,d] 列序，和 planner_input.json 的 domains 顺序约定一致
 NBINS = 2000                                                          # retained∈(0,1] 直方图分辨率 5e-4
 FLOORS = (0.0, 0.005, 0.01, 0.02)
-BS_PER_RANK = 144
-WORLD_SIZE = 16
-GLOBAL_BATCH = BS_PER_RANK * WORLD_SIZE                               # 2304
+LEGACY_STAGE256_BS_PER_RANK = 144
+LEGACY_STAGE256_WORLD_SIZE = 16
 # 仅作一致性校验用的参考值（Evan 指定，来自 t5_sampling_redesign_v1.json 的 domain_mix["256"]）；
 # 真正参与计算的 domain_mix 来自运行时 load_sampling_config() 读取，不由此常量决定。
 STAGE256_DOMAIN_MIX_REF = {
     "anime": 0.27, "monet_real": 0.405, "gpic": 0.259, "synthetic": 0.051, "textatlas": 0.015,
 }
+ELIGIBILITY_FALLBACK_DOMAINS = {
+    # Anime uses the historical all-true compatibility path instead of fallback.
+    "256": frozenset(("monet_real", "gpic", "synthetic", "textatlas")),
+    # Schema audit: the four source manifests derive elig_512 from width/height;
+    # TextAtlas is the only enumerated manifest that physically stores elig_512.
+    "512a": frozenset(("anime", "monet_real", "gpic", "synthetic")),
+}
+ANIME_NL_COLUMNS = (
+    "refined_description",
+    "medium_description",
+    "short_description",
+)
+
+
+class EligibilityContractError(RuntimeError):
+    """A manifest omitted the stage eligibility column outside the audited whitelist."""
 
 
 def utc_now() -> str:
@@ -134,11 +155,22 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def validate_output_dir(raw: str) -> Path:
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(8 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def validate_output_dir(raw: str, stage: str) -> Path:
     path = Path(raw).expanduser().resolve(strict=False)
-    if str(path) != str(CANONICAL_OUTPUT_DIR):
+    expected = CANONICAL_OUTPUT_DIRS.get(stage)
+    if expected is None:
+        raise ValueError(f"unsupported offline bucket-stats stage {stage!r}")
+    if path != expected:
         raise ValueError(
-            f"--output-dir 必须是固定路径 {CANONICAL_OUTPUT_DIR}，got {path}"
+            f"--output-dir 必须是 stage={stage} 的固定路径 {expected}，got {path}"
         )
     return path
 
@@ -146,9 +178,54 @@ def validate_output_dir(raw: str) -> Path:
 # --------------------------------------------------------------------------- #
 # pipeline/sampling config 装载（不实例化 CompleteV1Dataset：只要 multi_ar 参数 + shard 枚举)
 # --------------------------------------------------------------------------- #
-def load_pipeline_config(config_path: str) -> tuple[dict[str, Any], tuple[str, ...], str]:
+def _strict_config_int(value: Any, label: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{label} must be a positive integer, got {value!r}")
+    return value
+
+
+def load_pipeline_config(config_path: str) -> dict[str, Any]:
     cfg = OmegaConf.load(config_path)
+    stage_raw = OmegaConf.select(cfg, "dataset.stage")
+    if not isinstance(stage_raw, str) or not stage_raw:
+        raise ValueError(f"dataset.stage must be a non-empty string, got {stage_raw!r}")
+    stage = stage_raw
+    if stage not in CANONICAL_OUTPUT_DIRS:
+        raise ValueError(f"unsupported offline bucket-stats stage {stage!r}")
+    image_size = _strict_config_int(
+        OmegaConf.select(cfg, "dataset.image_size"), "dataset.image_size"
+    )
+    expected_image_size = {"256": 256, "512a": 512}[stage]
+    if image_size != expected_image_size:
+        raise ValueError(
+            f"stage={stage} requires dataset.image_size={expected_image_size}, got {image_size}"
+        )
     mar = cfg.dataset.multi_ar
+    if OmegaConf.select(cfg, "dataset.multi_ar.enabled") is not True:
+        raise ValueError("offline bucket stats require dataset.multi_ar.enabled=true")
+    if OmegaConf.select(cfg, "dataset.multi_ar.bucket_mode") != "adaptive":
+        raise ValueError(
+            "offline bucket stats require multi_ar.bucket_mode=adaptive; "
+            "the legacy fixed ar_list/bucket_probs table must not be reused"
+        )
+    required_adaptive = (
+        "target_area",
+        "divisor",
+        "adaptive_no_upscale",
+        "adaptive_min_area_ratio",
+        "adaptive_max_aspect",
+        "square_only_domains",
+    )
+    missing = [
+        key
+        for key in required_adaptive
+        if OmegaConf.select(cfg, f"dataset.multi_ar.{key}") is None
+    ]
+    if missing:
+        raise ValueError(
+            "offline adaptive bucket config is incomplete; refusing legacy fixed-bucket "
+            f"statistics: missing {missing}"
+        )
     multi_ar_params = {
         "target_area": int(mar.target_area),
         "divisor": int(mar.divisor),
@@ -156,9 +233,74 @@ def load_pipeline_config(config_path: str) -> tuple[dict[str, Any], tuple[str, .
         "min_area_ratio": float(mar.adaptive_min_area_ratio),
         "max_aspect": float(mar.adaptive_max_aspect),
     }
+    if multi_ar_params["target_area"] != image_size * image_size:
+        raise ValueError(
+            f"stage={stage} image_size={image_size} requires multi_ar.target_area="
+            f"{image_size * image_size}, got {multi_ar_params['target_area']}"
+        )
     square_only_domains = tuple(str(d) for d in mar.square_only_domains)   # 从 config 读，不硬编码
+    if set(square_only_domains) - set(DOMAINS):
+        raise ValueError(f"unknown square_only_domains: {square_only_domains}")
     sampling_config_path = str(cfg.dataset.sampling_config)
-    return multi_ar_params, square_only_domains, sampling_config_path
+    return {
+        "stage": stage,
+        "image_size": image_size,
+        "eligibility": f"elig_{image_size}",
+        "anime_elig_always_true": stage == "256",
+        "anime_nl_filter_applied": False,
+        "eligibility_fallback_domains": ELIGIBILITY_FALLBACK_DOMAINS[stage],
+        "multi_ar_params": multi_ar_params,
+        "square_only_domains": square_only_domains,
+        "sampling_config_path": sampling_config_path,
+    }
+
+
+def bind_sampling_contract(runtime: dict[str, Any], sampling_cfg: Any) -> None:
+    stage = runtime["stage"]
+    if stage not in sampling_cfg.domain_mix:
+        raise ValueError(f"sampling config has no domain_mix for stage={stage}")
+    mix = sampling_cfg.domain_mix[stage]
+    if set(mix) != set(DOMAINS):
+        raise ValueError(
+            f"stage={stage} domain_mix keys must be exactly {list(DOMAINS)}, got {sorted(mix)}"
+        )
+    total = sum(float(value) for value in mix.values())
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError(f"stage={stage} domain_mix must sum to 1, got {total}")
+    requires_nl = bool(sampling_cfg.anime_caption.requires_nl(stage))
+    if stage == "512a" and requires_nl:
+        raise ValueError(
+            "stage512a offline catalog contract requires requires_nl=false; "
+            "refusing to silently drop tag-only anime rows"
+        )
+    runtime["requires_nl"] = requires_nl
+
+
+def resolve_topology(
+    stage: str, world_size: int | None, per_rank_bs: int | None
+) -> dict[str, Any] | None:
+    """Resolve the optional C6 topology without inventing a stage512a batch shape."""
+    defaulted = world_size is None and per_rank_bs is None
+    if (world_size is None) != (per_rank_bs is None):
+        raise ValueError("--world-size and --per-rank-bs must be supplied together")
+    if world_size is None:
+        if stage == "256":
+            world_size = LEGACY_STAGE256_WORLD_SIZE
+            per_rank_bs = LEGACY_STAGE256_BS_PER_RANK
+        else:
+            return None
+    if per_rank_bs is None:
+        raise ValueError(
+            "internal topology contract error: per_rank_bs is missing after paired validation"
+        )
+    if world_size <= 0 or per_rank_bs <= 0:
+        raise ValueError("--world-size and --per-rank-bs must be positive")
+    return {
+        "world_size": world_size,
+        "bs_per_rank": per_rank_bs,
+        "global_batch": world_size * per_rank_bs,
+        "source": "legacy_stage256_default" if defaulted else "explicit_cli",
+    }
 
 
 def extreme_aspect_sides(target_area: int, divisor: int, max_aspect: float) -> tuple[int, int]:
@@ -251,11 +393,20 @@ def _to_int_array(batch: pa.RecordBatch, name: str) -> np.ndarray:
         return np.array([int(x) if x is not None else -1 for x in arr.to_pylist()], dtype=np.int64)
 
 
+def _to_nonempty_string_array(batch: pa.RecordBatch, name: str) -> np.ndarray:
+    """Match production ``bool(value)`` semantics for nullable caption strings."""
+    values = pc.fill_null(pc.not_equal(batch.column(name), ""), False)
+    return values.to_numpy(zero_copy_only=False).astype(bool)
+
+
 def scan_domain_shard(task: dict[str, Any]) -> dict[str, Any]:
     domain = task["domain"]
     shard_path = task["shard_path"]
     is_square_only = task["is_square_only"]
     elig_always_true = task["elig_always_true"]
+    eligibility_column = task["eligibility_column"]
+    image_size = task["image_size"]
+    fallback_allowed = task["fallback_allowed"]
     buckets_h = task["buckets_h"]
     buckets_w = task["buckets_w"]
     table = task["table"]
@@ -278,17 +429,36 @@ def scan_domain_shard(task: dict[str, Any]) -> dict[str, Any]:
     rows_elig_dropped = 0
     rows_invalid_wh_dropped = 0
     rows_kept = 0
+    anime_has_nl_by_bucket = np.zeros(n_buckets, dtype=np.int64)
+    anime_tag_only_by_bucket = np.zeros(n_buckets, dtype=np.int64)
 
     try:
         pf = pq.ParquetFile(shard_path)
         names = set(pf.schema_arrow.names)
         cols = ["width", "height"]
         has_holdout = "holdout" in names
-        has_elig = (not elig_always_true) and ("elig_256" in names)
+        has_elig = (not elig_always_true) and (eligibility_column in names)
+        if elig_always_true:
+            eligibility_mode = "stage256_anime_all_true_compatibility"
+        elif has_elig:
+            eligibility_mode = "column"
+        elif fallback_allowed:
+            eligibility_mode = "short_dim_fallback"
+        else:
+            raise EligibilityContractError(
+                f"domain={domain} shard={shard_path} is missing required {eligibility_column}"
+            )
         if has_holdout:
             cols.append("holdout")
         if has_elig:
-            cols.append("elig_256")
+            cols.append(eligibility_column)
+        if domain == "anime":
+            missing_nl = set(ANIME_NL_COLUMNS) - names
+            if missing_nl:
+                raise EligibilityContractError(
+                    f"anime shard={shard_path} missing NL availability columns {sorted(missing_nl)}"
+                )
+            cols.extend(ANIME_NL_COLUMNS)
         for batch in pf.iter_batches(batch_size=batch_size, columns=cols, use_threads=False):
             n = batch.num_rows
             rows_raw += n
@@ -302,12 +472,13 @@ def scan_domain_shard(task: dict[str, Any]) -> dict[str, Any]:
             rows_holdout_dropped += int((~holdout_keep).sum())
 
             if elig_always_true:
-                elig = np.ones(n, dtype=bool)          # anime 生产语义：elig_256 恒真，不看宽高
+                # Historical stage256 production semantics: anime elig_256 is all true.
+                elig = np.ones(n, dtype=bool)
             elif has_elig:
-                elig = _to_bool_array(batch, "elig_256")
+                elig = _to_bool_array(batch, eligibility_column)
             else:
                 short_dim = np.minimum(w, h)
-                elig = short_dim >= 256.0
+                elig = short_dim >= float(image_size)
 
             wh_valid = np.isfinite(w) & np.isfinite(h) & (w > 0) & (h > 0)
             keep = holdout_keep & elig & wh_valid
@@ -328,6 +499,18 @@ def scan_domain_shard(task: dict[str, Any]) -> dict[str, Any]:
                     extreme_long, extreme_short, buckets_list,
                 )
             n_matrix += np.bincount(bidx, minlength=n_buckets)[:n_buckets]
+
+            if domain == "anime":
+                has_nl_all = np.zeros(n, dtype=bool)
+                for column in ANIME_NL_COLUMNS:
+                    has_nl_all |= _to_nonempty_string_array(batch, column)
+                has_nl = has_nl_all[keep]
+                anime_has_nl_by_bucket += np.bincount(
+                    bidx[has_nl], minlength=n_buckets
+                )[:n_buckets]
+                anime_tag_only_by_bucket += np.bincount(
+                    bidx[~has_nl], minlength=n_buckets
+                )[:n_buckets]
 
             Hb = buckets_h[bidx]
             Wb = buckets_w[bidx]
@@ -351,11 +534,23 @@ def scan_domain_shard(task: dict[str, Any]) -> dict[str, Any]:
             "rows_raw": rows_raw, "rows_holdout_dropped": rows_holdout_dropped,
             "rows_elig_dropped": rows_elig_dropped, "rows_invalid_wh_dropped": rows_invalid_wh_dropped,
             "rows_kept": rows_kept,
+            "eligibility_column_shards": int(eligibility_mode == "column"),
+            "eligibility_fallback_shards": int(eligibility_mode == "short_dim_fallback"),
+            "eligibility_fallback_rows": (
+                rows_raw if eligibility_mode == "short_dim_fallback" else 0
+            ),
+            "eligibility_compatibility_shards": int(
+                eligibility_mode == "stage256_anime_all_true_compatibility"
+            ),
+            "eligibility_mode": eligibility_mode,
+            "anime_has_nl_by_bucket": anime_has_nl_by_bucket,
+            "anime_tag_only_by_bucket": anime_tag_only_by_bucket,
         }
     except Exception as exc:  # noqa: BLE001 - 坏 shard 记录不崩全 job
         return {
             "ok": False, "domain": domain, "shard_path": shard_path,
             "error": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc(limit=20),
+            "fatal_contract_violation": isinstance(exc, EligibilityContractError),
         }
 
 
@@ -424,6 +619,7 @@ def fold_matrix(
 def floor_variant_report(
     floor: float, n_matrix: np.ndarray, buckets: list[tuple[int, int]],
     domain_totals: dict[str, int], domain_mix: dict[str, float], domains: tuple[str, ...],
+    topology: dict[str, Any] | None,
 ) -> dict[str, Any]:
     probs_raw = compute_bucket_probs(n_matrix, domain_totals, domain_mix, domains)
     if floor > 0:
@@ -438,24 +634,50 @@ def floor_variant_report(
 
     ar_values = [buckets[b][1] / buckets[b][0] for b in kept]
     violations: list[dict[str, Any]] = []
-    for b in sorted(kept):
-        pb = float(folded_probs[b])
-        if pb <= 0:
-            continue
-        for j, d in enumerate(domains):
-            nd = domain_totals.get(d, 0)
-            if nd <= 0:
+    if topology is not None:
+        for b in sorted(kept):
+            pb = float(folded_probs[b])
+            if pb <= 0:
                 continue
-            p_d_given_b = (domain_mix.get(d, 0.0) * folded[b, j] / nd) / pb
-            # C6 真口径 = 每 global step(G=2304)的 cell 需求,非 per-rank 144(委托书笔误已纠正):
-            # planner §1(C6) 要求 max_k c_k[d] ≈ G·P(d|B) ≤ N[B,d]
-            c_t = math.ceil(GLOBAL_BATCH * p_d_given_b)
-            n_bd = int(folded[b, j])
-            if c_t > n_bd:
-                violations.append({
-                    "bucket_idx": b, "bucket_hw": list(buckets[b]), "domain": d,
-                    "c_t": c_t, "N_folded": n_bd, "deficit": c_t - n_bd,
-                })
+            for j, d in enumerate(domains):
+                nd = domain_totals.get(d, 0)
+                if nd <= 0:
+                    continue
+                p_d_given_b = (domain_mix.get(d, 0.0) * folded[b, j] / nd) / pb
+                # C6 uses the full global step demand.  A stage512a topology is
+                # deliberately never inferred here; it must be passed explicitly.
+                c_t = math.ceil(topology["global_batch"] * p_d_given_b)
+                n_bd = int(folded[b, j])
+                if c_t > n_bd:
+                    violations.append({
+                        "bucket_idx": b, "bucket_hw": list(buckets[b]), "domain": d,
+                        "c_t": c_t, "N_folded": n_bd, "deficit": c_t - n_bd,
+                    })
+        c6: dict[str, Any] = {
+            "evaluated": True,
+            **topology,
+            "cells_checked": len(kept) * len(domains),
+            "violation_count": len(violations),
+            "feasible": len(violations) == 0,
+            "violations": violations[:200],
+            "violations_truncated": len(violations) > 200,
+        }
+    else:
+        c6 = {
+            "evaluated": False,
+            "reason": (
+                "stage512a topology is intentionally unresolved; supply both "
+                "--world-size and --per-rank-bs after Evan approves the topology"
+            ),
+            "world_size": None,
+            "bs_per_rank": None,
+            "global_batch": None,
+            "cells_checked": 0,
+            "violation_count": None,
+            "feasible": None,
+            "violations": [],
+            "violations_truncated": False,
+        }
     return {
         "floor": floor,
         "kept_bucket_count": len(kept),
@@ -463,14 +685,88 @@ def floor_variant_report(
         "effective_ar_range": [min(ar_values), max(ar_values)],
         "folded_mass_fraction": folded_mass,
         "folded_bucket_probs": {str(b): float(folded_probs[b]) for b in sorted(kept)},
-        "c6_precheck": {
-            "bs_per_rank": BS_PER_RANK, "global_batch": GLOBAL_BATCH,
-            "cells_checked": len(kept) * len(domains),
-            "violation_count": len(violations),
-            "feasible": len(violations) == 0,
-            "violations": violations[:200],
-            "violations_truncated": len(violations) > 200,
+        "c6_precheck": c6,
+    }
+
+
+def anime_caption_availability_report(
+    runtime: dict[str, Any],
+    sampling_cfg: Any,
+    domain_mix: dict[str, float],
+    buckets: list[tuple[int, int]],
+    floor_reports: list[dict[str, Any]],
+    has_nl_raw: np.ndarray,
+    tag_only_raw: np.ndarray,
+) -> dict[str, Any]:
+    total_has_nl = int(has_nl_raw.sum())
+    total_tag_only = int(tag_only_raw.sum())
+    total = total_has_nl + total_tag_only
+    folded: dict[str, Any] = {}
+    combined = np.column_stack((has_nl_raw, tag_only_raw))
+    for candidate in floor_reports:
+        kept = frozenset(int(value) for value in candidate["kept_bucket_indices"])
+        folded_counts = fold_matrix(combined, buckets, set(kept))
+        folded[str(candidate["floor"])] = {
+            "kept_bucket_indices": sorted(kept),
+            "has_nl_by_bucket": [int(value) for value in folded_counts[:, 0]],
+            "tag_only_by_bucket": [int(value) for value in folded_counts[:, 1]],
+        }
+
+    estimate: dict[str, Any]
+    if runtime["stage"] == "512a" and total > 0:
+        has_weights = sampling_cfg.anime_caption.route_weights(runtime["stage"], True)
+        no_nl_weights = sampling_cfg.anime_caption.route_weights(runtime["stage"], False)
+        has_weight_sum = sum(float(value) for value in has_weights.values())
+        no_nl_weight_sum = sum(float(value) for value in no_nl_weights.values())
+        if has_weight_sum <= 0 or no_nl_weight_sum <= 0:
+            raise ValueError("anime caption route weights must have positive mass")
+        has_nl_tag_route_fraction = float(has_weights.get("tag_medium", 0.0)) / has_weight_sum
+        no_nl_tag_route_fraction = float(no_nl_weights.get("tag_medium", 0.0)) / no_nl_weight_sum
+        anime_tag_fraction = (
+            total_has_nl * has_nl_tag_route_fraction
+            + total_tag_only * no_nl_tag_route_fraction
+        ) / total
+        estimate = {
+            "basis": "eligible_pool_count_route_selection_pre_dropout",
+            "has_nl_tag_route_fraction": has_nl_tag_route_fraction,
+            "tag_only_tag_route_fraction": no_nl_tag_route_fraction,
+            "anime_tag_fraction": anime_tag_fraction,
+            "all_training_tag_fraction": anime_tag_fraction * domain_mix["anime"],
+            "anime_domain_mix": domain_mix["anime"],
+            "caption_dropout_config": float(sampling_cfg.anime_caption.dropout),
+            "planner_integer_exact_pending": True,
+            "limitations": [
+                "pool-count estimate only; Phase-4 integer quotas/repeats and row priority are not applied",
+                "uses the default has-NL stage route (10% tag) and no-NL route (100% tag); policy-specific route overrides are not applied",
+                "reported before quality-gated CFG caption dropout, so it is a route-selection fraction rather than non-empty prompt fraction",
+            ],
+        }
+    else:
+        estimate = {
+            "basis": "stage256_compatibility_scan_only",
+            "anime_tag_fraction": None,
+            "all_training_tag_fraction": None,
+            "planner_integer_exact_pending": True,
+        }
+    return {
+        "definition": (
+            "has_nl = bool(refined_description) or bool(medium_description) or "
+            "bool(short_description), exactly matching complete_dataset.iter_anime_shard"
+        ),
+        "eligibility": runtime["eligibility"],
+        "requires_nl": runtime["requires_nl"],
+        "anime_nl_filter_applied": runtime["anime_nl_filter_applied"],
+        "total": total,
+        "has_nl": total_has_nl,
+        "tag_only": total_tag_only,
+        "has_nl_fraction": (total_has_nl / total) if total else None,
+        "tag_only_fraction": (total_tag_only / total) if total else None,
+        "raw_bucket_distribution": {
+            "has_nl_by_bucket": [int(value) for value in has_nl_raw],
+            "tag_only_by_bucket": [int(value) for value in tag_only_raw],
         },
+        "folded_bucket_distribution_by_floor": folded,
+        "expected_tag_exposure": estimate,
     }
 
 
@@ -481,7 +777,7 @@ def build_tasks(
     shards_by_domain: dict[str, list[str]], square_only_domains: tuple[str, ...],
     buckets: list[tuple[int, int]], table: np.ndarray, mar_params: dict[str, Any],
     sq_idx: int, extreme_long: int, extreme_short: int, batch_size: int,
-    max_shards_per_domain: int | None,
+    max_shards_per_domain: int | None, runtime: dict[str, Any],
 ) -> list[dict[str, Any]]:
     buckets_h = np.array([h for h, _w in buckets], dtype=np.int64)
     buckets_w = np.array([w for _h, w in buckets], dtype=np.int64)
@@ -494,7 +790,10 @@ def build_tasks(
         for sp in shards:
             tasks.append({
                 "domain": domain, "shard_path": sp, "is_square_only": is_sq,
-                "elig_always_true": domain == "anime",
+                "elig_always_true": domain == "anime" and runtime["anime_elig_always_true"],
+                "eligibility_column": runtime["eligibility"],
+                "image_size": runtime["image_size"],
+                "fallback_allowed": domain in runtime["eligibility_fallback_domains"],
                 "buckets_h": buckets_h, "buckets_w": buckets_w, "table": table,
                 "buckets_list": buckets, "sq_idx": sq_idx,
                 "target_area": mar_params["target_area"], "divisor": mar_params["divisor"],
@@ -508,13 +807,27 @@ def build_tasks(
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=DEFAULT_PIPELINE_CONFIG,
-                    help="stage256 训练 yaml，读 dataset.multi_ar/* + dataset.sampling_config 路径")
+                    help="训练 yaml；stage/multi_ar/sampling contract 均从此文件读取")
+    ap.add_argument(
+        "--stage",
+        choices=tuple(CANONICAL_OUTPUT_DIRS),
+        default=None,
+        help="显式 stage guard；stage512a 必填，且必须与 config dataset.stage 一致",
+    )
     ap.add_argument("--output-dir", default=str(CANONICAL_OUTPUT_DIR))
     ap.add_argument("--workers", type=int, default=64)
     ap.add_argument("--batch-size", type=int, default=65536, help="pyarrow iter_batches 窄列 batch 行数")
     ap.add_argument("--max-shards-per-domain", type=int, default=None, help="诊断缩放：每域最多扫描 shard 数")
     ap.add_argument("--floors", default=",".join(str(x) for x in FLOORS),
                     help="逗号分隔候选剪枝 floor 列表")
+    ap.add_argument(
+        "--world-size", type=int, default=None,
+        help="仅用于 C6 决策材料；必须与 --per-rank-bs 成对提供",
+    )
+    ap.add_argument(
+        "--per-rank-bs", type=int, default=None,
+        help="仅用于 C6 决策材料；stage512a 不提供时明确记为未评估",
+    )
     args = ap.parse_args()
     if args.workers <= 0:
         ap.error("--workers 必须为正")
@@ -527,11 +840,21 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    output_dir = validate_output_dir(args.output_dir)
+    runtime = load_pipeline_config(args.config)
+    if args.stage is not None and args.stage != runtime["stage"]:
+        raise ValueError(
+            f"--stage={args.stage} does not match config dataset.stage={runtime['stage']}"
+        )
+    if runtime["stage"] == "512a" and args.stage is None:
+        raise ValueError("stage512a bucket stats require explicit --stage 512a")
+    output_dir = validate_output_dir(args.output_dir, runtime["stage"])
     output_dir.mkdir(parents=True, exist_ok=True)
     diagnostic_run = args.max_shards_per_domain is not None
+    topology = resolve_topology(runtime["stage"], args.world_size, args.per_rank_bs)
 
-    mar_params, square_only_domains, sampling_config_path = load_pipeline_config(args.config)
+    mar_params = runtime["multi_ar_params"]
+    square_only_domains = runtime["square_only_domains"]
+    sampling_config_path = runtime["sampling_config_path"]
     buckets = build_adaptive_buckets(
         target_area=mar_params["target_area"], divisor=mar_params["divisor"],
         min_area_ratio=mar_params["min_area_ratio"], max_aspect=mar_params["max_aspect"],
@@ -543,37 +866,53 @@ def main() -> int:
     table = build_bucket_table(buckets, mar_params["divisor"])
 
     sampling_cfg = load_sampling_config(sampling_config_path)
-    domain_mix = {d: float(w) for d, w in sampling_cfg.domain_mix[STAGE].items()}
-    domain_mix_mismatch = {
-        d: {"config": domain_mix.get(d), "reference": STAGE256_DOMAIN_MIX_REF.get(d)}
-        for d in DOMAINS
-        if abs(domain_mix.get(d, -1.0) - STAGE256_DOMAIN_MIX_REF.get(d, -2.0)) > 1e-9
+    bind_sampling_contract(runtime, sampling_cfg)
+    domain_mix = {
+        d: float(w) for d, w in sampling_cfg.domain_mix[runtime["stage"]].items()
     }
+    domain_mix_mismatch = (
+        {
+            d: {"config": domain_mix.get(d), "reference": STAGE256_DOMAIN_MIX_REF.get(d)}
+            for d in DOMAINS
+            if abs(domain_mix.get(d, -1.0) - STAGE256_DOMAIN_MIX_REF.get(d, -2.0)) > 1e-9
+        }
+        if runtime["stage"] == "256"
+        else {}
+    )
     if domain_mix_mismatch:
         print(f"[bucket-stats] WARNING domain_mix 与任务给定参考值不一致: {domain_mix_mismatch}", flush=True)
 
     shards_by_domain = list_shards(sampling_cfg)   # 生产同款枚举；某域为空会在 list_shards 内部 assert
 
     floors = tuple(float(x) for x in args.floors.split(",") if x.strip() != "")
+    if not floors or len(set(floors)) != len(floors):
+        raise ValueError("--floors must contain one or more unique values")
+    if any(not math.isfinite(value) or value < 0.0 for value in floors):
+        raise ValueError("--floors values must be finite and non-negative")
 
     tasks = build_tasks(
         shards_by_domain, square_only_domains, buckets, table, mar_params, sq_idx,
-        extreme_long, extreme_short, args.batch_size, args.max_shards_per_domain,
+        extreme_long, extreme_short, args.batch_size, args.max_shards_per_domain, runtime,
     )
     print(f"[bucket-stats] {len(tasks)} shard 任务（{len(DOMAINS)} 域），workers={args.workers}", flush=True)
 
     n_matrix = np.zeros((len(buckets), len(DOMAINS)), dtype=np.int64)
     hist_native = {d: np.zeros(NBINS, dtype=np.int64) for d in DOMAINS}
     hist_square = {d: np.zeros(NBINS, dtype=np.int64) for d in DOMAINS}
+    anime_has_nl_by_bucket = np.zeros(len(buckets), dtype=np.int64)
+    anime_tag_only_by_bucket = np.zeros(len(buckets), dtype=np.int64)
     coverage = {
         d: {
             "shards_total": len(shards_by_domain.get(d, [])), "shards_scanned": 0, "shards_failed": 0,
             "rows_raw": 0, "rows_holdout_dropped": 0, "rows_elig_dropped": 0,
             "rows_invalid_wh_dropped": 0, "rows_kept": 0,
+            "eligibility_column_shards": 0, "eligibility_fallback_shards": 0,
+            "eligibility_fallback_rows": 0, "eligibility_compatibility_shards": 0,
         }
         for d in DOMAINS
     }
     failed_shards: list[dict[str, Any]] = []
+    eligibility_contract_failures: list[dict[str, Any]] = []
     domain_index = {d: i for i, d in enumerate(DOMAINS)}
 
     started = time.perf_counter()
@@ -584,6 +923,10 @@ def main() -> int:
             if not res["ok"]:
                 coverage[d]["shards_failed"] += 1
                 failed_shards.append({"domain": d, "shard_path": res["shard_path"], "error": res["error"]})
+                if res.get("fatal_contract_violation"):
+                    eligibility_contract_failures.append(
+                        {"domain": d, "shard_path": res["shard_path"], "error": res["error"]}
+                    )
                 continue
             coverage[d]["shards_scanned"] += 1
             coverage[d]["rows_raw"] += res["rows_raw"]
@@ -591,9 +934,18 @@ def main() -> int:
             coverage[d]["rows_elig_dropped"] += res["rows_elig_dropped"]
             coverage[d]["rows_invalid_wh_dropped"] += res["rows_invalid_wh_dropped"]
             coverage[d]["rows_kept"] += res["rows_kept"]
+            coverage[d]["eligibility_column_shards"] += res["eligibility_column_shards"]
+            coverage[d]["eligibility_fallback_shards"] += res["eligibility_fallback_shards"]
+            coverage[d]["eligibility_fallback_rows"] += res["eligibility_fallback_rows"]
+            coverage[d]["eligibility_compatibility_shards"] += res[
+                "eligibility_compatibility_shards"
+            ]
             n_matrix[:, domain_index[d]] += res["n_matrix"]
             hist_native[d] += res["hist_native"]
             hist_square[d] += res["hist_square"]
+            if d == "anime":
+                anime_has_nl_by_bucket += res["anime_has_nl_by_bucket"]
+                anime_tag_only_by_bucket += res["anime_tag_only_by_bucket"]
             if (i + 1) % 50 == 0 or (i + 1) == len(tasks):
                 print(f"[bucket-stats] progress {i + 1}/{len(tasks)} shard 任务完成", flush=True)
     scan_seconds = time.perf_counter() - started
@@ -638,9 +990,29 @@ def main() -> int:
 
     # ---- floor 变体 ----
     floor_reports = [
-        floor_variant_report(f, n_matrix, buckets, domain_totals, domain_mix, DOMAINS)
+        floor_variant_report(
+            f, n_matrix, buckets, domain_totals, domain_mix, DOMAINS, topology
+        )
         for f in floors
     ]
+    anime_caption_availability = anime_caption_availability_report(
+        runtime,
+        sampling_cfg,
+        domain_mix,
+        buckets,
+        floor_reports,
+        anime_has_nl_by_bucket,
+        anime_tag_only_by_bucket,
+    )
+    if anime_caption_availability["total"] != domain_totals["anime"]:
+        raise RuntimeError(
+            "anime has-NL/tag-only accounting does not equal eligible anime rows: "
+            f"{anime_caption_availability['total']} != {domain_totals['anime']}"
+        )
+
+    pipeline_config_path = Path(args.config).expanduser().resolve(strict=True)
+    sampling_config_resolved = Path(sampling_config_path).expanduser().resolve(strict=True)
+    n_matrix_sha256 = sha256_file(n_matrix_path)
 
     report: dict[str, Any] = {
         "schema_version": "offline_arb_bucketstats_v1",
@@ -648,15 +1020,37 @@ def main() -> int:
         "host": socket.gethostname(),
         "duration_seconds": scan_seconds,
         "diagnostic_run": diagnostic_run,
+        "stage": runtime["stage"],
+        "image_size": runtime["image_size"],
+        "eligibility": runtime["eligibility"],
+        "requires_nl": runtime["requires_nl"],
+        "anime_nl_filter_applied": runtime["anime_nl_filter_applied"],
         "config": {
-            "pipeline_config": args.config,
-            "sampling_config": sampling_config_path,
-            "stage": STAGE,
+            "pipeline_config": str(pipeline_config_path),
+            "pipeline_config_sha256": sha256_file(pipeline_config_path),
+            "sampling_config": str(sampling_config_resolved),
+            "sampling_config_sha256": sha256_file(sampling_config_resolved),
+            "stage": runtime["stage"],
+            "image_size": runtime["image_size"],
+            "eligibility": runtime["eligibility"],
+            "requires_nl": runtime["requires_nl"],
+            "anime_nl_filter_applied": runtime["anime_nl_filter_applied"],
             "multi_ar_params": mar_params,
             "square_only_domains": list(square_only_domains),
             "domain_mix": domain_mix,
             "domain_mix_reference_mismatch": domain_mix_mismatch or None,
-            "world_size": WORLD_SIZE, "bs_per_rank": BS_PER_RANK, "global_batch": GLOBAL_BATCH,
+            "c6_topology": topology,
+        },
+        "N_matrix": {
+            "path": str(n_matrix_path.resolve(strict=True)),
+            "sha256": n_matrix_sha256,
+        },
+        "eligibility_audit": {
+            "column": runtime["eligibility"],
+            "fallback_rule": f"min(width,height)>={runtime['image_size']}",
+            "fallback_domain_whitelist": sorted(runtime["eligibility_fallback_domains"]),
+            "unexpected_missing_column_failures": eligibility_contract_failures,
+            "pass": not eligibility_contract_failures,
         },
         "buckets": [{"idx": i, "h": h, "w": w, "ar": w / h} for i, (h, w) in enumerate(buckets)],
         "square_bucket_idx": sq_idx,
@@ -669,13 +1063,22 @@ def main() -> int:
         "failed_shard_count": len(failed_shards),
         "retained_percentiles": retained_percentiles,
         "retained_histograms_20bin": retained_hist20,
+        "anime_caption_availability": anime_caption_availability,
         "floors": floor_reports,
         "known_simplifications": [
-            "N[d] 分母 = holdout==0(若该域有此列) 且 elig_256 的域内全量池，未按 source_alpha/"
+            f"N[d] 分母 = holdout==0(若该域有此列) 且 {runtime['eligibility']} 的域内全量池，未按 source_alpha/"
             "cluster_beta 做 base_w 降权，不代表最终采样器的精确边际分布(只影响分母权重，不影响"
             "单行的桶指派)。",
-            "未复刻 anime 的 has_nl/composition_clean 等采样期过滤；anime 的 elig_256 已按生产语义"
-            "恒为 True 处理（不看宽高）。",
+            (
+                "stage256 compatibility: 未复刻 anime 的 has_nl/composition_clean 等采样期过滤；"
+                "anime elig_256 保持生产历史语义恒为 True，且即使 sampling requires_nl=true，"
+                "本统计仍未丢弃 tag-only 行。"
+                if runtime["stage"] == "256"
+                else (
+                    "stage512a 使用 elig_512（列存在时直接读取，否则按短边>=512 回退），"
+                    "sampling contract 已硬校验 requires_nl=false；不做额外 anime NL 过滤。"
+                )
+            ),
             "C6 precheck 是标量粗筛(ceil(global_batch*P(d|B))<=N'[B,d])，不是 build_plan.py 的整数"
             "规划解；真正的 C[B,d] 由 Phase-4 planner 给出。",
             "square_only_domains(synthetic/textatlas) 的行强制指派到方桶，其 assigned_bucket 与"
@@ -693,13 +1096,17 @@ def main() -> int:
         "duration_seconds": scan_seconds,
     }, ensure_ascii=False, indent=2))
 
-    return 0 if not domain_total_failure else 2
+    return 0 if not failed_shards else 2
 
 
 def write_markdown_summary(path: Path, report: dict[str, Any]) -> None:
     lines: list[str] = []
     lines.append("# OFFLINE_ARB_V1 Phase-3a 桶表决策材料摘要\n")
     lines.append(f"生成时间(UTC): {report['generated_at']}  \n耗时: {report['duration_seconds']:.1f}s  \n")
+    lines.append(
+        f"stage/image/eligibility/requires_nl: `"
+        f"{report['stage']}/{report['image_size']}/{report['eligibility']}/{report['requires_nl']}`  \n"
+    )
     lines.append(f"multi_ar 参数: `{report['config']['multi_ar_params']}`  \n")
     lines.append(f"square_only_domains: `{report['config']['square_only_domains']}`（从 config 读)  \n")
     if report["config"]["domain_mix_reference_mismatch"]:
@@ -707,13 +1114,37 @@ def write_markdown_summary(path: Path, report: dict[str, Any]) -> None:
                       f"`{report['config']['domain_mix_reference_mismatch']}`\n")
 
     lines.append("\n## 覆盖率\n")
-    lines.append("| domain | shards_total | shards_scanned | shards_failed | rows_raw | rows_kept |")
-    lines.append("|---|---:|---:|---:|---:|---:|")
+    lines.append("| domain | shards_total | scanned | failed | elig-column shards | fallback shards | fallback rows | rows_raw | rows_kept |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
     for d, c in report["coverage"].items():
-        lines.append(f"| {d} | {c['shards_total']} | {c['shards_scanned']} | {c['shards_failed']} | "
-                      f"{c['rows_raw']:,} | {c['rows_kept']:,} |")
+        lines.append(
+            f"| {d} | {c['shards_total']} | {c['shards_scanned']} | {c['shards_failed']} | "
+            f"{c['eligibility_column_shards']} | {c['eligibility_fallback_shards']} | "
+            f"{c['eligibility_fallback_rows']:,} | {c['rows_raw']:,} | {c['rows_kept']:,} |"
+        )
     lines.append(f"\n合计 kept 行数: **{report['domain_totals_sum']:,}**"
                   f"（对照 Phase-1 D 项 95.7M 量级 uid 全量口径)\n")
+
+    anime = report["anime_caption_availability"]
+    estimate = anime["expected_tag_exposure"]
+    lines.append("\n## Anime NL/tag-only 可用性（eligible pool 精确计数）\n")
+    has_fraction = anime["has_nl_fraction"]
+    tag_fraction = anime["tag_only_fraction"]
+    lines.append(
+        f"- has-NL: **{anime['has_nl']:,}** ("
+        f"{'n/a' if has_fraction is None else format(has_fraction, '.4%')})"
+    )
+    lines.append(
+        f"- tag-only: **{anime['tag_only']:,}** ("
+        f"{'n/a' if tag_fraction is None else format(tag_fraction, '.4%')})"
+    )
+    if estimate.get("anime_tag_fraction") is not None:
+        lines.append(
+            f"- 默认 route、dropout 前的 pool-count 估算: anime 内 tag "
+            f"**{estimate['anime_tag_fraction']:.4%}**；乘 anime mix="
+            f"{estimate['anime_domain_mix']:.4f} 后全训练 **{estimate['all_training_tag_fraction']:.4%}**"
+        )
+        lines.append("- 这不是最终曝光精确值；需等 planner 整数解/repeat/priority 后闭合。")
 
     lines.append("\n## 裁剪保留率分布（p5/p25/p50，assigned_bucket vs square_baseline）\n")
     lines.append("| domain | assigned p5 | assigned p25 | assigned p50 | square p5 | square p25 | square p50 |")
@@ -733,9 +1164,12 @@ def write_markdown_summary(path: Path, report: dict[str, Any]) -> None:
     for fr in report["floors"]:
         ar_lo, ar_hi = fr["effective_ar_range"]
         c6 = fr["c6_precheck"]
+        cells = c6["cells_checked"] if c6["evaluated"] else "n/e"
+        violations = c6["violation_count"] if c6["evaluated"] else "n/e"
+        feasible = c6["feasible"] if c6["evaluated"] else "not evaluated"
         lines.append(f"| {fr['floor']} | {fr['kept_bucket_count']} | "
                       f"[{ar_lo:.3f}, {ar_hi:.3f}] | {fr['folded_mass_fraction']:.4f} | "
-                      f"{c6['cells_checked']} | {c6['violation_count']} | {c6['feasible']} |")
+                      f"{cells} | {violations} | {feasible} |")
 
     lines.append("\n## 已知简化（决策前请复核)\n")
     for note in report["known_simplifications"]:

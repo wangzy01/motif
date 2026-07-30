@@ -32,6 +32,7 @@ import numpy as np
 
 PLAN_FORMAT = "offline_arb_plan_v1"
 PLAN_FORMAT_VERSION = 1
+SUPPORTED_PLAN_FORMAT_VERSIONS = frozenset({1, 2})
 PLANNER_ALGORITHM_VERSION = "offline_arb_planner_v1_20260710"
 QUOTA_MILP_VERSION = "scipy_milp_l1_transport_scaled_exactgap_v1"
 QUOTA_FALLBACK_VERSION = "two_level_lr_residual_transport_v1"
@@ -66,6 +67,19 @@ _REQUIRED_KEYS = {
     "block_steps",
 }
 _OPTIONAL_KEYS = {"catalog_hash", "assignment_hash"}
+_V2_IDENTITY_KEYS = {
+    "stage",
+    "image_size",
+    "eligibility",
+    "requires_nl",
+    "anime_nl_filter_applied",
+}
+_CANONICAL_STAGE_IMAGE_SIZE = {"256": 256, "512a": 512, "512b": 512}
+_CANONICAL_STAGE_NL_POLICY = {
+    "256": (True, False),
+    "512a": (False, False),
+    "512b": (False, False),
+}
 
 
 class PlannerInputError(ValueError):
@@ -114,6 +128,11 @@ class PlannerConfig:
     R_max: tuple[int, ...]
     epsilon_jitter: bool
     block_steps: int
+    stage: str | None
+    image_size: int | None
+    eligibility: str | None
+    requires_nl: bool | None
+    anime_nl_filter_applied: bool | None
     catalog_hash: str | None
     assignment_hash: str | None
     input_sha256: str
@@ -168,6 +187,16 @@ class PlannerConfig:
             result["catalog_hash"] = self.catalog_hash
         if self.assignment_hash is not None:
             result["assignment_hash"] = self.assignment_hash
+        if self.format_version >= 2:
+            result.update(
+                {
+                    "stage": self.stage,
+                    "image_size": self.image_size,
+                    "eligibility": self.eligibility,
+                    "requires_nl": self.requires_nl,
+                    "anime_nl_filter_applied": self.anime_nl_filter_applied,
+                }
+            )
         return result
 
 
@@ -261,21 +290,81 @@ def _optional_hash(raw: Mapping[str, Any], key: str) -> str | None:
     return value
 
 
+def _require_v2_identity(
+    raw: Mapping[str, Any],
+) -> tuple[str, int, str, bool, bool]:
+    stage = raw["stage"]
+    if not isinstance(stage, str) or stage not in _CANONICAL_STAGE_IMAGE_SIZE:
+        raise PlannerInputError(
+            "stage must be one of the canonical values "
+            f"{sorted(_CANONICAL_STAGE_IMAGE_SIZE)}, got {stage!r}"
+        )
+    image_size = _require_int(raw["image_size"], "image_size", positive=True)
+    expected_size = _CANONICAL_STAGE_IMAGE_SIZE[stage]
+    if image_size != expected_size:
+        raise PlannerInputError(
+            f"stage/image_size mismatch: stage={stage!r} requires {expected_size}, got {image_size}"
+        )
+    eligibility = raw["eligibility"]
+    expected_eligibility = f"elig_{image_size}"
+    if eligibility != expected_eligibility:
+        raise PlannerInputError(
+            "eligibility must be derived from image_size: "
+            f"expected {expected_eligibility!r}, got {eligibility!r}"
+        )
+    requires_nl = raw["requires_nl"]
+    if not isinstance(requires_nl, bool):
+        raise PlannerInputError("requires_nl must be a JSON boolean")
+    anime_nl_filter_applied = raw["anime_nl_filter_applied"]
+    if not isinstance(anime_nl_filter_applied, bool):
+        raise PlannerInputError("anime_nl_filter_applied must be a JSON boolean")
+    expected_nl_policy = _CANONICAL_STAGE_NL_POLICY[stage]
+    if (requires_nl, anime_nl_filter_applied) != expected_nl_policy:
+        raise PlannerInputError(
+            "stage NL policy mismatch: "
+            f"stage={stage!r} requires (requires_nl,anime_nl_filter_applied)="
+            f"{expected_nl_policy!r}, got {(requires_nl, anime_nl_filter_applied)!r}"
+        )
+    return stage, image_size, eligibility, requires_nl, anime_nl_filter_applied
+
+
 def _normalize_input(raw: Mapping[str, Any], *, input_sha256: str | None = None) -> PlannerConfig:
+    if "format_version" not in raw:
+        raise PlannerInputError("missing required planner_input keys: ['format_version']")
+    format_version = _require_int(raw["format_version"], "format_version")
+    if format_version not in SUPPORTED_PLAN_FORMAT_VERSIONS:
+        raise PlannerInputError(
+            f"format_version must be one of {sorted(SUPPORTED_PLAN_FORMAT_VERSIONS)}, "
+            f"got {format_version}"
+        )
+    required_keys = _REQUIRED_KEYS | (_V2_IDENTITY_KEYS if format_version >= 2 else set())
     keys = set(raw)
-    missing = sorted(_REQUIRED_KEYS - keys)
-    unknown = sorted(keys - _REQUIRED_KEYS - _OPTIONAL_KEYS)
+    missing = sorted(required_keys - keys)
+    unknown = sorted(keys - required_keys - _OPTIONAL_KEYS)
     if missing:
         raise PlannerInputError(f"missing required planner_input keys: {missing}")
     if unknown:
-        raise PlannerInputError(f"unknown planner_input keys for format_version=1: {unknown}")
+        raise PlannerInputError(
+            f"unknown planner_input keys for format_version={format_version}: {unknown}"
+        )
 
-    format_version = _require_int(raw["format_version"], "format_version")
-    if format_version != 1:
-        raise PlannerInputError(f"format_version must be 1, got {format_version}")
     plan_id = raw["plan_id"]
     if not isinstance(plan_id, str) or not plan_id:
         raise PlannerInputError("plan_id must be a non-empty string")
+    stage = image_size = eligibility = requires_nl = anime_nl_filter_applied = None
+    if format_version >= 2:
+        (
+            stage,
+            image_size,
+            eligibility,
+            requires_nl,
+            anime_nl_filter_applied,
+        ) = _require_v2_identity(raw)
+        expected_prefix = f"stage{stage}_offline_exact_v2_"
+        if not plan_id.startswith(expected_prefix):
+            raise PlannerInputError(
+                f"format_version=2 plan_id must start with {expected_prefix!r}, got {plan_id!r}"
+            )
     seed = _require_int(raw["seed"], "seed")
     world_size = _require_int(raw["world_size"], "world_size", positive=True)
     per_rank_bs = _require_int(raw["per_rank_bs"], "per_rank_bs", positive=True)
@@ -387,6 +476,17 @@ def _normalize_input(raw: Mapping[str, Any], *, input_sha256: str | None = None)
 
     catalog_hash = _optional_hash(raw, "catalog_hash")
     assignment_hash = _optional_hash(raw, "assignment_hash")
+    if format_version >= 2:
+        for key, value in (
+            ("catalog_hash", catalog_hash),
+            ("assignment_hash", assignment_hash),
+        ):
+            if value is None or len(value) != 64 or any(
+                char not in "0123456789abcdef" for char in value
+            ):
+                raise PlannerInputError(
+                    f"format_version=2 requires {key} as a lowercase SHA-256 hex string"
+                )
     normalized_for_hash: dict[str, Any] = {
         "format_version": format_version,
         "plan_id": plan_id,
@@ -408,6 +508,16 @@ def _normalize_input(raw: Mapping[str, Any], *, input_sha256: str | None = None)
         normalized_for_hash["catalog_hash"] = catalog_hash
     if assignment_hash is not None:
         normalized_for_hash["assignment_hash"] = assignment_hash
+    if format_version >= 2:
+        normalized_for_hash.update(
+            {
+                "stage": stage,
+                "image_size": image_size,
+                "eligibility": eligibility,
+                "requires_nl": requires_nl,
+                "anime_nl_filter_applied": anime_nl_filter_applied,
+            }
+        )
     config_sha256 = _sha256_bytes(_canonical_json_bytes(normalized_for_hash))
     if input_sha256 is None:
         input_sha256 = config_sha256
@@ -428,6 +538,11 @@ def _normalize_input(raw: Mapping[str, Any], *, input_sha256: str | None = None)
         R_max=R_max,
         epsilon_jitter=epsilon_jitter,
         block_steps=block_steps,
+        stage=stage,
+        image_size=image_size,
+        eligibility=eligibility,
+        requires_nl=requires_nl,
+        anime_nl_filter_applied=anime_nl_filter_applied,
         catalog_hash=catalog_hash,
         assignment_hash=assignment_hash,
         input_sha256=input_sha256,
@@ -2047,17 +2162,24 @@ def _effective_catalog_assignment_hashes(cfg: PlannerConfig) -> tuple[str, str, 
     """
 
     if cfg.catalog_hash is None:
-        catalog_hash = _sha256_bytes(
-            _canonical_json_bytes(
+        catalog_proxy = {
+            "algorithm": "virtual_catalog_proxy_from_N_v1",
+            "row_id_mapping": ROW_ID_MAPPING_VERSION,
+            "domains": list(cfg.domains),
+            "buckets": [list(hw) for hw in cfg.buckets],
+            "N": cfg.N.tolist(),
+        }
+        if cfg.format_version >= 2:
+            catalog_proxy.update(
                 {
-                    "algorithm": "virtual_catalog_proxy_from_N_v1",
-                    "row_id_mapping": ROW_ID_MAPPING_VERSION,
-                    "domains": list(cfg.domains),
-                    "buckets": [list(hw) for hw in cfg.buckets],
-                    "N": cfg.N.tolist(),
+                    "stage": cfg.stage,
+                    "image_size": cfg.image_size,
+                    "eligibility": cfg.eligibility,
+                    "requires_nl": cfg.requires_nl,
+                    "anime_nl_filter_applied": cfg.anime_nl_filter_applied,
                 }
             )
-        )
+        catalog_hash = _sha256_bytes(_canonical_json_bytes(catalog_proxy))
         catalog_source = "virtual_catalog_proxy_from_N (not an upstream L1 catalog hash)"
     else:
         catalog_hash = cfg.catalog_hash
@@ -2133,8 +2255,8 @@ def _make_header(
     plan_identity_sha256 = _plan_identity_sha256(cfg, algorithms, seed_sha256)
     hashes["plan_identity_sha256"] = plan_identity_sha256
     domain_totals = {name: int(D[d]) for d, name in enumerate(cfg.domains)}
-    return {
-        "format_version": PLAN_FORMAT_VERSION,
+    header = {
+        "format_version": cfg.format_version,
         "plan_format": PLAN_FORMAT,
         "planner_algo_version": PLANNER_ALGORITHM_VERSION,
         "algorithm_version": PLANNER_ALGORITHM_VERSION,
@@ -2192,6 +2314,17 @@ def _make_header(
         "planner_input": cfg.normalized_dict(),
         "resume_contract": _resume_contract(cfg),
     }
+    if cfg.format_version >= 2:
+        header.update(
+            {
+                "stage": cfg.stage,
+                "image_size": cfg.image_size,
+                "eligibility": cfg.eligibility,
+                "requires_nl": cfg.requires_nl,
+                "anime_nl_filter_applied": cfg.anime_nl_filter_applied,
+            }
+        )
+    return header
 
 
 def _existing_output_header(output: Path, cfg: PlannerConfig, start_step: int) -> dict[str, Any] | None:
@@ -2386,7 +2519,10 @@ def _validate_header_document(header: Mapping[str, Any]) -> tuple[PlannerConfig,
     missing = sorted(required - set(header))
     if missing:
         raise PlannerInputError(f"header.json is missing required keys: {missing}")
-    if _require_int(header["format_version"], "header.format_version") != PLAN_FORMAT_VERSION:
+    header_format_version = _require_int(
+        header["format_version"], "header.format_version"
+    )
+    if header_format_version not in SUPPORTED_PLAN_FORMAT_VERSIONS:
         raise PlannerInputError("unsupported plan header format_version")
     if header["plan_format"] != PLAN_FORMAT:
         raise PlannerInputError(f"unsupported plan_format: {header['plan_format']!r}")
@@ -2398,6 +2534,16 @@ def _validate_header_document(header: Mapping[str, Any]) -> tuple[PlannerConfig,
     if not isinstance(planner_input, Mapping):
         raise PlannerInputError("header.planner_input must be an object")
     cfg = _normalize_input(planner_input)
+    if header_format_version != cfg.format_version:
+        raise PlannerInputError(
+            "header format_version disagrees with embedded planner_input"
+        )
+    if cfg.format_version >= 2:
+        identity_missing = sorted(_V2_IDENTITY_KEYS - set(header))
+        if identity_missing:
+            raise PlannerInputError(
+                f"format_version=2 header is missing identity keys: {identity_missing}"
+            )
     if header["config_hash"] != cfg.config_sha256:
         raise PlannerInputError(
             f"header config hash mismatch: stored={header['config_hash']!r}, recomputed={cfg.config_sha256}"
@@ -2440,6 +2586,16 @@ def _validate_header_document(header: Mapping[str, Any]) -> tuple[PlannerConfig,
         "block_steps": cfg.block_steps,
         "num_blocks": (cfg.total_steps + cfg.block_steps - 1) // cfg.block_steps,
     }
+    if cfg.format_version >= 2:
+        scalar_expectations.update(
+            {
+                "stage": cfg.stage,
+                "image_size": cfg.image_size,
+                "eligibility": cfg.eligibility,
+                "requires_nl": cfg.requires_nl,
+                "anime_nl_filter_applied": cfg.anime_nl_filter_applied,
+            }
+        )
     for key, expected in scalar_expectations.items():
         if header[key] != expected:
             raise PlannerInputError(f"header {key} mismatch: stored={header[key]!r}, expected={expected!r}")

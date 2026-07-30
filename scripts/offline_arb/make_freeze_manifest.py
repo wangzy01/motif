@@ -19,19 +19,23 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import hashlib
+import io
 import json
 import math
 import os
+import re
 import stat
 import subprocess
 import sys
 import threading
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from omegaconf import OmegaConf
 
 from scripts.offline_arb.caption_sidecar_contract import (
     BUILDER_BUILD_ID,
@@ -58,6 +62,138 @@ CATALOG = BASE / "offline_arb_catalog_v1"
 SAMPLING = Path("/fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json")
 ANIME_FREQ = BASE / "offline_arb_animefreq_v1"
 SIDECAR = BASE / "offline_arb_caption_sidecar_v1"
+DEFAULT_CONFIG_REL = Path("configs/stage256_offline_exact_v1.yaml")
+CONTRACT_KEYS = (
+    "stage",
+    "image_size",
+    "eligibility",
+    "requires_nl",
+    "anime_nl_filter_applied",
+)
+LEGACY_STAGE256_ASSIGNMENT = (
+    "10bd55e0a37aacef35583c91846984171c6ebdfa88ee8351087bb937cc498cc4"
+)
+STAGE256_FREEZE_SCHEMA = "offline_arb_freeze_v3_caption_sidecar"
+STAGE512A_FREEZE_SCHEMA = "offline_arb_freeze_v4_stage512a_reviewed_exceptions"
+STAGE512A_EXCEPTION_SCHEMA = (
+    "offline_arb_stage512a_w64_reviewed_exception_gate_v1"
+)
+STAGE512A_EXCEPTION_POLICY = "reviewed_exact_stage512a_w64_exceptions_v1"
+STAGE512A_EXCEPTION_COUNTS = {
+    "monet_empty_prompt_rows": 6,
+    "monet_empty_prompt_formal_exposures": 19,
+    "monet_empty_prompt_horizon_exposures": 20,
+    "textatlas_raw_candidate_rows": 43,
+    "textatlas_raw_candidate_formal_exposures": 134,
+    "textatlas_raw_candidate_horizon_exposures": 137,
+    "textatlas_production_decode_success_rows": 40,
+    "textatlas_production_decode_success_formal_exposures": 125,
+    "textatlas_production_decode_success_horizon_exposures": 127,
+    "textatlas_repaired_rows": 3,
+    "textatlas_repaired_formal_exposures": 9,
+    "textatlas_repaired_horizon_exposures": 10,
+}
+STAGE512A_EXCEPTION_RUNTIME_SOURCES = {
+    "offline_dataset": "training/dataline_offline/offline_dataset.py",
+    "caption_exceptions": "training/dataline_offline/caption_exceptions_v1.py",
+    "image_exceptions": "training/dataline_offline/image_exceptions_v1.py",
+    "image_fetch": "training/dataline/image_fetch.py",
+    "targeted_test": (
+        "scripts/offline_arb/test_stage512a_w64_reviewed_exceptions.py"
+    ),
+}
+STAGE512A_EXCEPTION_PRODUCER_SOURCES = {
+    "template": "jobs/offline_arb_stage512a_w64_reviewed_exception_gate.yaml",
+    "finalizer": (
+        "scripts/offline_arb/finalize_stage512a_w64_exception_gate.py"
+    ),
+    "immutable_evidence_helper": "scripts/offline_arb/immutable_review_evidence.py",
+    "renderer": "scripts/offline_arb/render_stage512a_write_job.py",
+}
+STAGE512A_EXCEPTION_PRODUCER_IMAGE = (
+    "471112743779.dkr.ecr.us-west-2.amazonaws.com/"
+    "autobuild:py312-torch211-cu129"
+)
+STAGE512A_REVIEWED_GATE_PATH = (
+    BASE
+    / "offline_arb_exceptions_stage512a_w64_reviewed_v1/FORMAL_PASS.json"
+)
+STAGE512A_REVIEWED_GATE_SHA256 = (
+    "c3bae0569ce7b9ca0de824f683a8adfd5011d0d0e0088fe19d36b61c70a1829c"
+)
+STAGE512A_REVIEWED_FREEZE_BASENAME = (
+    "FREEZE_MANIFEST_STAGE512A_W64_REVIEWED_EXCEPTIONS_V1.json"
+)
+STAGE512A_REVIEWED_FREEZE_PATH = (
+    BASE
+    / "offline_arb_plans_stage512a_w64_v2"
+    / STAGE512A_REVIEWED_FREEZE_BASENAME
+)
+
+
+def validate_stage512a_reviewed_gate_storage(path: Path) -> None:
+    """Require the one canonical sealed gate namespace, not a copied PASS."""
+
+    if path != STAGE512A_REVIEWED_GATE_PATH:
+        raise ValueError(
+            "reviewed_exception_gate must use the exact canonical path: "
+            f"{STAGE512A_REVIEWED_GATE_PATH}"
+        )
+    try:
+        file_meta = path.lstat()
+        parent_meta = path.parent.lstat()
+        canonical_parent = path.parent.resolve(strict=True)
+        members = {item.name for item in path.parent.iterdir()}
+    except OSError as exc:
+        raise ValueError("reviewed_exception_gate sealed namespace is unreadable") from exc
+    if (
+        not stat.S_ISREG(file_meta.st_mode)
+        or file_meta.st_nlink != 1
+        or stat.S_IMODE(file_meta.st_mode) != 0o444
+    ):
+        raise ValueError("reviewed_exception_gate must be one regular 0444 inode")
+    if (
+        not stat.S_ISDIR(parent_meta.st_mode)
+        or canonical_parent != path.parent
+        or stat.S_IMODE(parent_meta.st_mode) != 0o555
+        or members != {path.name}
+    ):
+        raise ValueError(
+            "reviewed_exception_gate parent must be canonical 0555 with exact members"
+        )
+
+
+def validate_stage512a_reviewed_freeze_storage(
+    path: Path, *, require_exists: bool
+) -> None:
+    """Reject alternate/copy freeze paths and writable released manifests."""
+
+    if path != STAGE512A_REVIEWED_FREEZE_PATH:
+        raise ValueError(
+            "stage512a reviewed freeze must use the exact canonical path: "
+            f"{STAGE512A_REVIEWED_FREEZE_PATH}"
+        )
+    try:
+        parent_meta = path.parent.lstat()
+        canonical_parent = path.parent.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("stage512a reviewed freeze parent is unreadable") from exc
+    if not stat.S_ISDIR(parent_meta.st_mode) or canonical_parent != path.parent:
+        raise ValueError("stage512a reviewed freeze parent must be canonical and real")
+    try:
+        file_meta = path.lstat()
+    except FileNotFoundError:
+        if require_exists:
+            raise ValueError("stage512a reviewed freeze is missing")
+        return
+    if not require_exists:
+        raise ValueError("stage512a reviewed freeze output already exists")
+    if (
+        not stat.S_ISREG(file_meta.st_mode)
+        or file_meta.st_nlink != 1
+        or stat.S_IMODE(file_meta.st_mode) != 0o444
+    ):
+        raise ValueError("stage512a reviewed freeze must be one regular 0444 inode")
 
 SOURCE_TREES = ("training", "networks")
 SOURCE_EXPLICIT = (
@@ -78,6 +214,67 @@ SOURCE_EXPLICIT = (
     "scripts/offline_arb/test_caption_sidecar_runtime.py",
     "training/dataline_offline/caption_sidecar.py",
     "training/dataline_offline/offline_dataset.py",
+    "training/config_schema.py",
+)
+
+# Stage256 is a released legacy freeze contract: SOURCE_EXPLICIT and its
+# manifest discovery payload above must stay byte-for-byte stable.  Stage512a
+# uses a separate fail-closed source profile so it cannot silently freeze the
+# stage256 launch/gate set.
+SOURCE_EXPLICIT_STAGE512A = (
+    "train.py",
+    "configs/stage512a_offline_exact_w64_v1.yaml",
+    "configs/stage256_offline_exact_v1.yaml",
+    "jobs/offline_arb_phase5_catalog_stage512a.yaml",
+    "jobs/offline_arb_phase5_plans_stage512a.yaml",
+    "jobs/offline_arb_animefreq_stage512a.yaml",
+    "jobs/offline_arb_caption_sidecar_build_stage512a.yaml",
+    "jobs/offline_arb_exceptions_audit_stage512a_w64.yaml",
+    "jobs/offline_arb_textatlas_catalog_evidence_rebind_w64_TEMPLATE.yaml",
+    "jobs/offline_arb_stage256_completion_gate_for_stage512a.yaml",
+    "jobs/offline_arb_stage512a_w64_reviewed_exception_gate.yaml",
+    "jobs/offline_arb_freeze_v4_stage512a_w64_reviewed.yaml",
+    "jobs/offline_exact_512a_2x8_GPUVAL_TEMPLATE.yaml",
+    "jobs/offline_exact_512a_8x8_FORMAL_TEMPLATE.yaml",
+    "scripts/offline_arb/make_freeze_manifest.py",
+    "scripts/offline_arb/test_freeze_stage_source_profiles.py",
+    "scripts/offline_arb/phase5_build_catalog.py",
+    "scripts/offline_arb/make_planner_input.py",
+    "scripts/offline_arb/build_plan.py",
+    "scripts/offline_arb/validate_plan.py",
+    "scripts/offline_arb/precompute_anime_freq.py",
+    "scripts/offline_arb/test_animefreq_input_contract.py",
+    "scripts/offline_arb/render_stage512a_write_job.py",
+    "scripts/offline_arb/test_stage512a_write_job_renderer.py",
+    "scripts/offline_arb/caption_sidecar_contract.py",
+    "scripts/offline_arb/build_caption_sidecar.py",
+    "scripts/offline_arb/verify_caption_sidecar.py",
+    "scripts/offline_arb/test_caption_sidecar_runtime.py",
+    "scripts/offline_arb/audit_planned_caption_availability.py",
+    "scripts/offline_arb/audit_textatlas_plan_rows.py",
+    "scripts/offline_arb/rebind_textatlas_catalog_evidence_w64.py",
+    "scripts/offline_arb/test_rebind_textatlas_catalog_evidence_w64.py",
+    "scripts/offline_arb/immutable_review_evidence.py",
+    "scripts/offline_arb/stage512a_w64_exception_contract.py",
+    "scripts/offline_arb/finalize_stage512a_w64_exception_gate.py",
+    "scripts/offline_arb/test_stage512a_w64_exception_gate_contract.py",
+    "scripts/offline_arb/test_stage512a_w64_runtime_profiles.py",
+    "scripts/offline_arb/test_stage512a_w64_reviewed_exceptions.py",
+    "scripts/offline_arb/completion_publication.py",
+    "scripts/offline_arb/test_completion_publication.py",
+    "scripts/offline_arb/verify_stage256_completion_for_stage512a.py",
+    "scripts/offline_arb/test_stage256_completion_contract.py",
+    "scripts/offline_arb/stage512a_launch_guard.py",
+    "scripts/offline_arb/render_stage512a_formal_launch.py",
+    "scripts/offline_arb/test_stage512a_launch_guard.py",
+    "scripts/offline_arb/stage512a_gpuval_guard.py",
+    "scripts/offline_arb/render_stage512a_gpuval.py",
+    "scripts/offline_arb/test_stage512a_gpuval_contract.py",
+    "training/dataline_offline/caption_sidecar.py",
+    "training/dataline_offline/offline_dataset.py",
+    "training/dataline_offline/caption_exceptions_v1.py",
+    "training/dataline_offline/image_exceptions_v1.py",
+    "training/dataline/image_fetch.py",
     "training/config_schema.py",
 )
 
@@ -340,16 +537,343 @@ def exact_set(label: str, live: Iterable[str], expected: Iterable[str]) -> None:
         )
 
 
+def load_stage_contract(
+    config: Path, sampling: Path, tracker: SnapshotTracker
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    config_payload = tracker.read_bytes(config)
+    try:
+        cfg = OmegaConf.load(io.StringIO(config_payload.decode("utf-8")))
+    except Exception as exc:
+        raise ValueError(f"cannot parse selected config {config}: {exc}") from exc
+    stage = OmegaConf.select(cfg, "dataset.stage")
+    image_size = OmegaConf.select(cfg, "dataset.image_size")
+    sampling_from_config = OmegaConf.select(cfg, "dataset.sampling_config")
+    if stage not in ("256", "512a"):
+        raise ValueError(f"unsupported selected config stage: {stage!r}")
+    if type(image_size) is not int or image_size != {"256": 256, "512a": 512}[stage]:
+        raise ValueError(f"selected config stage/image_size mismatch: {stage!r}/{image_size!r}")
+    if not isinstance(sampling_from_config, str) or not sampling_from_config:
+        raise ValueError("selected config dataset.sampling_config is missing")
+    if Path(sampling_from_config).expanduser().resolve(strict=False) != sampling:
+        raise ValueError(
+            f"selected config sampling path {sampling_from_config} != --sampling {sampling}"
+        )
+    sampling_value, sampling_artifact = read_json_snapshot(sampling, tracker)
+    anime = sampling_value.get("anime")
+    caption = anime.get("caption") if isinstance(anime, dict) else None
+    require_stages = caption.get("require_nl_stages", []) if isinstance(caption, dict) else []
+    if not isinstance(require_stages, list) or any(
+        not isinstance(value, str) for value in require_stages
+    ):
+        raise ValueError("sampling anime.caption.require_nl_stages must be a string list")
+    requires_nl = stage in require_stages
+    if stage == "512a" and requires_nl:
+        raise ValueError("stage512a freeze requires sampling requires_nl=false")
+    contract = {
+        "stage": stage,
+        "image_size": image_size,
+        "eligibility": f"elig_{image_size}",
+        "requires_nl": requires_nl,
+        # Offline catalog construction intentionally does not apply the online
+        # anime NL-only filter, including for the legacy stage256 artifact.
+        "anime_nl_filter_applied": False,
+    }
+    sampling_evidence = None
+    if stage == "512a":
+        domain_mix_root = sampling_value.get("domain_mix")
+        domain_mix = (
+            domain_mix_root.get(stage) if isinstance(domain_mix_root, dict) else None
+        )
+        if (
+            not isinstance(domain_mix, dict)
+            or set(domain_mix) != set(DOMAINS)
+            or any(type(domain_mix[domain]) is not float for domain in DOMAINS)
+        ):
+            raise ValueError("stage512a sampling domain_mix is malformed")
+        sampling_evidence = {
+            "sha256": sampling_artifact["sha256"],
+            "domain_mix": dict(domain_mix),
+        }
+    return contract, sampling_evidence
+
+
+def validate_stage512a_catalog_sampling(
+    plan_header: dict[str, Any],
+    catalog_header: dict[str, Any],
+    contract: dict[str, Any],
+    sampling_evidence: dict[str, Any] | None,
+) -> None:
+    """Bind stage512a catalog semantics to the current tracked sampling JSON."""
+
+    if contract["stage"] != "512a":
+        return
+    if not isinstance(sampling_evidence, dict):
+        raise ValueError("stage512a sampling evidence is missing")
+    inputs = catalog_header.get("inputs")
+    if not isinstance(inputs, dict):
+        raise ValueError("stage512a catalog inputs must be an object")
+    if inputs.get("sampling_config_sha256") != sampling_evidence["sha256"]:
+        raise ValueError("stage512a catalog sampling SHA-256 differs from current sampling")
+    catalog_mix = inputs.get("domain_mix")
+    if (
+        not isinstance(catalog_mix, dict)
+        or set(catalog_mix) != set(DOMAINS)
+        or any(type(catalog_mix[domain]) is not float for domain in DOMAINS)
+        or catalog_mix != sampling_evidence["domain_mix"]
+    ):
+        raise ValueError("stage512a catalog domain_mix differs from current sampling")
+    expected_plan_mix: dict[str, str] = {}
+    for domain in DOMAINS:
+        text = format(Decimal(str(sampling_evidence["domain_mix"][domain])), "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        expected_plan_mix[domain] = text or "0"
+    if plan_header.get("domain_mix") != expected_plan_mix:
+        raise ValueError("stage512a plan domain_mix differs from current sampling")
+    if (
+        "sampling_config_sha256" in plan_header
+        and plan_header["sampling_config_sha256"] != sampling_evidence["sha256"]
+    ):
+        raise ValueError("stage512a plan sampling SHA-256 differs from current sampling")
+
+
+def _explicit_header_contract(
+    header: dict[str, Any], expected: dict[str, Any], label: str
+) -> bool:
+    present = {key for key in CONTRACT_KEYS if key in header}
+    if not present:
+        return False
+    if present != set(CONTRACT_KEYS):
+        raise ValueError(f"{label} has a partial stage contract: {sorted(present)}")
+    for key in CONTRACT_KEYS:
+        got, wanted = header[key], expected[key]
+        if type(got) is not type(wanted) or got != wanted:
+            raise ValueError(f"{label} {key}={got!r} != selected config {wanted!r}")
+    return True
+
+
+def validate_release_contract(
+    plan_header: dict[str, Any],
+    catalog_header: dict[str, Any],
+    expected: dict[str, Any],
+) -> dict[str, Any]:
+    catalog_explicit = _explicit_header_contract(catalog_header, expected, "catalog header")
+    plan_explicit = _explicit_header_contract(plan_header, expected, "plan header")
+    if catalog_explicit != plan_explicit:
+        raise ValueError("plan/catalog stage contract presence differs")
+    legacy = not catalog_explicit
+    if legacy:
+        if expected["stage"] != "256":
+            raise ValueError("only verified stage256 artifacts may omit the stage contract")
+        if catalog_header.get("assignment_hash") != LEGACY_STAGE256_ASSIGNMENT:
+            raise ValueError("legacy stage256 catalog assignment identity is not recognized")
+        if (
+            plan_header.get("assignment_hash") != LEGACY_STAGE256_ASSIGNMENT
+            or plan_header.get("upstream_assignment_hash") != LEGACY_STAGE256_ASSIGNMENT
+            or not str(plan_header.get("plan_id", "")).startswith("stage256_")
+        ):
+            raise ValueError("legacy stage256 plan assignment identity is not recognized")
+    return {**expected, "legacy_stage256_headers": legacy}
+
+
+def validate_external_bindings(
+    bindings: dict[str, Path],
+    contract: dict[str, Any],
+    plan_header: dict[str, Any],
+    catalog_header: dict[str, Any],
+    plan_header_sha256: str,
+    catalog_header_sha256: str,
+    repo: Path,
+    tracker: SnapshotTracker,
+) -> None:
+    if contract["stage"] == "512a":
+        expected_labels = {"gpic_payload", "reviewed_exception_gate"}
+        if set(bindings) != expected_labels:
+            raise ValueError(
+                "stage512a freeze requires exactly --external-binding "
+                "gpic_payload=<JSON> and reviewed_exception_gate=<JSON>; "
+                f"actual={sorted(bindings)!r}"
+            )
+    if "gpic_payload" in bindings:
+        value, _artifact = read_json_snapshot(bindings["gpic_payload"], tracker)
+        expected_identity = {key: contract[key] for key in CONTRACT_KEYS}
+        if value.get("status") != "PASS":
+            raise ValueError("gpic_payload status is not PASS")
+        if value.get("stage_identity") != expected_identity:
+            raise ValueError(
+                "gpic_payload stage_identity does not match the selected release contract"
+            )
+        if value.get("catalog_hash") != catalog_header["catalog_hash"]:
+            raise ValueError("gpic_payload catalog_hash does not bind the selected catalog")
+        if value.get("catalog_header_sha256") != catalog_header_sha256:
+            raise ValueError(
+                "gpic_payload catalog_header_sha256 does not bind the live catalog header"
+            )
+        artifact_root_raw = value.get("artifact_root")
+        if not isinstance(artifact_root_raw, str) or not artifact_root_raw:
+            raise ValueError("gpic_payload artifact_root is missing or malformed")
+        artifact_root = Path(artifact_root_raw)
+        if (
+            not artifact_root.is_absolute()
+            or artifact_root.name in {"latest", "current"}
+            or artifact_root.is_symlink()
+            or not artifact_root.is_dir()
+            or artifact_root.resolve(strict=True) != artifact_root
+        ):
+            raise ValueError(
+                "gpic_payload artifact_root must be an absolute, canonical, "
+                "non-symlink immutable directory"
+            )
+        for key in ("manifest_sha256", "release_digest"):
+            if not is_sha256(value.get(key)):
+                raise ValueError(f"gpic_payload {key} is not a lowercase SHA-256")
+
+    if "reviewed_exception_gate" in bindings:
+        validate_stage512a_reviewed_gate_storage(bindings["reviewed_exception_gate"])
+        value, gate_artifact = read_json_snapshot(
+            bindings["reviewed_exception_gate"], tracker
+        )
+        if not is_sha256(STAGE512A_REVIEWED_GATE_SHA256):
+            raise ValueError(
+                "stage512a W64 reviewed_exception_gate SHA-256 authority "
+                "is pending or malformed"
+            )
+        if gate_artifact["sha256"] != STAGE512A_REVIEWED_GATE_SHA256:
+            raise ValueError(
+                "reviewed_exception_gate SHA-256 differs from the sealed "
+                "W64 authority"
+            )
+        expected_identity = {key: contract[key] for key in CONTRACT_KEYS}
+        if value.get("status") != "PASS":
+            raise ValueError("reviewed_exception_gate status is not PASS")
+        if value.get("schema") != STAGE512A_EXCEPTION_SCHEMA:
+            raise ValueError("reviewed_exception_gate schema mismatch")
+        if value.get("policy") != STAGE512A_EXCEPTION_POLICY:
+            raise ValueError("reviewed_exception_gate policy mismatch")
+        if value.get("stage_identity") != expected_identity:
+            raise ValueError("reviewed_exception_gate stage_identity mismatch")
+        for key in ("plan_id", "plan_hash", "assignment_hash"):
+            if value.get(key) != plan_header.get(key):
+                raise ValueError(f"reviewed_exception_gate {key} mismatch")
+        if value.get("catalog_hash") != catalog_header.get("catalog_hash"):
+            raise ValueError("reviewed_exception_gate catalog_hash mismatch")
+        if value.get("plan_header_sha256") != plan_header_sha256:
+            raise ValueError("reviewed_exception_gate plan header SHA mismatch")
+        if value.get("catalog_header_sha256") != catalog_header_sha256:
+            raise ValueError("reviewed_exception_gate catalog header SHA mismatch")
+        if value.get("counts") != STAGE512A_EXCEPTION_COUNTS:
+            raise ValueError("reviewed_exception_gate exact count contract mismatch")
+
+        runtime = value.get("runtime")
+        if not isinstance(runtime, dict) or set(runtime) != set(
+            STAGE512A_EXCEPTION_RUNTIME_SOURCES
+        ):
+            raise ValueError("reviewed_exception_gate runtime source set mismatch")
+        for label, relative in STAGE512A_EXCEPTION_RUNTIME_SOURCES.items():
+            item = runtime.get(label)
+            expected_path = repo / relative
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"reviewed_exception_gate runtime.{label} must be an object"
+                )
+            if item.get("path") != str(expected_path):
+                raise ValueError(
+                    f"reviewed_exception_gate runtime.{label} path mismatch"
+                )
+            live = tracker.artifact(expected_path)
+            if item.get("sha256") != live["sha256"]:
+                raise ValueError(
+                    f"reviewed_exception_gate runtime.{label} SHA mismatch"
+                )
+
+        producer = value.get("producer")
+        expected_producer_keys = {
+            "schema",
+            "job_name",
+            "container_image",
+            "launch_token",
+            "render_payload_sha256",
+            "rendered_yaml",
+            *STAGE512A_EXCEPTION_PRODUCER_SOURCES,
+        }
+        if not isinstance(producer, dict) or set(producer) != expected_producer_keys:
+            raise ValueError("reviewed_exception_gate producer provenance set mismatch")
+        token = producer.get("launch_token")
+        payload_sha = producer.get("render_payload_sha256")
+        if (
+            producer.get("schema")
+            != "stage512a_reviewed_gate_producer_provenance_v1"
+            or producer.get("container_image")
+            != STAGE512A_EXCEPTION_PRODUCER_IMAGE
+            or not isinstance(producer.get("job_name"), str)
+            or not producer["job_name"]
+            or not isinstance(token, str)
+            or not token.startswith("STAGE512A_WRITE_V1_")
+            or not is_sha256(token.removeprefix("STAGE512A_WRITE_V1_"))
+            or not is_sha256(payload_sha)
+            or token.removeprefix("STAGE512A_WRITE_V1_") != payload_sha
+        ):
+            raise ValueError("reviewed_exception_gate producer identity mismatch")
+
+        producer_paths = {
+            label: repo / relative
+            for label, relative in STAGE512A_EXCEPTION_PRODUCER_SOURCES.items()
+        }
+        rendered_item = producer.get("rendered_yaml")
+        if not isinstance(rendered_item, dict) or set(rendered_item) != {
+            "path",
+            "bytes",
+            "sha256",
+        }:
+            raise ValueError("reviewed_exception_gate producer rendered_yaml malformed")
+        rendered_path_raw = rendered_item.get("path")
+        rendered_path = Path(rendered_path_raw) if isinstance(rendered_path_raw, str) else Path()
+        try:
+            rendered_is_canonical = (
+                rendered_path.is_absolute()
+                and rendered_path.resolve(strict=True) == rendered_path
+            )
+        except OSError as exc:
+            raise ValueError(
+                "reviewed_exception_gate rendered YAML path is unreadable"
+            ) from exc
+        if not rendered_is_canonical:
+            raise ValueError("reviewed_exception_gate rendered YAML path is not canonical")
+        if stat.S_IMODE(rendered_path.lstat().st_mode) & 0o222:
+            raise ValueError("reviewed_exception_gate rendered YAML is writable")
+        producer_paths["rendered_yaml"] = rendered_path
+        for label, expected_path in producer_paths.items():
+            item = producer.get(label)
+            if not isinstance(item, dict) or set(item) != {"path", "bytes", "sha256"}:
+                raise ValueError(
+                    f"reviewed_exception_gate producer.{label} artifact malformed"
+                )
+            if item.get("path") != str(expected_path):
+                raise ValueError(
+                    f"reviewed_exception_gate producer.{label} path mismatch"
+                )
+            live = tracker.artifact(expected_path)
+            if (
+                item.get("bytes") != live["bytes"]
+                or item.get("sha256") != live["sha256"]
+            ):
+                raise ValueError(
+                    f"reviewed_exception_gate producer.{label} byte identity mismatch"
+                )
+
+
 def expected_inputs(
     repo: Path,
+    config: Path,
     plan: Path,
     catalog: Path,
     sampling: Path,
     animefreq: Path,
     sidecar: Path,
+    external_bindings: dict[str, Path],
 ) -> dict[str, Path]:
-    return {
-        "config": repo / "configs/stage256_offline_exact_v1.yaml",
+    inputs = {
+        "config": config,
         "plan_header": plan / "header.json",
         "plan_checksums": plan / "checksums.json",
         "catalog_header": catalog / "header.json",
@@ -359,10 +883,22 @@ def expected_inputs(
         "sidecar_header": sidecar / "header.json",
         "sidecar_success": sidecar / "_SUCCESS",
     }
+    for name, path in sorted(external_bindings.items()):
+        inputs[f"external:{name}"] = path
+    return inputs
 
 
-def discover_training_sources(repo: Path) -> dict[str, Path]:
-    paths = {repo / relative for relative in SOURCE_EXPLICIT}
+def source_explicit_for_stage(stage: str) -> tuple[str, ...]:
+    if stage == "256":
+        return SOURCE_EXPLICIT
+    if stage == "512a":
+        return SOURCE_EXPLICIT_STAGE512A
+    raise ValueError(f"no freeze source profile for stage {stage!r}")
+
+
+def discover_training_sources(repo: Path, stage: str) -> dict[str, Path]:
+    explicit = source_explicit_for_stage(stage)
+    paths = {repo / relative for relative in explicit}
     for tree in SOURCE_TREES:
         root = repo / tree
         directory_metadata(root)
@@ -893,12 +1429,14 @@ def validate_sidecar(
 def validate_common_headers(
     plan: Path,
     catalog: Path,
+    expected_contract: dict[str, Any],
     tracker: SnapshotTracker,
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
     dict[str, dict[str, Any]],
+    dict[str, Any],
 ]:
     plan_header, plan_header_artifact = read_json_snapshot(plan / "header.json", tracker)
     plan_checksums, checksums_artifact = read_json_snapshot(plan / "checksums.json", tracker)
@@ -908,23 +1446,42 @@ def validate_common_headers(
         raise ValueError("catalog header catalog_hash is malformed")
     if plan_header.get("upstream_catalog_hash") != catalog_hash:
         raise ValueError("plan/catalog hash binding mismatch")
+    assignment_hash = catalog_header.get("assignment_hash")
+    if not is_sha256(assignment_hash):
+        raise ValueError("catalog header assignment_hash is malformed")
+    if (
+        plan_header.get("assignment_hash") != assignment_hash
+        or plan_header.get("upstream_assignment_hash") != assignment_hash
+    ):
+        raise ValueError("plan/catalog assignment hash binding mismatch")
     if plan_checksums.get("header") != plan_header_artifact["sha256"]:
         raise ValueError("plan checksums do not bind the live plan header")
-    return plan_header, plan_checksums, catalog_header, {
-        "plan_header": plan_header_artifact,
-        "plan_checksums": checksums_artifact,
-        "catalog_header": catalog_header_artifact,
-    }
+    release_contract = validate_release_contract(
+        plan_header, catalog_header, expected_contract
+    )
+    return (
+        plan_header,
+        plan_checksums,
+        catalog_header,
+        {
+            "plan_header": plan_header_artifact,
+            "plan_checksums": checksums_artifact,
+            "catalog_header": catalog_header_artifact,
+        },
+        release_contract,
+    )
 
 
 def collect_release_snapshot(
     *,
     repo: Path,
+    config: Path,
     plan: Path,
     catalog: Path,
     sampling: Path,
     animefreq: Path,
     sidecar: Path,
+    external_bindings: dict[str, Path],
     tracker: SnapshotTracker,
 ) -> dict[str, Any]:
     for label, path in {
@@ -939,9 +1496,38 @@ def collect_release_snapshot(
         directory_metadata(path)
     if not sampling.is_absolute():
         raise ValueError(f"sampling path must be absolute: {sampling}")
+    if not config.is_absolute():
+        raise ValueError(f"config path must be absolute: {config}")
+    regular_metadata(config)
+    for name, path in external_bindings.items():
+        if not path.is_absolute():
+            raise ValueError(f"external binding {name} path must be absolute: {path}")
+        regular_metadata(path)
 
-    plan_header, plan_checksums, catalog_header, header_artifacts = validate_common_headers(
-        plan, catalog, tracker
+    expected_contract, sampling_evidence = load_stage_contract(
+        config, sampling, tracker
+    )
+    (
+        plan_header,
+        plan_checksums,
+        catalog_header,
+        header_artifacts,
+        release_contract,
+    ) = validate_common_headers(
+        plan, catalog, expected_contract, tracker
+    )
+    validate_stage512a_catalog_sampling(
+        plan_header, catalog_header, release_contract, sampling_evidence
+    )
+    validate_external_bindings(
+        external_bindings,
+        release_contract,
+        plan_header,
+        catalog_header,
+        header_artifacts["plan_header"]["sha256"],
+        header_artifacts["catalog_header"]["sha256"],
+        repo,
+        tracker,
     )
     catalogs = catalog_domains(catalog_header)
     anime_header, anime_section = validate_animefreq(
@@ -955,11 +1541,14 @@ def collect_release_snapshot(
     if sidecar_section["catalog_hash"] != catalog_header["catalog_hash"]:
         raise ValueError("sidecar/catalog identity mismatch")
 
-    sources = discover_training_sources(repo)
+    source_explicit = source_explicit_for_stage(release_contract["stage"])
+    sources = discover_training_sources(repo, release_contract["stage"])
     source_files = {
         relative: tracker.artifact(path) for relative, path in sorted(sources.items())
     }
-    input_paths = expected_inputs(repo, plan, catalog, sampling, animefreq, sidecar)
+    input_paths = expected_inputs(
+        repo, config, plan, catalog, sampling, animefreq, sidecar, external_bindings
+    )
     inputs = {label: tracker.artifact(path) for label, path in sorted(input_paths.items())}
     duplicated_controls = {
         "animefreq_header": anime_section["header"],
@@ -999,7 +1588,7 @@ def collect_release_snapshot(
     exact_animefreq_root(animefreq, anime_header["files"], tracker)
     exact_catalog_declared(catalog, catalogs, tracker)
     exact_sidecar_root(sidecar, closing_sidecar_files, tracker)
-    closing_sources = discover_training_sources(repo)
+    closing_sources = discover_training_sources(repo, release_contract["stage"])
     exact_set("training source", closing_sources, sources)
     for relative, path in closing_sources.items():
         tracker.remember(path, "file", regular_metadata(path))
@@ -1009,11 +1598,22 @@ def collect_release_snapshot(
         "plan_id": plan_header.get("plan_id"),
         "catalog_hash": catalog_header.get("catalog_hash"),
         "assignment_hash": catalog_header.get("assignment_hash"),
+        **{key: release_contract[key] for key in CONTRACT_KEYS},
         "caption_sidecar_header_sha256": sidecar_section["header_sha256"],
         "caption_sidecar_release_digest": sidecar_section["release_digest"],
     }
-    if not all(identities.values()):
-        raise ValueError("release identities contain empty values")
+    for key in (
+        "plan_id",
+        "catalog_hash",
+        "assignment_hash",
+        "caption_sidecar_header_sha256",
+        "caption_sidecar_release_digest",
+    ):
+        if not identities[key]:
+            raise ValueError(f"release identity {key} is empty")
+    for key in CONTRACT_KEYS:
+        if type(identities[key]) is not type(expected_contract[key]):
+            raise ValueError(f"release contract identity {key} has the wrong type")
     return {
         "identities": identities,
         "inputs": inputs,
@@ -1024,7 +1624,7 @@ def collect_release_snapshot(
         "training_sources": {
             "root": str(repo),
             "discovery": {
-                "explicit": list(SOURCE_EXPLICIT),
+                "explicit": list(source_explicit),
                 "python_trees": list(SOURCE_TREES),
             },
             "files": source_files,
@@ -1037,11 +1637,13 @@ def collect_release_snapshot(
 def build_manifest(
     *,
     repo: Path,
+    config: Path,
     plan: Path,
     catalog: Path,
     sampling: Path,
     animefreq: Path,
     sidecar: Path,
+    external_bindings: dict[str, Path],
 ) -> tuple[dict[str, Any], str]:
     tracker = SnapshotTracker()
     git_head = subprocess.run(
@@ -1052,11 +1654,13 @@ def build_manifest(
     ).stdout.strip()
     release = collect_release_snapshot(
         repo=repo,
+        config=config,
         plan=plan,
         catalog=catalog,
         sampling=sampling,
         animefreq=animefreq,
         sidecar=sidecar,
+        external_bindings=external_bindings,
         tracker=tracker,
     )
     control_artifacts = release.pop("control_artifacts")
@@ -1065,8 +1669,13 @@ def build_manifest(
     if any(release["inputs"][label] != artifact for label, artifact in control_artifacts.items()):
         raise ValueError("release control artifact/input mismatch")
     snapshot_digest = release.pop("snapshot_fingerprints_sha256")
+    freeze_schema = (
+        STAGE512A_FREEZE_SCHEMA
+        if release["identities"]["stage"] == "512a"
+        else STAGE256_FREEZE_SCHEMA
+    )
     manifest = {
-        "schema_version": "offline_arb_freeze_v3_caption_sidecar",
+        "schema_version": freeze_schema,
         "frozen_at": datetime.now(timezone.utc).isoformat(),
         "git_head_at_freeze": git_head,
         **release,
@@ -1075,22 +1684,47 @@ def build_manifest(
 
 
 def atomic_write_manifest(path: Path, manifest: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-    payload = json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+    if not path.is_absolute():
+        raise ValueError(f"freeze output must be absolute: {path}")
+    if not path.parent.is_dir() or path.parent.is_symlink():
+        raise ValueError(f"freeze output parent must be an existing real directory: {path.parent}")
+    if path.parent.resolve(strict=True) != path.parent:
+        raise ValueError(f"freeze output parent must be canonical: {path.parent}")
+    payload = (
+        json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        descriptor = os.open(path, flags, 0o444)
         try:
+            offset = 0
+            while offset < len(payload):
+                written = os.write(descriptor, payload[offset:])
+                if written <= 0:
+                    raise OSError(f"short freeze write: {path}")
+                offset += written
+            os.fchmod(descriptor, 0o444)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-    finally:
-        temporary.unlink(missing_ok=True)
+        parent_fd = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except FileExistsError as exc:
+        raise ValueError(f"immutable freeze output already exists: {path}") from exc
+    if stat.S_IMODE(path.stat().st_mode) != 0o444:
+        raise ValueError(f"published freeze mode must be 0444: {path}")
 
 
 def freeze_release_digest(manifest: dict[str, Any]) -> str:
@@ -1113,11 +1747,13 @@ def verify_freeze(
     freeze_path: Path,
     *,
     repo: Path,
+    config: Path,
     plan: Path,
     catalog: Path,
     sampling: Path,
     animefreq: Path,
     sidecar: Path,
+    external_bindings: dict[str, Path],
 ) -> dict[str, Any]:
     tracker = SnapshotTracker()
     manifest, freeze_artifact = read_json_snapshot(freeze_path, tracker)
@@ -1138,8 +1774,15 @@ def verify_freeze(
             f"freeze top-level key set drift: missing={sorted(expected_keys-set(manifest))}, "
             f"unexpected={sorted(set(manifest)-expected_keys)}"
         )
-    if manifest.get("schema_version") != "offline_arb_freeze_v3_caption_sidecar":
+    if manifest.get("schema_version") not in {
+        STAGE256_FREEZE_SCHEMA,
+        STAGE512A_FREEZE_SCHEMA,
+    }:
         raise ValueError(f"unsupported freeze schema: {manifest.get('schema_version')!r}")
+    if manifest.get("schema_version") == STAGE512A_FREEZE_SCHEMA:
+        validate_stage512a_reviewed_freeze_storage(
+            freeze_path, require_exists=True
+        )
     if (
         not isinstance(manifest.get("frozen_at"), str)
         or not manifest["frozen_at"]
@@ -1150,19 +1793,55 @@ def verify_freeze(
 
     live = collect_release_snapshot(
         repo=repo,
+        config=config,
         plan=plan,
         catalog=catalog,
         sampling=sampling,
         animefreq=animefreq,
         sidecar=sidecar,
+        external_bindings=external_bindings,
         tracker=tracker,
     )
+    expected_schema = (
+        STAGE512A_FREEZE_SCHEMA
+        if live["identities"]["stage"] == "512a"
+        else STAGE256_FREEZE_SCHEMA
+    )
+    if manifest.get("schema_version") != expected_schema:
+        raise ValueError(
+            "freeze schema does not match the selected stage contract: "
+            f"expected={expected_schema!r}, actual={manifest.get('schema_version')!r}"
+        )
     live.pop("snapshot_fingerprints_sha256")
     control_artifacts = live.pop("control_artifacts")
     if any(live["inputs"][label] != artifact for label, artifact in control_artifacts.items()):
         raise ValueError("live release control artifact/input mismatch")
+    # Existing production stage256 freezes predate the five-field identity
+    # closure.  They remain verifiable only when the live catalog/plan passed
+    # the recognized legacy-stage256 checks above.  New/partial identities are
+    # never projected.
+    frozen_identities = manifest.get("identities")
+    live_identities = live.get("identities")
+    if not isinstance(frozen_identities, dict) or not isinstance(live_identities, dict):
+        raise ValueError("freeze/live identities must be objects")
+    frozen_contract_keys = {key for key in CONTRACT_KEYS if key in frozen_identities}
+    if not frozen_contract_keys:
+        if (
+            live_identities.get("stage") != "256"
+            or live_identities.get("assignment_hash") != LEGACY_STAGE256_ASSIGNMENT
+        ):
+            raise ValueError("contract-less freeze is not a verified legacy stage256 release")
+        comparable_identities = {
+            key: value for key, value in live_identities.items() if key not in CONTRACT_KEYS
+        }
+    elif frozen_contract_keys == set(CONTRACT_KEYS):
+        comparable_identities = live_identities
+    else:
+        raise ValueError("frozen identities contain a partial stage contract")
+    if frozen_identities != comparable_identities:
+        raise ValueError("live release section differs from freeze: identities")
+
     for section in (
-        "identities",
         "inputs",
         "plan_blocks",
         "catalog",
@@ -1223,6 +1902,27 @@ def sidecar_summary(value: dict[str, Any], mode: str) -> dict[str, Any]:
     }
 
 
+def parse_external_bindings(values: Iterable[str]) -> dict[str, Path]:
+    bindings: dict[str, Path] = {}
+    for raw in values:
+        name, separator, path_raw = raw.partition("=")
+        if (
+            not separator
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+", name)
+            or not path_raw
+        ):
+            raise ValueError(
+                f"--external-binding must be NAME=/absolute/path, got {raw!r}"
+            )
+        if name in bindings:
+            raise ValueError(f"duplicate external binding name: {name}")
+        path = Path(path_raw).expanduser()
+        if not path.is_absolute():
+            raise ValueError(f"external binding path must be absolute: {path}")
+        bindings[name] = path.resolve(strict=False)
+    return bindings
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
@@ -1231,11 +1931,24 @@ def parse_args() -> argparse.Namespace:
     modes.add_argument("--verify-freeze", action="store_true")
     parser.add_argument("--freeze", type=Path, default=OUT)
     parser.add_argument("--repo", type=Path, default=REPO)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="selected training config; default is <repo>/configs/stage256_offline_exact_v1.yaml",
+    )
     parser.add_argument("--plan", type=Path, default=PLAN)
     parser.add_argument("--catalog-root", type=Path, default=CATALOG)
     parser.add_argument("--sampling", type=Path, default=SAMPLING)
     parser.add_argument("--animefreq-root", type=Path, default=ANIME_FREQ)
     parser.add_argument("--sidecar-root", type=Path, default=SIDECAR)
+    parser.add_argument(
+        "--external-binding",
+        action="append",
+        default=[],
+        metavar="NAME=/ABSOLUTE/PATH",
+        help="freeze an external stage artifact; stage512a requires gpic_payload=<JSON>",
+    )
     return parser.parse_args()
 
 
@@ -1244,11 +1957,17 @@ def main() -> int:
     try:
         args.freeze = args.freeze.expanduser().resolve(strict=False)
         args.repo = args.repo.expanduser().resolve(strict=False)
+        if args.config is None:
+            args.config = args.repo / DEFAULT_CONFIG_REL
+        elif not args.config.is_absolute():
+            args.config = args.repo / args.config
+        args.config = args.config.expanduser().resolve(strict=False)
         args.plan = args.plan.expanduser().resolve(strict=False)
         args.catalog_root = args.catalog_root.expanduser().resolve(strict=False)
         args.sampling = args.sampling.expanduser().resolve(strict=False)
         args.animefreq_root = args.animefreq_root.expanduser().resolve(strict=False)
         args.sidecar_root = args.sidecar_root.expanduser().resolve(strict=False)
+        external_bindings = parse_external_bindings(args.external_binding)
         if args.verify_sidecar_control:
             value = validate_sidecar(args.sidecar_root, args.catalog_root, full=False)
             result = sidecar_summary(value, "verify-sidecar-control")
@@ -1259,21 +1978,29 @@ def main() -> int:
             result = verify_freeze(
                 args.freeze,
                 repo=args.repo,
+                config=args.config,
                 plan=args.plan,
                 catalog=args.catalog_root,
                 sampling=args.sampling,
                 animefreq=args.animefreq_root,
                 sidecar=args.sidecar_root,
+                external_bindings=external_bindings,
             )
         else:
             manifest, source_snapshot_digest = build_manifest(
                 repo=args.repo,
+                config=args.config,
                 plan=args.plan,
                 catalog=args.catalog_root,
                 sampling=args.sampling,
                 animefreq=args.animefreq_root,
                 sidecar=args.sidecar_root,
+                external_bindings=external_bindings,
             )
+            if manifest["identities"]["stage"] == "512a":
+                validate_stage512a_reviewed_freeze_storage(
+                    args.freeze, require_exists=False
+                )
             atomic_write_manifest(args.freeze, manifest)
             freeze_tracker = SnapshotTracker()
             written, freeze_artifact = read_json_snapshot(args.freeze, freeze_tracker)

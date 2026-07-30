@@ -1,4 +1,10 @@
-"""Frozen, production-only image-byte exceptions for OFFLINE_ARB_V1."""
+"""Frozen, production-only image-byte exceptions for exact offline plans.
+
+The public unprefixed constants remain the released stage256 ABI and the
+existing ``STAGE512A_*`` constants remain the released W48 ABI.  Stage512a W64
+has a separately named production identity while retaining the same catalog
+rows and exact physical payload/pixel identities for its three reviewed JPEGs.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +15,8 @@ from typing import Any, Callable, Mapping
 
 
 PLAN_ID = "stage256_offline_exact_v1_w64_prod"
+STAGE = "256"
+ELIGIBILITY = "elig_256"
 PLAN_HASH = "a187b1eb2f99f1b1c4c860deed369d2c04bc2a997e12249dd9566ccf3962f263"
 CATALOG_HASH = "b5f83014e4eab304460336adff217c35e993a2d892a5d889f69f87013c65f212"
 PLAN_HEADER_SHA256 = "e4ce718bc29e823a6ba44f8e592f6b8fb446273a5c6908eec87c5e194e3da9a9"
@@ -103,6 +111,148 @@ TEXTATLAS_JPEG_EOI_REPAIRS: Mapping[int, TextAtlasJpegEoiRepair] = MappingProxyT
 )
 
 
+# Stage512a W48 production profile.  Evidence remains separately named so the
+# suggestion/review chain cannot be mistaken for the legacy stage256 audit.
+STAGE512A_PLAN_ID = "stage512a_offline_exact_v2_w48_prod"
+STAGE512A_STAGE = "512a"
+STAGE512A_ELIGIBILITY = "elig_512"
+STAGE512A_PLAN_HASH = (
+    "72363201789fc72803219604887095d287b5d52bbfc415a64744e84f99899a8a"
+)
+STAGE512A_CATALOG_HASH = (
+    "370b1679e8c5670338a03ba4c6972cdbf69fa5068fc35108bf646b2d64642331"
+)
+STAGE512A_PLAN_HEADER_SHA256 = (
+    "939df84dd066d93c36cc10606a57e1dfc4e9d4c174f0b658c45ab2cad35cbd0d"
+)
+STAGE512A_CATALOG_HEADER_SHA256 = (
+    "51a5f0904987a751b54842633d2968ea7f6485307850858d9472319c15748d1d"
+)
+STAGE512A_INTEGRITY_AUDIT_SHA256 = (
+    "9d2b42eed098a1808589f418402cbfa19ffa5278852fa40d166ed31d89450a6f"
+)
+STAGE512A_ALLOWLIST_SUGGESTION_SHA256 = (
+    "29fdce7368823a943a688434be095996d26ad4309594762f3ae9408150d2b932"
+)
+STAGE512A_REPAIRED_PAYLOAD_BINDINGS_SHA256 = (
+    "0450ba03cfa6dfca1a2b1b3cacc27c6c6d50ae40a4eda31a7589d95913a923d5"
+)
+STAGE512A_FINAL_REVIEW_SHA256 = (
+    "d1734949e27c4ef8cdc037e9c37dbece1ad463d2f75f01139093189f57f9c4c3"
+)
+
+STAGE512A_TEXTATLAS_JPEG_EOI_REPAIRS: Mapping[
+    int, TextAtlasJpegEoiRepair
+] = MappingProxyType(
+    {
+        68_973_396: TextAtlasJpegEoiRepair(
+            row_id=68_973_396,
+            uid="PPT2Structured:986e2d6790064c0d9db822e405cfd804.jpg",
+            bucket_idx=182,
+            width=3_600,
+            height=2_700,
+            image_path="986e2d6790064c0d9db822e405cfd804.jpg",
+            image_parquet_path=(
+                "/s3/evan/textatlas5m/PPT2Structured/"
+                "train-00021-of-00036.parquet"
+            ),
+            image_row_group=13,
+            image_row_in_group=27,
+            raw_bytes=1_036_288,
+            raw_sha256="2a84efd18e5c66e72cfb26f34c3195db6ed97becd02633ab7c2bd8449dcc45d2",
+            repaired_bytes=1_036_290,
+            repaired_sha256="0522d5ea8705494f9c8ebfb8442bacc888d6916dbc5659e22e8cde8f2ed7fc4a",
+            pixel_sha256="120051cba9c51f1ad620acaf49a3ca3105845d60a947a5ef9f9a6ff69d76f79f",
+        ),
+        69_010_633: TextAtlasJpegEoiRepair(
+            row_id=69_010_633,
+            uid="PPT2Structured:fbc3c5a38a12459b92ed77870494e609.jpg",
+            bucket_idx=182,
+            width=3_600,
+            height=2_700,
+            image_path="fbc3c5a38a12459b92ed77870494e609.jpg",
+            image_parquet_path=(
+                "/s3/evan/textatlas5m/PPT2Structured/"
+                "train-00035-of-00036.parquet"
+            ),
+            image_row_group=10,
+            image_row_in_group=78,
+            raw_bytes=786_432,
+            raw_sha256="bbd73e4673977154cb76665bdbb29ca43227d710b23e77a4c2a10348883fd460",
+            repaired_bytes=786_434,
+            repaired_sha256="e38ba338c5c12c453e1a17fd57bdac536f165f175f0d1c3c181925bb39b3a361",
+            pixel_sha256="7b44b9a43b7f221fff237018c312d696dd03cc9c1854585a770c9ba9ab6643aa",
+        ),
+        70_063_978: TextAtlasJpegEoiRepair(
+            row_id=70_063_978,
+            uid="TextVisionBlend:716f0b1cc7134b84bd6a098a55a70425.jpg",
+            bucket_idx=182,
+            width=512,
+            height=512,
+            image_path="716f0b1cc7134b84bd6a098a55a70425.jpg",
+            image_parquet_path=(
+                "/s3/evan/textatlas5m/TextVisionBlend/"
+                "train-00009-of-00022.parquet"
+            ),
+            image_row_group=192,
+            image_row_in_group=4,
+            raw_bytes=32_768,
+            raw_sha256="1b9bec49cef9e0b04709c2447712ef9b4a3825d18d60a000facc4e3631d5363c",
+            repaired_bytes=32_770,
+            repaired_sha256="03e276bb716de0d10da58fef1b22dd6f8458972012cd053d2ba6c2c6cf8a9767",
+            pixel_sha256="bbb0b6cf52ed0430b7d52ebf5bf578420098ba0a54fdd65be6822024ae52089a",
+        ),
+    }
+)
+STAGE512A_TEXTATLAS_FORMAL_EXPOSURES: Mapping[int, int] = MappingProxyType(
+    {68_973_396: 4, 69_010_633: 3, 70_063_978: 3}
+)
+STAGE512A_TEXTATLAS_TOTAL_FORMAL_EXPOSURES = 10
+
+# Stage512a W64 production profile.  The catalog and reviewed JPEG payloads are
+# unchanged from W48.  W64 plan exposure counts and evidence SHAs are not
+# runtime inputs; the W64 reviewed gate keeps them fail-closed until its plan
+# audit/rebind artifacts have been published.
+STAGE512A_W64_PLAN_ID = "stage512a_offline_exact_v2_w64_prod"
+STAGE512A_W64_STAGE = "512a"
+STAGE512A_W64_ELIGIBILITY = "elig_512"
+STAGE512A_W64_PLAN_HASH = (
+    "37b30d902bd46c5d6c1fe26d3b69e13d5d03d847ec3fea1a8bccdf1651c85097"
+)
+STAGE512A_W64_CATALOG_HASH = STAGE512A_CATALOG_HASH
+STAGE512A_W64_PLAN_HEADER_SHA256 = (
+    "b69e8a20331a1abb13905cbc4cf4710abb4d7d2a592a0d7a3dfcfe3db0201c75"
+)
+STAGE512A_W64_CATALOG_HEADER_SHA256 = STAGE512A_CATALOG_HEADER_SHA256
+
+STAGE512A_W64_TEXTATLAS_JPEG_EOI_REPAIRS: Mapping[
+    int, TextAtlasJpegEoiRepair
+] = MappingProxyType(dict(STAGE512A_TEXTATLAS_JPEG_EOI_REPAIRS))
+
+
+# Stage512a 2026-07-22 weighted W64 production profile.  The catalog and the
+# three byte/pixel-reviewed JPEG repairs are identical to the prior W64
+# release; only the immutable plan identity and observed exposure counts differ.
+STAGE512A_WEIGHTED_PLAN_ID = "stage512a_offline_exact_v2_w64_256m_weighted_v1"
+STAGE512A_WEIGHTED_STAGE = "512a"
+STAGE512A_WEIGHTED_ELIGIBILITY = "elig_512"
+STAGE512A_WEIGHTED_PLAN_HASH = (
+    "7295ca937d5002a0cf5e207c1d466c5992352e395adc9ae1c33f3cb616f675db"
+)
+STAGE512A_WEIGHTED_CATALOG_HASH = STAGE512A_W64_CATALOG_HASH
+STAGE512A_WEIGHTED_PLAN_HEADER_SHA256 = (
+    "dc994b05147e33ee7515a986b3edb48e42c777b9257bc663dfa78c35a77a892d"
+)
+STAGE512A_WEIGHTED_CATALOG_HEADER_SHA256 = STAGE512A_W64_CATALOG_HEADER_SHA256
+STAGE512A_WEIGHTED_TEXTATLAS_JPEG_EOI_REPAIRS: Mapping[
+    int, TextAtlasJpegEoiRepair
+] = MappingProxyType(dict(STAGE512A_W64_TEXTATLAS_JPEG_EOI_REPAIRS))
+STAGE512A_WEIGHTED_TEXTATLAS_FORMAL_EXPOSURES: Mapping[int, int] = MappingProxyType(
+    {68_973_396: 3, 69_010_633: 4, 70_063_978: 3}
+)
+STAGE512A_WEIGHTED_TEXTATLAS_TOTAL_FORMAL_EXPOSURES = 10
+
+
 class ImageExceptionBindingError(ValueError):
     pass
 
@@ -111,8 +261,59 @@ class ImageExceptionMismatchError(ValueError):
     pass
 
 
+_EMPTY_EXCEPTIONS: Mapping[int, TextAtlasJpegEoiRepair] = MappingProxyType({})
+
+# Layout mirrors bind_image_exceptions arguments and ends with its returned
+# mapping.  plan_id, plan_hash, and plan-header SHA are independently unique
+# production signals; mixing signals from two profiles is always fatal.
+_PROFILES = (
+    (
+        STAGE,
+        ELIGIBILITY,
+        PLAN_ID,
+        PLAN_HASH,
+        CATALOG_HASH,
+        PLAN_HEADER_SHA256,
+        CATALOG_HEADER_SHA256,
+        TEXTATLAS_JPEG_EOI_REPAIRS,
+    ),
+    (
+        STAGE512A_STAGE,
+        STAGE512A_ELIGIBILITY,
+        STAGE512A_PLAN_ID,
+        STAGE512A_PLAN_HASH,
+        STAGE512A_CATALOG_HASH,
+        STAGE512A_PLAN_HEADER_SHA256,
+        STAGE512A_CATALOG_HEADER_SHA256,
+        STAGE512A_TEXTATLAS_JPEG_EOI_REPAIRS,
+    ),
+    (
+        STAGE512A_W64_STAGE,
+        STAGE512A_W64_ELIGIBILITY,
+        STAGE512A_W64_PLAN_ID,
+        STAGE512A_W64_PLAN_HASH,
+        STAGE512A_W64_CATALOG_HASH,
+        STAGE512A_W64_PLAN_HEADER_SHA256,
+        STAGE512A_W64_CATALOG_HEADER_SHA256,
+        STAGE512A_W64_TEXTATLAS_JPEG_EOI_REPAIRS,
+    ),
+    (
+        STAGE512A_WEIGHTED_STAGE,
+        STAGE512A_WEIGHTED_ELIGIBILITY,
+        STAGE512A_WEIGHTED_PLAN_ID,
+        STAGE512A_WEIGHTED_PLAN_HASH,
+        STAGE512A_WEIGHTED_CATALOG_HASH,
+        STAGE512A_WEIGHTED_PLAN_HEADER_SHA256,
+        STAGE512A_WEIGHTED_CATALOG_HEADER_SHA256,
+        STAGE512A_WEIGHTED_TEXTATLAS_JPEG_EOI_REPAIRS,
+    ),
+)
+
+
 def bind_image_exceptions(
     *,
+    stage: str,
+    eligibility: str,
     plan_id: str,
     plan_hash: str,
     catalog_hash: str,
@@ -121,35 +322,47 @@ def bind_image_exceptions(
     decode_domain: Callable[[int], str],
 ) -> Mapping[int, TextAtlasJpegEoiRepair]:
     actual = (
+        stage,
+        eligibility,
         plan_id,
         plan_hash,
         catalog_hash,
         plan_header_sha256,
         catalog_header_sha256,
     )
-    expected = (
-        PLAN_ID,
-        PLAN_HASH,
-        CATALOG_HASH,
-        PLAN_HEADER_SHA256,
-        CATALOG_HEADER_SHA256,
+    matches = tuple(
+        profile
+        for profile in _PROFILES
+        if (
+            plan_id == profile[2]
+            or plan_hash == profile[3]
+            or plan_header_sha256 == profile[5]
+        )
     )
-    production_signal = plan_id == PLAN_ID or plan_header_sha256 == PLAN_HEADER_SHA256
-    if not production_signal:
-        return MappingProxyType({})
+    # Catalogs may be shared by diagnostic plans, so catalog identity alone is
+    # deliberately not an activation signal.
+    if not matches:
+        return _EMPTY_EXCEPTIONS
+    if len(matches) != 1:
+        raise ImageExceptionBindingError(
+            "image exception production signals select conflicting profiles"
+        )
+    profile = matches[0]
+    expected = profile[:7]
     if actual != expected:
         raise ImageExceptionBindingError(
             "image exception production binding mismatch: "
             f"actual={actual!r}, expected={expected!r}"
         )
-    for row_id, repair in TEXTATLAS_JPEG_EOI_REPAIRS.items():
+    repairs = profile[7]
+    for row_id, repair in repairs.items():
         domain = decode_domain(row_id)
         if domain != "textatlas":
             raise ImageExceptionBindingError(
                 f"image exception row {row_id}/{repair.uid} decodes to "
                 f"{domain!r}, not textatlas"
             )
-    return TEXTATLAS_JPEG_EOI_REPAIRS
+    return repairs
 
 
 def apply_textatlas_jpeg_eoi_repair(
@@ -212,13 +425,37 @@ __all__ = [
     "ALLOWLIST_SUGGESTION_SHA256",
     "CATALOG_HASH",
     "CATALOG_HEADER_SHA256",
+    "ELIGIBILITY",
     "INTEGRITY_AUDIT_SHA256",
     "ImageExceptionBindingError",
     "ImageExceptionMismatchError",
     "PLAN_HEADER_SHA256",
     "PLAN_HASH",
     "PLAN_ID",
+    "STAGE",
     "REPAIRED_PAYLOAD_BINDINGS_SHA256",
+    "STAGE512A_ALLOWLIST_SUGGESTION_SHA256",
+    "STAGE512A_CATALOG_HASH",
+    "STAGE512A_CATALOG_HEADER_SHA256",
+    "STAGE512A_ELIGIBILITY",
+    "STAGE512A_FINAL_REVIEW_SHA256",
+    "STAGE512A_INTEGRITY_AUDIT_SHA256",
+    "STAGE512A_PLAN_HASH",
+    "STAGE512A_PLAN_HEADER_SHA256",
+    "STAGE512A_PLAN_ID",
+    "STAGE512A_REPAIRED_PAYLOAD_BINDINGS_SHA256",
+    "STAGE512A_STAGE",
+    "STAGE512A_TEXTATLAS_FORMAL_EXPOSURES",
+    "STAGE512A_TEXTATLAS_JPEG_EOI_REPAIRS",
+    "STAGE512A_TEXTATLAS_TOTAL_FORMAL_EXPOSURES",
+    "STAGE512A_W64_CATALOG_HASH",
+    "STAGE512A_W64_CATALOG_HEADER_SHA256",
+    "STAGE512A_W64_ELIGIBILITY",
+    "STAGE512A_W64_PLAN_HASH",
+    "STAGE512A_W64_PLAN_HEADER_SHA256",
+    "STAGE512A_W64_PLAN_ID",
+    "STAGE512A_W64_STAGE",
+    "STAGE512A_W64_TEXTATLAS_JPEG_EOI_REPAIRS",
     "TEXTATLAS_JPEG_EOI_REPAIRS",
     "TextAtlasJpegEoiRepair",
     "apply_textatlas_jpeg_eoi_repair",

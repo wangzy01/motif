@@ -16,7 +16,9 @@ import io
 import json
 import os
 import re
+import stat
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -45,6 +47,232 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _fsync_dir(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _absolute_lexical(path: Path) -> Path:
+    """Return an absolute path without following symlinks."""
+
+    return Path(os.path.abspath(os.fspath(path.expanduser())))
+
+
+def _require_real_directory(path: Path, label: str) -> Path:
+    lexical = _absolute_lexical(path)
+    try:
+        resolved = lexical.resolve(strict=True)
+        metadata = os.lstat(lexical)
+    except (FileNotFoundError, OSError) as exc:
+        raise AuditError(f"{label} is not an existing real directory: {lexical}") from exc
+    if resolved != lexical or stat.S_ISLNK(metadata.st_mode):
+        raise AuditError(f"{label} must not contain or be a symlink: {lexical}")
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise AuditError(f"{label} is not a directory: {lexical}")
+    return lexical
+
+
+def _bind_output(path: Path, audit_root: Path, label: str) -> Path:
+    lexical = _absolute_lexical(path)
+    if lexical.parent != audit_root:
+        raise AuditError(
+            f"{label} must be a direct child of audit_root: {lexical} != {audit_root}"
+        )
+    try:
+        metadata = os.lstat(lexical)
+    except FileNotFoundError:
+        return lexical
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise AuditError(f"{label} must be absent or a regular non-symlink file: {lexical}")
+    return lexical
+
+
+def _verify_regular_bytes(path: Path, expected: bytes) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise AuditError(f"cannot safely reopen existing output: {path}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise AuditError(f"existing output is not a regular file: {path}")
+        chunks: list[bytes] = []
+        remaining = len(expected) + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        observed = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    if observed != expected:
+        raise AuditError(
+            f"existing partial-set member differs byte-for-byte; refusing recovery: {path}"
+        )
+
+
+def _publish_or_verify_bytes(path: Path, raw: bytes) -> None:
+    """Publish once, or verify an identical crash-recovery member byte-for-byte."""
+
+    temporary = path.with_name(
+        f".{path.name}.tmp.{os.getpid()}.{os.urandom(8).hex()}"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", buffering=0) as handle:
+            descriptor = -1
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError:
+            _verify_regular_bytes(path, raw)
+        _fsync_dir(path.parent)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink(missing_ok=True)
+        finally:
+            _fsync_dir(path.parent)
+
+
+def _json_bytes(value: Any) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+
+
+def _required(mapping: Mapping[str, Any], key: str, label: str) -> Any:
+    if key not in mapping:
+        raise AuditError(f"required field missing: {label}.{key}")
+    return mapping[key]
+
+
+def _strict_int(mapping: Mapping[str, Any], key: str, label: str) -> int:
+    value = _required(mapping, key, label)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AuditError(f"{label}.{key} must be a non-negative integer")
+    return value
+
+
+def validate_payload_shards(
+    shards: list[dict[str, Any]],
+    *,
+    shard_count: int,
+    plan_json_sha256: str,
+    plan_bitmap_sha256: str,
+    catalog_header_sha256: str,
+    catalog_textatlas_sha256: str,
+) -> dict[str, Any]:
+    """Fail-closed validation of every payload-shard schema and provenance."""
+
+    if shard_count <= 0 or len(shards) != shard_count:
+        raise AuditError(
+            f"payload shard file count drift: {len(shards)} != {shard_count}"
+        )
+    indexes: list[int] = []
+    modes: set[str] = set()
+    checked_unique = 0
+    checked_files = 0
+    source_failures = 0
+    candidates: list[dict[str, Any]] = []
+    expected_provenance = {
+        "plan_json_sha256": plan_json_sha256,
+        "plan_bitmap_sha256": plan_bitmap_sha256,
+        "catalog_header_sha256": catalog_header_sha256,
+        "catalog_textatlas_sha256": catalog_textatlas_sha256,
+    }
+    for position, shard in enumerate(shards):
+        label = f"payload_shards[{position}]"
+        if not isinstance(shard, Mapping):
+            raise AuditError(f"{label} must be an object")
+        if _required(shard, "status", label) != "PASS":
+            raise AuditError(f"{label} status drift")
+        if _required(shard, "audit", label) != "offline_arb_textatlas_planned_payloads_v2":
+            raise AuditError(f"{label} audit schema drift")
+        if _required(shard, "read_only", label) is not True:
+            raise AuditError(f"{label} must be read_only=true")
+        index = _strict_int(shard, "shard_index", label)
+        if _strict_int(shard, "shard_count", label) != shard_count:
+            raise AuditError(f"{label} shard_count drift")
+        indexes.append(index)
+        mode = _required(shard, "signature_mode", label)
+        if not isinstance(mode, str):
+            raise AuditError(f"{label}.signature_mode must be a string")
+        modes.add(mode)
+        provenance = _required(shard, "provenance", label)
+        if not isinstance(provenance, Mapping):
+            raise AuditError(f"{label}.provenance must be an object")
+        for key, expected in expected_provenance.items():
+            if _required(provenance, key, f"{label}.provenance") != expected:
+                raise AuditError(f"{label} {key} provenance drift")
+        summary = _required(shard, "summary", label)
+        if not isinstance(summary, Mapping):
+            raise AuditError(f"{label}.summary must be an object")
+        checked_unique += _strict_int(summary, "planned_unique_rows_checked", f"{label}.summary")
+        checked_files += _strict_int(summary, "source_files_checked", f"{label}.summary")
+        shard_source_failures = _strict_int(
+            summary, "strict_decode_failures", f"{label}.summary"
+        )
+        shard_signature_count = _strict_int(
+            summary, "signature_candidates", f"{label}.summary"
+        )
+        shard_candidate_failures = _strict_int(
+            summary,
+            "strict_decode_failures_among_candidates",
+            f"{label}.summary",
+        )
+        raw_candidates = _required(shard, "signature_candidates", label)
+        if not isinstance(raw_candidates, list) or any(
+            not isinstance(candidate, dict) for candidate in raw_candidates
+        ):
+            raise AuditError(f"{label}.signature_candidates must be a list of objects")
+        if shard_signature_count != len(raw_candidates):
+            raise AuditError(f"{label} signature candidate count mismatch")
+        if mode == "strict_decode_failure_all":
+            if not (
+                shard_source_failures
+                == shard_candidate_failures
+                == shard_signature_count
+            ):
+                raise AuditError(f"{label} strict/raw/signature count mismatch")
+            if any(candidate.get("strict_decode_ok") is not False for candidate in raw_candidates):
+                raise AuditError(f"{label} strict candidate unexpectedly reports success")
+        source_failures += shard_source_failures
+        candidates.extend(raw_candidates)
+    if sorted(indexes) != list(range(shard_count)):
+        raise AuditError(f"payload shard index coverage drift: {indexes!r}")
+    if len(modes) != 1:
+        raise AuditError(f"payload shard signature-mode drift: {modes!r}")
+    mode = next(iter(modes))
+    if mode not in {
+        "exact_32768_missing_eoi",
+        "jpeg_missing_eoi",
+        "strict_decode_failure_all",
+    }:
+        raise AuditError(f"unsupported signature mode: {mode}")
+    return {
+        "signature_mode": mode,
+        "checked_unique": checked_unique,
+        "checked_files": checked_files,
+        "source_reported_strict_decode_failures": source_failures,
+        "candidates": candidates,
+    }
 
 
 def _decode(raw: bytes, *, allow_truncated: bool) -> dict[str, Any]:
@@ -199,7 +427,7 @@ def _plan_coordinates(
 ) -> dict[int, list[dict[str, Any]]]:
     ids = np.asarray(sorted(set(int(value) for value in row_ids)), dtype=np.int64)
     if ids.size == 0:
-        raise AuditError("no signature candidates to map")
+        return {}
     total_steps = int(plan["total_steps"])
     block_steps = int(plan["block_steps"])
     blocks = (total_steps + block_steps - 1) // block_steps
@@ -252,12 +480,24 @@ def _args() -> argparse.Namespace:
             "strict-decode failures that are not eligible for JPEG EOI repair"
         ),
     )
+    parser.add_argument(
+        "--receipt-output",
+        type=Path,
+        default=None,
+        help="optional immutable SHA/provenance receipt for all published evidence",
+    )
+    parser.add_argument(
+        "--success-output",
+        type=Path,
+        default=None,
+        help="optional immutable completion marker; requires --receipt-output",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = _args()
-    audit_root = args.audit_root.expanduser().resolve(strict=True)
+    audit_root = _require_real_directory(args.audit_root, "audit_root")
     plan_audit_root = (
         args.plan_audit_root.expanduser().resolve(strict=True)
         if args.plan_audit_root is not None
@@ -265,69 +505,115 @@ def main() -> int:
     )
     catalog_root = args.catalog_root.expanduser().resolve(strict=True)
     plan_root = args.plan_root.expanduser().resolve(strict=True)
-    output = args.output.expanduser().resolve(strict=False)
-    allowlist_output = args.allowlist_output.expanduser().resolve(strict=False)
+    output = _bind_output(args.output, audit_root, "output")
+    allowlist_output = _bind_output(
+        args.allowlist_output, audit_root, "allowlist_output"
+    )
     neutral_output = (
-        args.neutral_output.expanduser().resolve(strict=False)
+        _bind_output(args.neutral_output, audit_root, "neutral_output")
         if args.neutral_output is not None
         else None
     )
+    receipt_output = (
+        _bind_output(args.receipt_output, audit_root, "receipt_output")
+        if args.receipt_output is not None
+        else None
+    )
+    success_output = (
+        _bind_output(args.success_output, audit_root, "success_output")
+        if args.success_output is not None
+        else None
+    )
+    if (receipt_output is None) != (success_output is None):
+        raise AuditError("--receipt-output and --success-output are all-or-none")
     output_paths = [output, allowlist_output]
     if neutral_output is not None:
         output_paths.append(neutral_output)
-    for path in output_paths:
-        if path.exists() or path.is_symlink():
-            raise AuditError(f"refusing to overwrite output: {path}")
+    if receipt_output is not None and success_output is not None:
+        output_paths.extend((receipt_output, success_output))
+    if len(set(output_paths)) != len(output_paths):
+        raise AuditError("all output paths must be distinct")
 
     plan_rows_path = plan_audit_root / "plan_rows.json"
     plan_rows = _json(plan_rows_path)
+    if plan_rows.get("status") != "PASS":
+        raise AuditError("plan-row audit status drift")
+    if plan_rows.get("audit") != "offline_arb_textatlas_plan_rows_v1":
+        raise AuditError("plan-row audit schema drift")
+    if plan_rows.get("read_only") is not True:
+        raise AuditError("plan-row audit must be read_only=true")
+    plan_json_sha = _sha256(plan_rows_path)
+    bitmap_section = plan_rows.get("bitmap")
+    if not isinstance(bitmap_section, Mapping):
+        raise AuditError("plan-row audit bitmap section missing")
+    bitmap_path = Path(str(_required(bitmap_section, "path", "plan_rows.bitmap"))).resolve(
+        strict=True
+    )
+    expected_bitmap_path = (plan_audit_root / "plan_rows_bitmap.npz").resolve(
+        strict=True
+    )
+    if bitmap_path != expected_bitmap_path:
+        raise AuditError("plan-row audit bitmap path drift")
+    plan_bitmap_sha = _sha256(bitmap_path)
+    if plan_bitmap_sha != _required(bitmap_section, "sha256", "plan_rows.bitmap"):
+        raise AuditError("plan-row audit bitmap SHA drift")
+
     shard_paths = [audit_root / f"payload_shard_{index}.json" for index in range(args.shard_count)]
     shards = [_json(path) for path in shard_paths]
-    if any(item.get("status") != "PASS" for item in shards):
-        raise AuditError("payload shard status drift")
-    if sorted(int(item["shard_index"]) for item in shards) != list(range(args.shard_count)):
-        raise AuditError("payload shard index coverage drift")
-    if any(int(item["shard_count"]) != args.shard_count for item in shards):
-        raise AuditError("payload shard-count drift")
-    signature_modes = {
-        str(item.get("signature_mode", "exact_32768_missing_eoi")) for item in shards
-    }
-    if len(signature_modes) != 1:
-        raise AuditError(f"payload shard signature-mode drift: {signature_modes!r}")
-    signature_mode = next(iter(signature_modes))
-    if signature_mode not in {
-        "exact_32768_missing_eoi",
-        "jpeg_missing_eoi",
-        "strict_decode_failure_all",
-    }:
-        raise AuditError(f"unsupported signature mode: {signature_mode}")
-    plan_bitmap_sha = plan_rows["bitmap"]["sha256"]
-    if any(item["provenance"]["plan_bitmap_sha256"] != plan_bitmap_sha for item in shards):
-        raise AuditError("payload shard plan bitmap drift")
-    expected_unique = int(plan_rows["textatlas"]["total_plan_unique_rows"])
-    checked_unique = sum(int(item["summary"]["planned_unique_rows_checked"]) for item in shards)
-    checked_files = sum(int(item["summary"]["source_files_checked"]) for item in shards)
+    catalog_header_path = catalog_root / "header.json"
+    catalog_header = _json(catalog_header_path)
+    plan_header_path = plan_root / "header.json"
+    plan_header = _json(plan_header_path)
+    catalog_header_sha = _sha256(catalog_header_path)
+    if catalog_header_sha != plan_rows["catalog"]["header_sha256"]:
+        raise AuditError("catalog header changed after plan scan")
+    if _sha256(plan_header_path) != plan_rows["plan"]["header_sha256"]:
+        raise AuditError("plan header changed after plan scan")
+    catalog_files = catalog_header.get("files")
+    if not isinstance(catalog_files, Mapping) or not isinstance(
+        catalog_files.get("textatlas"), Mapping
+    ):
+        raise AuditError("catalog TextAtlas file entry missing")
+    textatlas_entry = catalog_files["textatlas"]
+    catalog_textatlas_path = catalog_root / str(
+        _required(textatlas_entry, "name", "catalog.files.textatlas")
+    )
+    catalog_textatlas_sha = _sha256(catalog_textatlas_path)
+    if catalog_textatlas_sha != _required(
+        textatlas_entry, "sha256", "catalog.files.textatlas"
+    ):
+        raise AuditError("live TextAtlas catalog file SHA drift")
+
+    shard_validation = validate_payload_shards(
+        shards,
+        shard_count=args.shard_count,
+        plan_json_sha256=plan_json_sha,
+        plan_bitmap_sha256=plan_bitmap_sha,
+        catalog_header_sha256=catalog_header_sha,
+        catalog_textatlas_sha256=catalog_textatlas_sha,
+    )
+    signature_mode = str(shard_validation["signature_mode"])
+    if not isinstance(plan_rows.get("textatlas"), Mapping):
+        raise AuditError("plan-row audit TextAtlas summary missing")
+    expected_unique = _strict_int(
+        plan_rows["textatlas"], "total_plan_unique_rows", "plan_rows.textatlas"
+    )
+    checked_unique = int(shard_validation["checked_unique"])
+    checked_files = int(shard_validation["checked_files"])
     if checked_unique != expected_unique or checked_files != 595:
         raise AuditError(
-            f"payload shard coverage drift rows={checked_unique}/{expected_unique}, files={checked_files}/595"
+            f"payload shard coverage drift rows={checked_unique}/{expected_unique}, "
+            f"files={checked_files}/595"
         )
-    raw_candidates = [item for shard in shards for item in shard["signature_candidates"]]
+    raw_candidates = list(shard_validation["candidates"])
     raw_candidates.sort(key=lambda item: int(item["row_id"]))
     row_ids = [int(item["row_id"]) for item in raw_candidates]
     if len(row_ids) != len(set(row_ids)):
         raise AuditError("duplicate candidate row across shards")
 
-    catalog_header_path = catalog_root / "header.json"
-    catalog_header = _json(catalog_header_path)
-    plan_header_path = plan_root / "header.json"
-    plan_header = _json(plan_header_path)
-    if _sha256(catalog_header_path) != plan_rows["catalog"]["header_sha256"]:
-        raise AuditError("catalog header changed after plan scan")
-    if _sha256(plan_header_path) != plan_rows["plan"]["header_sha256"]:
-        raise AuditError("plan header changed after plan scan")
     textatlas_base = int(plan_rows["catalog"]["textatlas_row_base"])
     catalog_rows = _catalog_candidate_rows(
-        catalog_root / str(catalog_header["files"]["textatlas"]["name"]),
+        catalog_textatlas_path,
         row_ids,
         textatlas_base=textatlas_base,
     )
@@ -449,21 +735,37 @@ def main() -> int:
         "catalog_textatlas_rows_checked": checked_unique,
         "source_files_checked": checked_files,
         "source_row_groups_checked": sum(
-            int(item["summary"]["source_row_groups_checked"]) for item in shards
+            _strict_int(item["summary"], "source_row_groups_checked", "payload_shard.summary")
+            for item in shards
         ),
-        "exact_32768_rows": sum(int(item["summary"]["exact_32768_rows"]) for item in shards),
+        "exact_32768_rows": sum(
+            _strict_int(item["summary"], "exact_32768_rows", "payload_shard.summary")
+            for item in shards
+        ),
         "exact_32768_with_eoi_rows": sum(
-            int(item["summary"]["exact_32768_with_eoi_rows"]) for item in shards
+            _strict_int(
+                item["summary"],
+                "exact_32768_with_eoi_rows",
+                "payload_shard.summary",
+            )
+            for item in shards
         ),
-        "jpeg_rows": sum(int(item["summary"].get("jpeg_rows", 0)) for item in shards),
+        "jpeg_rows": sum(
+            _strict_int(item["summary"], "jpeg_rows", "payload_shard.summary")
+            for item in shards
+        ),
         "jpeg_missing_eoi_rows": sum(
-            int(item["summary"].get("jpeg_missing_eoi_rows", 0)) for item in shards
+            _strict_int(
+                item["summary"], "jpeg_missing_eoi_rows", "payload_shard.summary"
+            )
+            for item in shards
         ),
         "strict_decode_rows": sum(
-            int(item["summary"].get("strict_decode_rows", 0)) for item in shards
+            _strict_int(item["summary"], "strict_decode_rows", "payload_shard.summary")
+            for item in shards
         ),
-        "source_reported_strict_decode_failures": sum(
-            int(item["summary"].get("strict_decode_failures", 0)) for item in shards
+        "source_reported_strict_decode_failures": int(
+            shard_validation["source_reported_strict_decode_failures"]
         ),
         "signature_mode": signature_mode,
         "signature_candidates": len(candidates),
@@ -492,6 +794,17 @@ def main() -> int:
         "formal_candidate_exposures": sum(item["formal_plan_exposures"] for item in candidates),
         "all_plan_candidate_exposures": sum(item["total_plan_exposures"] for item in candidates),
     }
+    if signature_mode == "strict_decode_failure_all" and not (
+        summary["source_reported_strict_decode_failures"]
+        == summary["raw_strict_decode_failures"]
+        == summary["signature_candidates"]
+    ):
+        raise AuditError(
+            "strict/raw/signature aggregate mismatch: "
+            f"source={summary['source_reported_strict_decode_failures']}, "
+            f"raw={summary['raw_strict_decode_failures']}, "
+            f"candidates={summary['signature_candidates']}"
+        )
     result = {
         "status": "PASS",
         "audit": {
@@ -500,22 +813,53 @@ def main() -> int:
             "strict_decode_failure_all": "offline_arb_textatlas_full_strict_decode_close_v1",
         }[signature_mode],
         "read_only": True,
+        "plan_contract": {
+            "plan_horizon": int(plan_header["total_steps"]),
+            "formal_steps": int(args.formal_steps),
+            "world_size": int(plan_header["world_size"]),
+            "per_rank_bs": int(plan_header["per_rank_bs"]),
+            "global_batch": int(plan_header["world_size"])
+            * int(plan_header["per_rank_bs"]),
+            "formal_exposures": int(args.formal_steps)
+            * int(plan_header["world_size"])
+            * int(plan_header["per_rank_bs"]),
+        },
         "scope": {
-            "exact_32768_missing_eoi": "all 4,687,038 planned TextAtlas rows; exact 32768-byte/no-JPEG-EOI signature",
-            "jpeg_missing_eoi": "all 4,687,038 planned TextAtlas rows; JPEG SOI present and JPEG EOI absent, any payload length",
-            "strict_decode_failure_all": "all 4,687,038 planned TextAtlas rows; runtime-equivalent strict Pillow RGB conversion",
+            "exact_32768_missing_eoi": (
+                f"all {expected_unique:,} planned TextAtlas rows; "
+                "exact 32768-byte/no-JPEG-EOI signature"
+            ),
+            "jpeg_missing_eoi": (
+                f"all {expected_unique:,} planned TextAtlas rows; JPEG SOI "
+                "present and JPEG EOI absent, any payload length"
+            ),
+            "strict_decode_failure_all": (
+                f"all {expected_unique:,} planned TextAtlas rows; "
+                "runtime-equivalent strict Pillow RGB conversion"
+            ),
         }[signature_mode],
         "provenance": {
             "plan_id": plan_header.get("plan_id"),
             "plan_hash": plan_header.get("plan_hash"),
             "plan_header_sha256": _sha256(plan_header_path),
             "catalog_hash": catalog_header.get("catalog_hash"),
-            "catalog_header_sha256": _sha256(catalog_header_path),
-            "plan_rows_json_sha256": _sha256(plan_rows_path),
+            "catalog_header_sha256": catalog_header_sha,
+            "catalog_textatlas_sha256": catalog_textatlas_sha,
+            "plan_rows_json_sha256": plan_json_sha,
             "plan_bitmap_sha256": plan_bitmap_sha,
             "payload_shards": [
                 {"path": str(path), "sha256": _sha256(path)} for path in shard_paths
             ],
+            "stage_identity": {
+                key: plan_header.get(key)
+                for key in (
+                    "stage",
+                    "image_size",
+                    "eligibility",
+                    "requires_nl",
+                    "anime_nl_filter_applied",
+                )
+            },
         },
         "summary": summary,
         "candidates": candidates,
@@ -632,18 +976,38 @@ def main() -> int:
                 for item in neutral_rows
             ],
         }
-    output.parent.mkdir(parents=True, exist_ok=True)
     values = [(output, result), (allowlist_output, allowlist)]
     if neutral_output is not None:
-        assert neutral_suggestion is not None
+        if neutral_suggestion is None:
+            raise AuditError(
+                "internal contract error: strict_decode_failure_all requires neutral suggestion"
+            )
         values.append((neutral_output, neutral_suggestion))
-    for path, value in values:
-        temporary = path.with_name(path.name + f".tmp.{os.getpid()}")
-        temporary.write_text(
-            json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+    serialized_values = [(path, value, _json_bytes(value)) for path, value in values]
+    for path, _value, raw in serialized_values:
+        _publish_or_verify_bytes(path, raw)
+    if receipt_output is not None and success_output is not None:
+        receipt = {
+            "status": "PASS",
+            "schema_version": "offline_arb_textatlas_integrity_evidence_receipt_v1",
+            "read_only": True,
+            "runtime_policy_activated": False,
+            "artifacts": [
+                {
+                    "path": str(path),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "status": value.get("status"),
+                }
+                for path, value, raw in serialized_values
+            ],
+        }
+        receipt_raw = _json_bytes(receipt)
+        _publish_or_verify_bytes(receipt_output, receipt_raw)
+        receipt_sha = hashlib.sha256(receipt_raw).hexdigest()
+        _publish_or_verify_bytes(
+            success_output,
+            f"PASS|SUGGESTION_ONLY|{receipt_sha}\n".encode("ascii"),
         )
-        os.replace(temporary, path)
     print(json.dumps({"status": "PASS", **summary}, sort_keys=True))
     return 0
 

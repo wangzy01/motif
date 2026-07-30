@@ -971,7 +971,7 @@ def _test_gpic_memory_reader(workspace: Path) -> None:
 
     def pair(step: int, slot: int, row_id: int, path: Path) -> tuple[Any, dict[str, str]]:
         return (
-            _PlannedItem(step, slot, row_id, "gpic", 2, 0),
+            _PlannedItem(step, slot, row_id, "gpic", 2, 0, 0),
             {"image_path": str(path)},
         )
 

@@ -39,6 +39,8 @@ from training.dataline_offline.gpic_release_view import (
 
 
 SCHEMA_VERSION = "offline_gpic_blob_v1"
+REUSE_SCHEMA_VERSION = "offline_gpic_blob_reuse_v1"
+REUSE_PROOF_SCHEMA_VERSION = "offline_gpic_payload_reuse_proof_v1"
 VERIFY_SCHEMA_VERSION = "offline_gpic_blob_verify_v1"
 LAYOUT_VERSION = "offline_gpic_blob_index_le_v1"
 BACKEND = "mountpoint_s3"
@@ -57,6 +59,7 @@ _MANIFEST_KEYS = {
     "verification",
     "manifest_sha256",
 }
+_REUSE_MANIFEST_KEYS = _MANIFEST_KEYS | {"payload_reuse"}
 _RELEASE_KEYS = {
     "backend",
     "catalog",
@@ -86,6 +89,41 @@ _S3_INIT_KEYS = {"path", "bytes", "raw_sha256"}
 _FILE_KEYS = {"bytes", "sha256"}
 _BLOB_KEYS = {"blob_id", "name", "bytes", "sha256"}
 _VERIFICATION_BINDING_KEYS = {"path", "bytes", "sha256", "schema_version"}
+_SOURCE_DOCUMENT_KEYS = {"name", "bytes", "raw_sha256", "self_sha256"}
+_REUSE_PROOF_KEYS = {
+    "schema_version",
+    "status",
+    "generated_at",
+    "source_canonical_manifest",
+    "source_verifier_summary",
+    "source_catalog",
+    "source_dense_index",
+    "source_s3_root",
+    "source_blob_set_sha256",
+    "source_payload_bytes",
+    "target_catalog",
+    "target_dense_index",
+    "target_release_sha256",
+    "target_row_id_start",
+    "target_row_id_stop_exclusive",
+    "target_row_count",
+    "join_key",
+    "source_rows_scanned",
+    "target_rows_verified",
+    "missing_uid",
+    "duplicate_source_uid",
+    "duplicate_source_image_path",
+    "duplicate_target_uid",
+    "duplicate_target_image_path",
+    "image_path_mismatches",
+    "source_index_row_mismatches",
+    "target_index_row_mismatches",
+    "locator_mismatches",
+    "segment_binding_mismatches",
+    "producer_receipt_sha256",
+    "verifier_code_sha256",
+    "proof_sha256",
+}
 _VERIFY_REPORT_KEYS = {
     "schema_version",
     "status",
@@ -133,6 +171,12 @@ def manifest_self_hash(value: Mapping[str, Any]) -> str:
 def report_self_hash(value: Mapping[str, Any]) -> str:
     core = dict(value)
     core.pop("report_sha256", None)
+    return canonical_json_sha256(core)
+
+
+def reuse_proof_self_hash(value: Mapping[str, Any]) -> str:
+    core = dict(value)
+    core.pop("proof_sha256", None)
     return canonical_json_sha256(core)
 
 
@@ -482,7 +526,10 @@ class _BlobFDCache:
             for directory_descriptor in reversed(opened_directories):
                 os.close(directory_descriptor)
         try:
-            assert descriptor is not None
+            if descriptor is None:
+                raise GpicBlobError(
+                    f"S3 blob descriptor was not opened for blob_id={blob.blob_id}"
+                )
             metadata = os.fstat(descriptor)
             if (
                 not stat.S_ISREG(metadata.st_mode)
@@ -629,9 +676,15 @@ class GpicBlobOverlay:
         manifest = _parse_canonical_json(
             manifest_raw, self.manifest_path, "GPIC manifest"
         )
-        _exact_keys(manifest, _MANIFEST_KEYS, "GPIC manifest")
+        manifest_schema = manifest.get("schema_version")
+        reuse_mode = manifest_schema == REUSE_SCHEMA_VERSION
+        _exact_keys(
+            manifest,
+            _REUSE_MANIFEST_KEYS if reuse_mode else _MANIFEST_KEYS,
+            "GPIC manifest",
+        )
         if (
-            manifest.get("schema_version") != SCHEMA_VERSION
+            manifest_schema not in {SCHEMA_VERSION, REUSE_SCHEMA_VERSION}
             or manifest.get("status") != "PASS"
             or not isinstance(manifest.get("generated_at"), str)
             or not manifest["generated_at"]
@@ -648,11 +701,21 @@ class GpicBlobOverlay:
                 "GPIC FSx _SUCCESS does not bind the exact manifest file SHA-256"
             )
 
-        # The FSx view is an immutable compatibility projection.  Its local
-        # copies of the production canonical manifest and verifier summary are
-        # part of the trust root, not optional provenance.  Validate them before
-        # opening either the dense index or any S3 blob.
-        self.canonical_manifest_path = self.control_root / "canonical_manifest.json"
+        # Legacy views copy the canonical controls under their historical names.
+        # A reuse view has a different catalog/index authority, so it labels the
+        # copied controls explicitly as source evidence.  The legacy filenames,
+        # exact-set check, and projection path remain byte-for-byte unchanged.
+        canonical_name = (
+            "source_canonical_manifest.json"
+            if reuse_mode
+            else "canonical_manifest.json"
+        )
+        summary_name = (
+            "source_verifier_summary.json"
+            if reuse_mode
+            else "verifier_summary.json"
+        )
+        self.canonical_manifest_path = self.control_root / canonical_name
         canonical_raw, canonical_raw_sha = _read_bound_bytes(
             self.canonical_manifest_path, "GPIC production canonical manifest"
         )
@@ -666,13 +729,13 @@ class GpicBlobOverlay:
                 f"invalid GPIC production canonical manifest: {exc}"
             ) from exc
         canonical_self_sha = canonical["manifest_sha256"]
-        if canonical["build_jobtag"] != self.control_root.name:
+        if not reuse_mode and canonical["build_jobtag"] != self.control_root.name:
             raise GpicBlobError(
                 "GPIC production buildtag must equal the FSx view basename"
             )
 
         self.production_verifier_summary_path = (
-            self.control_root / "verifier_summary.json"
+            self.control_root / summary_name
         )
         summary_raw, _summary_raw_sha = _read_bound_bytes(
             self.production_verifier_summary_path,
@@ -688,20 +751,119 @@ class GpicBlobOverlay:
                 f"invalid GPIC production verifier summary: {exc}"
             ) from exc
 
+        reuse_proof: Mapping[str, Any] | None = None
+        if reuse_mode:
+            reuse_binding = _exact_keys(
+                manifest.get("payload_reuse"),
+                _VERIFICATION_BINDING_KEYS,
+                "GPIC payload reuse binding",
+            )
+            proof_path_raw = reuse_binding.get("path")
+            if (
+                not isinstance(proof_path_raw, str)
+                or not Path(proof_path_raw).is_absolute()
+            ):
+                raise GpicBlobError("GPIC payload reuse proof path must be absolute")
+            proof_declared = Path(proof_path_raw)
+            _regular_metadata(proof_declared, "GPIC payload reuse proof")
+            self.payload_reuse_proof_path = proof_declared.resolve(strict=True)
+            if (
+                str(self.payload_reuse_proof_path) != proof_path_raw
+                or self.payload_reuse_proof_path.parent != self.control_root
+                or self.payload_reuse_proof_path.name != "payload_reuse_proof.json"
+            ):
+                raise GpicBlobError(
+                    "GPIC payload reuse proof must be the canonical direct-child path"
+                )
+            proof_raw, proof_raw_sha = _read_bound_bytes(
+                self.payload_reuse_proof_path, "GPIC payload reuse proof"
+            )
+            if (
+                reuse_binding.get("schema_version") != REUSE_PROOF_SCHEMA_VERSION
+                or _strict_int(reuse_binding.get("bytes"), "GPIC reuse proof bytes", 1)
+                != len(proof_raw)
+                or reuse_binding.get("sha256") != proof_raw_sha
+            ):
+                raise GpicBlobError("GPIC payload reuse proof file binding mismatch")
+            reuse_proof = _parse_canonical_json(
+                proof_raw, self.payload_reuse_proof_path, "GPIC payload reuse proof"
+            )
+            _exact_keys(reuse_proof, _REUSE_PROOF_KEYS, "GPIC payload reuse proof")
+            if (
+                reuse_proof.get("schema_version") != REUSE_PROOF_SCHEMA_VERSION
+                or reuse_proof.get("status") != "PASS"
+                or not isinstance(reuse_proof.get("generated_at"), str)
+                or not reuse_proof["generated_at"]
+                or reuse_proof.get("proof_sha256")
+                != reuse_proof_self_hash(reuse_proof)
+            ):
+                raise GpicBlobError("GPIC payload reuse proof identity/self-hash mismatch")
+
+            source_documents = (
+                (
+                    "source_canonical_manifest",
+                    canonical_name,
+                    canonical_raw,
+                    canonical_raw_sha,
+                    canonical_self_sha,
+                ),
+                (
+                    "source_verifier_summary",
+                    summary_name,
+                    summary_raw,
+                    hashlib.sha256(summary_raw).hexdigest(),
+                    summary["verifier_summary_sha256"],
+                ),
+            )
+            for key, name, raw, raw_sha, self_sha in source_documents:
+                binding = _exact_keys(
+                    reuse_proof.get(key), _SOURCE_DOCUMENT_KEYS, f"GPIC {key}"
+                )
+                expected_binding = {
+                    "name": name,
+                    "bytes": len(raw),
+                    "raw_sha256": raw_sha,
+                    "self_sha256": self_sha,
+                }
+                if dict(binding) != expected_binding:
+                    raise GpicBlobError(f"GPIC reuse proof {key} binding mismatch")
+
         release = _exact_keys(manifest.get("release"), _RELEASE_KEYS, "GPIC release")
+        release_sha = canonical_json_sha256(release)
+        if manifest.get("release_sha256") != release_sha:
+            raise GpicBlobError("GPIC release SHA-256 mismatch")
         try:
-            projected_release = project_release(canonical, self.control_root)
+            projection_root = (
+                Path("/") / str(canonical["build_jobtag"])
+                if reuse_mode
+                else self.control_root
+            )
+            projected_release = project_release(canonical, projection_root)
         except (ReleaseViewError, ValueError, TypeError, KeyError) as exc:
             raise GpicBlobError(
                 f"cannot project GPIC production canonical release: {exc}"
             ) from exc
-        if projected_release != release:
+        if not reuse_mode and projected_release != release:
             raise GpicBlobError(
                 "GPIC compatibility release differs from the canonical projection"
             )
-        release_sha = canonical_json_sha256(release)
-        if manifest.get("release_sha256") != release_sha:
-            raise GpicBlobError("GPIC release SHA-256 mismatch")
+        if reuse_mode:
+            for key in ("backend", "layout", "blobs", "payload_bytes", "blob_set_sha256"):
+                if release.get(key) != projected_release.get(key):
+                    raise GpicBlobError(
+                        f"GPIC reused payload differs from source canonical field {key}"
+                    )
+            source_storage = _exact_keys(
+                projected_release.get("storage"), _STORAGE_KEYS, "GPIC source storage"
+            )
+            target_storage = _exact_keys(
+                release.get("storage"), _STORAGE_KEYS, "GPIC reused storage"
+            )
+            if (
+                target_storage.get("s3_root") != source_storage.get("s3_root")
+                or target_storage.get("s3_init") != source_storage.get("s3_init")
+            ):
+                raise GpicBlobError("GPIC reused S3 payload authority differs from source")
         if release.get("backend") != BACKEND:
             raise GpicBlobError(
                 f"GPIC release backend must be {BACKEND!r}, got {release.get('backend')!r}"
@@ -801,6 +963,55 @@ class GpicBlobOverlay:
             raise GpicBlobError("GPIC payload bytes do not close over declared blobs")
         if release.get("blob_set_sha256") != canonical_json_sha256(canonical_blobs):
             raise GpicBlobError("GPIC blob-set digest mismatch")
+
+        if reuse_mode:
+            if reuse_proof is None:
+                raise GpicBlobError("GPIC reuse manifest has no validated reuse proof")
+            source_storage = _exact_keys(
+                projected_release.get("storage"), _STORAGE_KEYS, "GPIC source storage"
+            )
+            expected_proof = {
+                "source_catalog": projected_release["catalog"],
+                "source_dense_index": projected_release["index"],
+                "source_s3_root": source_storage["s3_root"],
+                "source_blob_set_sha256": projected_release["blob_set_sha256"],
+                "source_payload_bytes": projected_release["payload_bytes"],
+                "target_catalog": dict(catalog_raw),
+                "target_dense_index": dict(index_binding),
+                "target_release_sha256": release_sha,
+                "target_row_id_start": catalog.gpic_row_base,
+                "target_row_id_stop_exclusive": (
+                    catalog.gpic_row_base + catalog.gpic_rows
+                ),
+                "target_row_count": catalog.gpic_rows,
+                "join_key": ["uid", "image_path"],
+                "source_rows_scanned": canonical["rows"],
+                "target_rows_verified": catalog.gpic_rows,
+            }
+            for key, expected in expected_proof.items():
+                if reuse_proof.get(key) != expected:
+                    raise GpicBlobError(
+                        f"GPIC reuse proof mismatch for {key}: "
+                        f"expected={expected!r}, actual={reuse_proof.get(key)!r}"
+                    )
+            zero_fields = (
+                "missing_uid",
+                "duplicate_source_uid",
+                "duplicate_source_image_path",
+                "duplicate_target_uid",
+                "duplicate_target_image_path",
+                "image_path_mismatches",
+                "source_index_row_mismatches",
+                "target_index_row_mismatches",
+                "locator_mismatches",
+                "segment_binding_mismatches",
+            )
+            for key in zero_fields:
+                if _strict_int(reuse_proof.get(key), f"GPIC reuse proof {key}") != 0:
+                    raise GpicBlobError(f"GPIC reuse proof reports nonzero {key}")
+            for key in ("producer_receipt_sha256", "verifier_code_sha256"):
+                if not _is_sha256(reuse_proof.get(key)):
+                    raise GpicBlobError(f"GPIC reuse proof {key} is malformed")
 
         try:
             nofile_soft, nofile_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -1051,13 +1262,16 @@ class GpicBlobOverlay:
 
         expected_control_names = {
             "manifest.json",
-            "canonical_manifest.json",
-            "verifier_summary.json",
+            canonical_name,
+            summary_name,
             "_SUCCESS",
             self.index_path.name,
             self.verifier_report_path.name,
         }
-        if len(expected_control_names) != 6:
+        if reuse_mode:
+            expected_control_names.add("payload_reuse_proof.json")
+        expected_control_count = 7 if reuse_mode else 6
+        if len(expected_control_names) != expected_control_count:
             raise GpicBlobError(
                 "GPIC index/verifier names collide with immutable control names"
             )
@@ -1078,6 +1292,7 @@ class GpicBlobOverlay:
         self.canonical_manifest_sha256 = str(canonical_self_sha)
         self.canonical_manifest_raw_sha256 = canonical_raw_sha
         self.production_verifier_summary = summary
+        self.payload_reuse_proof = reuse_proof
         self.release_sha256 = release_sha
         self.index_sha256 = str(index_sha)
         self.catalog = catalog
@@ -1322,6 +1537,8 @@ __all__ = [
     "INDEX_STRUCT",
     "LAYOUT_VERSION",
     "MAX_SEGMENT_BYTES",
+    "REUSE_PROOF_SCHEMA_VERSION",
+    "REUSE_SCHEMA_VERSION",
     "SCHEMA_VERSION",
     "SELECTION_MODE",
     "VERIFY_SCHEMA_VERSION",
@@ -1329,4 +1546,5 @@ __all__ = [
     "canonical_json_sha256",
     "manifest_self_hash",
     "report_self_hash",
+    "reuse_proof_self_hash",
 ]

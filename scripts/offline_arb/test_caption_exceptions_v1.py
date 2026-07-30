@@ -17,9 +17,11 @@ from training.dataline_offline.caption_exceptions_v1 import (
     CAPTIONLESS_MONET_ROWS,
     CATALOG_HASH,
     CATALOG_HEADER_SHA256,
+    ELIGIBILITY,
     MONET_CAPTION_CODES,
     PLAN_HEADER_SHA256,
     PLAN_ID,
+    STAGE,
     CaptionExceptionBindingError,
     bind_caption_exceptions,
 )
@@ -70,6 +72,8 @@ def run(args: argparse.Namespace) -> None:
 
     decoder = _VirtualRowDecoder(plan_header["domains"], plan_header["N"])
     bound = bind_caption_exceptions(
+        stage=STAGE,
+        eligibility=ELIGIBILITY,
         plan_id=PLAN_ID,
         catalog_hash=CATALOG_HASH,
         plan_header_sha256=PLAN_HEADER_SHA256,
@@ -103,6 +107,8 @@ def run(args: argparse.Namespace) -> None:
         assert dataset._build_caption("monet_real", rec, band, random.Random(0)) == ""
 
     unrelated = bind_caption_exceptions(
+        stage="512a",
+        eligibility="elig_512",
         plan_id="synthetic-test-plan",
         catalog_hash=CATALOG_HASH,
         plan_header_sha256="1" * 64,
@@ -112,6 +118,8 @@ def run(args: argparse.Namespace) -> None:
     assert not unrelated
     expect_error(
         lambda: bind_caption_exceptions(
+            stage=STAGE,
+            eligibility=ELIGIBILITY,
             plan_id=PLAN_ID,
             catalog_hash="0" * 64,
             plan_header_sha256=PLAN_HEADER_SHA256,
@@ -122,6 +130,8 @@ def run(args: argparse.Namespace) -> None:
     )
     expect_error(
         lambda: bind_caption_exceptions(
+            stage=STAGE,
+            eligibility=ELIGIBILITY,
             plan_id=PLAN_ID,
             catalog_hash=CATALOG_HASH,
             plan_header_sha256=PLAN_HEADER_SHA256,
@@ -129,6 +139,18 @@ def run(args: argparse.Namespace) -> None:
             decode_domain=lambda _row_id: "gpic",
         ),
         "not monet_real",
+    )
+    expect_error(
+        lambda: bind_caption_exceptions(
+            stage="512a",
+            eligibility="elig_512",
+            plan_id=PLAN_ID,
+            catalog_hash=CATALOG_HASH,
+            plan_header_sha256=PLAN_HEADER_SHA256,
+            catalog_header_sha256=CATALOG_HEADER_SHA256,
+            decode_domain=lambda _row_id: "monet_real",
+        ),
+        "binding mismatch",
     )
 
     first_id, first_uid = next(iter(CAPTIONLESS_MONET_ROWS.items()))

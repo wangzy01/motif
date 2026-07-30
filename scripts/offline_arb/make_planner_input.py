@@ -14,13 +14,18 @@ N_matrix 的 bucket_h/w 与其一致(不一致即报错——防 N 矩阵与桶�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import stat
 import sys
+from pathlib import Path
 
 import pyarrow.parquet as pq
 from omegaconf import OmegaConf
 
-sys.path.insert(0, "/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
 from training.dataline.config import load_sampling_config          # noqa: E402
 from training.dataline.multi_ar import build_adaptive_buckets, square_index  # noqa: E402
 
@@ -28,11 +33,84 @@ DOMAINS = ["anime", "monet_real", "gpic", "synthetic", "textatlas"]   # 与 N_ma
 R_MAX_DEFAULT = {"anime": 20, "monet_real": 20, "gpic": 20, "synthetic": 200, "textatlas": 200}
 
 
+def _fingerprint(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_mode),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(value.st_ctime_ns),
+    )
+
+
+def _stable_sampling_sha256(
+    path: Path,
+    *,
+    expected_fingerprint: tuple[int, int, int, int, int, int] | None = None,
+) -> tuple[str, tuple[int, int, int, int, int, int]]:
+    """Hash one non-symlink sampling config through a closed file identity."""
+
+    try:
+        path_before = path.lstat()
+    except OSError as exc:
+        raise SystemExit(f"cannot stat sampling config {path}: {exc}") from exc
+    before = _fingerprint(path_before)
+    if not stat.S_ISREG(path_before.st_mode) or path_before.st_size <= 0:
+        raise SystemExit(f"sampling config is not a nonempty regular file: {path}")
+    if expected_fingerprint is not None and before != expected_fingerprint:
+        raise SystemExit("sampling config fingerprint changed across planner load")
+
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb", buffering=0) as handle:
+            fd_before = _fingerprint(os.fstat(handle.fileno()))
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+            fd_after = _fingerprint(os.fstat(handle.fileno()))
+        path_after = _fingerprint(path.lstat())
+    except OSError as exc:
+        raise SystemExit(f"cannot hash sampling config {path}: {exc}") from exc
+    if not (before == fd_before == fd_after == path_after):
+        raise SystemExit("sampling config changed while being hashed")
+    return digest.hexdigest(), before
+
+
+def _validate_stage512a_catalog_sampling(
+    header: dict, mix: dict[str, float], sampling_sha256: str
+) -> None:
+    """Close planner-v2 sampling semantics against the catalog authority."""
+
+    inputs = header.get("inputs")
+    if not isinstance(inputs, dict):
+        raise SystemExit("catalog header inputs must be an object")
+    if inputs.get("sampling_config_sha256") != sampling_sha256:
+        raise SystemExit("sampling config SHA-256 differs from catalog header")
+    catalog_mix = inputs.get("domain_mix")
+    if (
+        not isinstance(catalog_mix, dict)
+        or set(catalog_mix) != set(DOMAINS)
+        or any(type(catalog_mix[domain]) is not float for domain in DOMAINS)
+        or catalog_mix != mix
+    ):
+        raise SystemExit(
+            "sampling domain_mix differs from catalog header: "
+            f"catalog={catalog_mix!r}, live={mix!r}"
+        )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n-matrix", required=True)
     ap.add_argument("--config", default="configs/stage256_redesign_naifu_arb_v1.yaml")
     ap.add_argument("--stage", default="256")
+    ap.add_argument(
+        "--format-version",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="planner contract version; stage512a production must explicitly use 2",
+    )
     ap.add_argument("--total-steps", type=int, required=True)
     ap.add_argument("--world-size", type=int, default=16)
     ap.add_argument("--per-rank-bs", type=int, default=144)
@@ -55,6 +133,11 @@ def main() -> int:
         raise SystemExit("--catalog-header 与 --floor 互斥:catalog N 已是折叠+排除后的最终值")
 
     cfg = OmegaConf.load(args.config)
+    config_stage = str(cfg.dataset.stage)
+    if config_stage != args.stage:
+        raise SystemExit(
+            f"--stage {args.stage!r} != config dataset.stage {config_stage!r}"
+        )
     mar = cfg.dataset.multi_ar
     buckets = build_adaptive_buckets(
         int(mar.target_area), int(mar.divisor),
@@ -62,8 +145,39 @@ def main() -> int:
         max_aspect=float(mar.adaptive_max_aspect))   # no_upscale 是指派期参数,桶表构建不收
     sq = square_index(buckets)
     square_only = [str(d) for d in mar.square_only_domains]
-    samp = load_sampling_config(str(cfg.dataset.sampling_config))
+    sampling_path = Path(str(cfg.dataset.sampling_config))
+    close_catalog_sampling = (
+        args.format_version == 2
+        and args.stage == "512a"
+        and args.catalog_header is not None
+    )
+    sampling_sha256 = None
+    sampling_fingerprint = None
+    if close_catalog_sampling:
+        if not sampling_path.is_absolute():
+            raise SystemExit("stage512a planner-v2 sampling config must be absolute")
+        sampling_sha256, sampling_fingerprint = _stable_sampling_sha256(
+            sampling_path
+        )
+    samp = load_sampling_config(str(sampling_path))
+    if close_catalog_sampling:
+        closing_sha256, closing_fingerprint = _stable_sampling_sha256(
+            sampling_path, expected_fingerprint=sampling_fingerprint
+        )
+        if (
+            closing_sha256 != sampling_sha256
+            or closing_fingerprint != sampling_fingerprint
+        ):
+            raise SystemExit("sampling config changed across planner load")
     mix = {d: float(samp.domain_mix[args.stage][d]) for d in DOMAINS}
+    image_size = int(cfg.dataset.image_size)
+    eligibility = f"elig_{image_size}"
+    requires_nl = bool(samp.anime_caption.requires_nl(args.stage))
+    # Phase3/5 materializes the historical pool without applying the sampling
+    # config's require-NL filter.  This is explicit in the artifact identity.
+    anime_nl_filter_applied = False
+    if args.format_version == 2 and not args.catalog_header:
+        raise SystemExit("format_version=2 requires --catalog-header; virtual/proxy hashes are forbidden")
 
     tbl = pq.read_table(args.n_matrix)
     cols = {c: tbl.column(c).to_pylist() for c in tbl.column_names}
@@ -99,6 +213,24 @@ def main() -> int:
             raise SystemExit("catalog header 是 diag 产物(diagnostic_run != False),不得用于生产 plan")
         if list(hdr["domain_order"]) != DOMAINS:
             raise SystemExit(f"catalog domain_order {hdr['domain_order']} != {DOMAINS}")
+        if args.format_version == 2:
+            expected_identity = {
+                "stage": args.stage,
+                "image_size": image_size,
+                "eligibility": eligibility,
+                "requires_nl": requires_nl,
+                "anime_nl_filter_applied": anime_nl_filter_applied,
+            }
+            actual_identity = {key: hdr.get(key) for key in expected_identity}
+            if actual_identity != expected_identity:
+                raise SystemExit(
+                    "catalog stage identity differs from config/sampling: "
+                    f"actual={actual_identity!r}, expected={expected_identity!r}"
+                )
+            if close_catalog_sampling:
+                if sampling_sha256 is None:
+                    raise SystemExit("stage512a sampling evidence was not collected")
+                _validate_stage512a_catalog_sampling(hdr, mix, sampling_sha256)
         for pos, b in enumerate(hdr["buckets"]):
             if int(b["idx"]) != pos:
                 raise SystemExit(f"catalog buckets[{pos}].idx={b['idx']} 与位置不符")
@@ -142,7 +274,7 @@ def main() -> int:
               f"逐 cell 守恒全过,绑定 catalog_hash={catalog_hash[:12]}…")
 
     out = {
-        "format_version": 1,
+        "format_version": args.format_version,
         "plan_id": args.plan_id,
         "seed": args.seed,
         "world_size": args.world_size,
@@ -161,6 +293,16 @@ def main() -> int:
     if catalog_hash is not None:
         out["catalog_hash"] = catalog_hash          # planner→plan header upstream_catalog_hash
         out["assignment_hash"] = assignment_hash    # loader 据此拒 proxy plan
+    if args.format_version == 2:
+        out.update(
+            {
+                "stage": args.stage,
+                "image_size": image_size,
+                "eligibility": eligibility,
+                "requires_nl": requires_nl,
+                "anime_nl_filter_applied": anime_nl_filter_applied,
+            }
+        )
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=1)
     tot = sum(sum(r) for r in N)

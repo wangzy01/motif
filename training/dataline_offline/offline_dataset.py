@@ -3,10 +3,12 @@
 The loader deliberately has no fallback sampler.  A plan slot names exactly one
 catalog row, and any catalog, locator, decode, or bucket mismatch is fatal.
 Native-size mismatch is also fatal except for anime HTTP-served metadata when
-the decoded image can fill the frozen target bucket without upsampling.  Raw
-bytes are fetched in deterministic plan windows; decode and the single
-native-RGB -> target-bucket resize are prepared ahead in the existing supply
-threads so that identical image math overlaps GPU work.
+the decoded image can fill the frozen target bucket without upsampling, or
+when an otherwise-fatal upsample is bound back to the exact source-Parquet
+row and its decoded-RGB MD5.  Raw bytes are fetched in deterministic plan
+windows; decode and the single native-RGB -> target-bucket resize are prepared
+ahead in the existing supply threads so that identical image math overlaps
+GPU work.
 
 The public surface mirrors ``CompleteV1Dataset`` as consumed by ``train.py``:
 
@@ -81,7 +83,13 @@ from training.dataline_offline.image_exceptions_v1 import (
     apply_textatlas_jpeg_eoi_repair,
     bind_image_exceptions,
 )
-from training.dataline_offline.planner_v1 import OfflinePlan
+from training.dataline_offline.anime_native_upsample_exceptions_weighted_v1 import (
+    AnimeNativeUpsampleBindingError,
+    AnimeNativeUpsampleMismatchError,
+    apply_anime_native_upsample_exception,
+    bind_anime_native_upsample_exceptions,
+)
+from training.dataline_offline.weighted_plan_reader_v1 import WeightedOfflinePlan
 
 
 _MIB = 1 << 20
@@ -104,6 +112,14 @@ _TELEMETRY_SCHEMA = "offline_arb_io_profile_v1"
 # worst-case remains below the loader's default 600-second step timeout.
 _ANIME_EXACT_REFETCH_DELAYS_S = (1.0, 4.0, 16.0, 64.0)
 _ANIME_CAPTION_SOURCE_PARENT = Path("/s3/evan/anime_core_ditv04_ct_soft/data")
+_ANIME_SOURCE_IMAGE_BINDING_COLUMNS = (
+    "md5",
+    "width",
+    "height",
+    "key",
+    "image_size",
+    "s3key",
+)
 _CAPTION_SOURCE_COLUMNS = {
     # ``rating_bucket`` and ``year`` are frozen catalog fields and are injected
     # below after the caption lookup; copying them into the sidecar would create
@@ -184,6 +200,225 @@ _DOMAIN_CATALOG_TYPES = {
 
 class OfflineLoaderError(RuntimeError):
     """The exact plan cannot be consumed without changing its semantics."""
+
+
+@dataclass(frozen=True)
+class _OfflineStageIdentity:
+    """Frozen runtime identity for one supported offline curriculum stage."""
+
+    stage: str
+    image_size: int
+    eligibility: str
+    assignment_eligibility: str
+    legacy_artifacts_allowed: bool
+    requires_nl: bool | None
+    anime_nl_filter_applied: bool
+
+
+# ``eligibility`` is the public artifact contract.  The stage256 assignment
+# hash predates that contract and must retain its historical internal token
+# byte-for-byte; do not expose that legacy token to sidecars/exceptions.
+_OFFLINE_STAGE_IDENTITIES = {
+    "256": _OfflineStageIdentity(
+        stage="256",
+        image_size=256,
+        eligibility="elig_256",
+        assignment_eligibility="phase3a_stage256_v1",
+        legacy_artifacts_allowed=True,
+        requires_nl=True,
+        anime_nl_filter_applied=False,
+    ),
+    "512a": _OfflineStageIdentity(
+        stage="512a",
+        image_size=512,
+        eligibility="elig_512",
+        assignment_eligibility="elig_512",
+        legacy_artifacts_allowed=False,
+        requires_nl=False,
+        anime_nl_filter_applied=False,
+    ),
+}
+
+
+def _resolve_offline_stage_identity(
+    stage: Any,
+    image_size: Any,
+    multi_ar: Mapping[str, Any],
+) -> _OfflineStageIdentity:
+    normalized_stage = str(stage)
+    identity = _OFFLINE_STAGE_IDENTITIES.get(normalized_stage)
+    if identity is None:
+        raise OfflineLoaderError(
+            "OfflineExactDataset has no frozen artifact contract for "
+            f"stage={normalized_stage!r}; supported={sorted(_OFFLINE_STAGE_IDENTITIES)}"
+        )
+
+    if image_size is None:
+        if not identity.legacy_artifacts_allowed:
+            raise OfflineLoaderError(
+                f"stage {normalized_stage!r} requires explicit dataset.image_size="
+                f"{identity.image_size}"
+            )
+    elif type(image_size) is not int or image_size != identity.image_size:
+        raise OfflineLoaderError(
+            f"stage {normalized_stage!r} requires dataset.image_size="
+            f"{identity.image_size}, got {image_size!r}"
+        )
+
+    target_area = multi_ar.get("target_area")
+    expected_area = identity.image_size * identity.image_size
+    if target_area is None:
+        if not identity.legacy_artifacts_allowed:
+            raise OfflineLoaderError(
+                f"stage {normalized_stage!r} requires "
+                f"dataset.multi_ar.target_area={expected_area}"
+            )
+    elif type(target_area) is not int or target_area != expected_area:
+        raise OfflineLoaderError(
+            f"stage {normalized_stage!r} requires dataset.multi_ar.target_area="
+            f"{expected_area}, got {target_area!r}"
+        )
+    return identity
+
+
+def _validate_artifact_stage_identity(
+    header: Mapping[str, Any],
+    *,
+    artifact: str,
+    identity: _OfflineStageIdentity,
+    requires_nl: bool,
+) -> bool:
+    """Validate a plan/catalog stage identity; return whether it was explicit."""
+
+    if identity.requires_nl is not None and requires_nl is not identity.requires_nl:
+        raise OfflineLoaderError(
+            f"runtime stage {identity.stage!r} requires requires_nl="
+            f"{identity.requires_nl!r}, got {requires_nl!r} from sampling_config"
+        )
+
+    identity_keys = {
+        "stage",
+        "image_size",
+        "eligibility",
+        "requires_nl",
+        "anime_nl_filter_applied",
+    }
+    present = identity_keys.intersection(header)
+    if not present:
+        if identity.legacy_artifacts_allowed:
+            return False
+        raise OfflineLoaderError(
+            f"{artifact} lacks required stage/eligibility identity for "
+            f"runtime stage {identity.stage!r}"
+        )
+
+    required = {
+        "stage",
+        "image_size",
+        "eligibility",
+        "requires_nl",
+        "anime_nl_filter_applied",
+    }
+    missing = required - set(header)
+    if missing:
+        raise OfflineLoaderError(
+            f"{artifact} has a partial stage identity; missing={sorted(missing)}"
+        )
+    if type(header.get("stage")) is not str or header["stage"] != identity.stage:
+        raise OfflineLoaderError(
+            f"{artifact}/runtime stage mismatch: artifact={header.get('stage')!r}, "
+            f"runtime={identity.stage!r}"
+        )
+    if (
+        type(header.get("eligibility")) is not str
+        or header["eligibility"] != identity.eligibility
+    ):
+        raise OfflineLoaderError(
+            f"{artifact}/runtime eligibility mismatch: "
+            f"artifact={header.get('eligibility')!r}, "
+            f"runtime={identity.eligibility!r}"
+        )
+    if (
+        type(header["image_size"]) is not int
+        or header["image_size"] != identity.image_size
+    ):
+        raise OfflineLoaderError(
+            f"{artifact}/runtime image_size mismatch: "
+            f"artifact={header.get('image_size')!r}, runtime={identity.image_size}"
+        )
+    if (
+        type(header["requires_nl"]) is not bool
+        or header["requires_nl"] is not requires_nl
+    ):
+        raise OfflineLoaderError(
+            f"{artifact}/runtime requires_nl mismatch: "
+            f"artifact={header.get('requires_nl')!r}, runtime={requires_nl!r}"
+        )
+    if (
+        type(header["anime_nl_filter_applied"]) is not bool
+        or header["anime_nl_filter_applied"]
+        is not identity.anime_nl_filter_applied
+    ):
+        raise OfflineLoaderError(
+            f"{artifact}/runtime anime_nl_filter_applied mismatch: "
+            f"artifact={header.get('anime_nl_filter_applied')!r}, "
+            f"runtime={identity.anime_nl_filter_applied!r}"
+        )
+    return True
+
+
+def _validate_plan_stage_identity(
+    header: Mapping[str, Any],
+    *,
+    identity: _OfflineStageIdentity,
+    requires_nl: bool,
+) -> bool:
+    explicit = _validate_artifact_stage_identity(
+        header,
+        artifact="plan header",
+        identity=identity,
+        requires_nl=requires_nl,
+    )
+    expected_format = 2 if explicit else 1
+    if (
+        type(header.get("format_version")) is not int
+        or header["format_version"] != expected_format
+    ):
+        raise OfflineLoaderError(
+            "plan stage identity/format mismatch: "
+            f"explicit={explicit}, expected format_version={expected_format}, "
+            f"got {header.get('format_version')!r}"
+        )
+    return explicit
+
+
+def _assignment_identity_payload(
+    header: Mapping[str, Any],
+    *,
+    identity: _OfflineStageIdentity,
+    requires_nl: bool,
+) -> dict[str, Any]:
+    payload = {
+        "bucket_table_hash": header["bucket_table_hash"],
+        "floor": header.get("floor"),
+        "kept": list(header.get("kept_bucket_indices", [])),
+        "fold_map": list(header.get("fold_map", [])),
+        "square_only_domains": list(header.get("square_only_domains", [])),
+        "square_bucket_idx": header.get("square_bucket_idx"),
+        "assignment": "phase3a_vectorized_with_production_scalar_fallback_v1",
+    }
+    if identity.stage == "256":
+        payload["eligibility"] = identity.assignment_eligibility
+    else:
+        payload.update(
+            {
+                "stage": identity.stage,
+                "image_size": identity.image_size,
+                "eligibility": identity.assignment_eligibility,
+                "requires_nl": requires_nl,
+            }
+        )
+    return payload
 
 
 def _validated_gpic_source_consistency_mode(value: Any) -> str:
@@ -487,6 +722,7 @@ class _PlannedItem:
     domain: str
     domain_idx: int
     bucket_idx: int
+    caption_band: int
 
 
 @dataclass(frozen=True)
@@ -527,6 +763,8 @@ class OfflineExactDataset:
         crop_v_anchor=None,
         multi_ar=None,
         offline_plan_root=None,
+        offline_plan_hash=None,
+        offline_weighted_contract_sha256=None,
         offline_catalog_root=None,
         offline_anime_freq_root=None,
         offline_caption_sidecar_root=None,
@@ -545,32 +783,41 @@ class OfflineExactDataset:
         gpic_blob_fd_cache_size=64,
         **_,
     ):
-        del image_size  # target shape is plan-owned; a second size authority is forbidden.
         if not offline_plan_root or not offline_catalog_root:
             raise OfflineLoaderError(
                 "dataset.offline_plan_root and dataset.offline_catalog_root are required"
             )
         if not sampling_config:
             raise OfflineLoaderError("dataset.sampling_config is required for caption semantics")
-        assignment_mode = str(dict(multi_ar or {}).get("assignment_mode", ""))
-        if assignment_mode != "offline_exact_v1":
+        multi_ar_cfg = dict(multi_ar or {})
+        assignment_mode = str(multi_ar_cfg.get("assignment_mode", ""))
+        if assignment_mode != "offline_weighted_band_v1":
             raise OfflineLoaderError(
-                "OfflineExactDataset requires dataset.multi_ar.assignment_mode=offline_exact_v1"
+                "OfflineExactDataset requires "
+                "dataset.multi_ar.assignment_mode=offline_weighted_band_v1"
             )
+        for name, value in (
+            ("offline_plan_hash", offline_plan_hash),
+            ("offline_weighted_contract_sha256", offline_weighted_contract_sha256),
+        ):
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise OfflineLoaderError(f"{name} must be a lowercase SHA-256")
 
         self.rank, self.world_size = self._resolve_rank(rank, world_size)
         self.seed = int(seed)
         self.stage = str(stage)
-        if self.stage != "256":
-            raise OfflineLoaderError(
-                f"offline_arb_catalog_v1 is stage-256 materialization; got stage={self.stage!r}"
-            )
+        self._stage_identity = _resolve_offline_stage_identity(
+            self.stage, image_size, multi_ar_cfg
+        )
+        self.image_size = self._stage_identity.image_size
+        self.eligibility = self._stage_identity.eligibility
         self.sampling_config_path = Path(str(sampling_config)).expanduser()
         self.cfg = load_sampling_config(str(self.sampling_config_path))
         if self.stage not in self.cfg.domain_mix:
             raise OfflineLoaderError(
                 f"stage {self.stage!r} is absent from sampling config {sampling_config}"
             )
+        self.requires_nl = bool(self.cfg.anime_caption.requires_nl(self.stage))
         self.anime_cache_dir = str(anime_cache_dir) if anime_cache_dir else None
         requested_anchors = {
             str(k): float(v) for k, v in dict(crop_v_anchor or {}).items()
@@ -703,13 +950,21 @@ class OfflineExactDataset:
             raise OfflineLoaderError(
                 f"anime frequency root lacks _SUCCESS: {self._anime_freq_root}"
             )
-        self.plan = OfflinePlan(
+        self.plan = WeightedOfflinePlan(
             self.plan_root,
             world_size=self.world_size,
+            per_rank_bs=None,
+            expected_plan_hash=offline_plan_hash,
+            expected_contract_sha256=offline_weighted_contract_sha256,
             verify_checksums=True,
         )
         self.plan_header = self.plan.header
         self.plan_id = str(self.plan_header["plan_id"])
+        _validate_plan_stage_identity(
+            self.plan_header,
+            identity=self._stage_identity,
+            requires_nl=self.requires_nl,
+        )
         self.domains = tuple(str(x) for x in self.plan_header["domains"])
         unknown_domains = sorted(set(self.domains) - set(_DOMAIN_CATALOG_TYPES))
         if unknown_domains:
@@ -724,6 +979,8 @@ class OfflineExactDataset:
         self.catalog_header = self._validate_catalog_header()
         try:
             self._captionless_monet_rows = bind_caption_exceptions(
+                stage=self.stage,
+                eligibility=self.eligibility,
                 plan_id=self.plan_id,
                 catalog_hash=str(self.catalog_header["catalog_hash"]),
                 plan_header_sha256=_sha256_file(self.plan_root / "header.json"),
@@ -738,6 +995,8 @@ class OfflineExactDataset:
             ) from exc
         try:
             self._image_repairs = bind_image_exceptions(
+                stage=self.stage,
+                eligibility=self.eligibility,
                 plan_id=self.plan_id,
                 plan_hash=str(self.plan_header.get("plan_hash", "")),
                 catalog_hash=str(self.catalog_header["catalog_hash"]),
@@ -750,6 +1009,25 @@ class OfflineExactDataset:
         except ImageExceptionBindingError as exc:
             raise OfflineLoaderError(
                 f"cannot bind frozen image exceptions: {exc}"
+            ) from exc
+        try:
+            self._anime_native_upsample_exceptions = (
+                bind_anime_native_upsample_exceptions(
+                    stage=self.stage,
+                    eligibility=self.eligibility,
+                    plan_id=self.plan_id,
+                    plan_hash=str(self.plan_header.get("plan_hash", "")),
+                    catalog_hash=str(self.catalog_header["catalog_hash"]),
+                    plan_header_sha256=_sha256_file(self.plan_root / "header.json"),
+                    catalog_header_sha256=_sha256_file(self.catalog_root / "header.json"),
+                    decode_domain=lambda row_id: self.domains[
+                        self._row_decoder.decode(row_id)[0]
+                    ],
+                )
+            )
+        except AnimeNativeUpsampleBindingError as exc:
+            raise OfflineLoaderError(
+                f"cannot bind frozen anime native-upsample exceptions: {exc}"
             ) from exc
         if self._anime_freq_root is not None:
             # 审查 P1(2026-07-11):freq 表必须与本 catalog 同源——catalog 重建而忘重跑
@@ -1349,6 +1627,12 @@ class OfflineExactDataset:
             )
         if header.get("diagnostic_run") is not False:
             raise OfflineLoaderError("diagnostic catalog products are forbidden for training")
+        _validate_artifact_stage_identity(
+            header,
+            artifact="catalog header",
+            identity=self._stage_identity,
+            requires_nl=self.requires_nl,
+        )
         if header.get("row_scheme") != "virtual_catalog_v1_materialized":
             raise OfflineLoaderError(f"unsupported catalog row_scheme={header.get('row_scheme')!r}")
         domains = [str(x) for x in header.get("domains", [])]
@@ -1427,16 +1711,11 @@ class OfflineExactDataset:
         bucket_payload = [list(hw) for hw in self.buckets]
         if header.get("bucket_table_hash") != _canonical_sha256(bucket_payload):
             raise OfflineLoaderError("catalog bucket_table_hash mismatch")
-        assignment_payload = {
-            "bucket_table_hash": header["bucket_table_hash"],
-            "floor": header.get("floor"),
-            "kept": list(header.get("kept_bucket_indices", [])),
-            "fold_map": list(header.get("fold_map", [])),
-            "square_only_domains": list(header.get("square_only_domains", [])),
-            "square_bucket_idx": header.get("square_bucket_idx"),
-            "assignment": "phase3a_vectorized_with_production_scalar_fallback_v1",
-            "eligibility": "phase3a_stage256_v1",
-        }
+        assignment_payload = _assignment_identity_payload(
+            header,
+            identity=self._stage_identity,
+            requires_nl=self.requires_nl,
+        )
         if header.get("assignment_hash") != _canonical_sha256(assignment_payload):
             raise OfflineLoaderError("catalog assignment_hash mismatch")
         catalog_payload = {
@@ -1771,8 +2050,47 @@ class OfflineExactDataset:
                 return band
         return available[-1]
 
+    def _validate_planned_band(
+        self, domain: str, rec: Mapping[str, Any], planned_band: int
+    ) -> int:
+        band = int(planned_band)
+        if domain not in {"monet_real", "gpic"}:
+            if band != -1:
+                raise OfflineLoaderError(
+                    f"non-real planned row has caption band {band}: "
+                    f"domain={domain},row_id={rec.get('row_id')}"
+                )
+            if domain == "synthetic":
+                base_w = float(rec.get("base_w", 0.0))
+                if not math.isfinite(base_w) or base_w <= 0:
+                    raise OfflineLoaderError(
+                        f"weighted plan selected a non-positive Synthetic row: "
+                        f"row_id={rec.get('row_id')},base_w={base_w}"
+                    )
+            return -1
+        if band < 0 or band >= 4:
+            raise OfflineLoaderError(
+                f"real planned row has invalid caption band {band}: "
+                f"domain={domain},row_id={rec.get('row_id')}"
+            )
+        base_w = float(rec.get("base_w", 0.0))
+        served = int(rec["served_mask"])
+        codes = [int(value) for value in rec["band_captioner"]]
+        if not math.isfinite(base_w) or base_w <= 0:
+            raise OfflineLoaderError(
+                f"weighted plan selected a non-positive real row: "
+                f"domain={domain},row_id={rec.get('row_id')},base_w={base_w}"
+            )
+        if ((served >> band) & 1) == 0 or codes[band] <= 0:
+            raise OfflineLoaderError(
+                f"weighted plan selected an unserved caption band: "
+                f"domain={domain},row_id={rec.get('row_id')},band={band},"
+                f"served_mask={served},codes={codes}"
+            )
+        return band
+
     def _plan_items_for_step(self, step: int) -> tuple[int, list[_PlannedItem]]:
-        bucket_hw, row_ids = self.plan.batch(step, self.rank)
+        bucket_hw, row_ids, caption_bands = self.plan.batch(step, self.rank)
         bucket = self._bucket_to_idx.get(tuple(int(x) for x in bucket_hw))
         if bucket is None:
             raise OfflineLoaderError(f"plan step {step} returned unknown bucket {bucket_hw}")
@@ -1782,8 +2100,15 @@ class OfflineExactDataset:
             raise OfflineLoaderError(
                 f"plan batch shape drift at step {step}: {row_ids.dtype}/{row_ids.shape}"
             )
+        if caption_bands.dtype != np.dtype(np.int8) or caption_bands.shape != row_ids.shape:
+            raise OfflineLoaderError(
+                f"plan caption-band shape drift at step {step}: "
+                f"{caption_bands.dtype}/{caption_bands.shape}"
+            )
         items: list[_PlannedItem] = []
-        for slot, row_raw in enumerate(row_ids.tolist()):
+        for slot, (row_raw, band_raw) in enumerate(
+            zip(row_ids.tolist(), caption_bands.tolist())
+        ):
             row = int(row_raw)
             d, decoded_bucket, _local = self._row_decoder.decode(row)
             if decoded_bucket != bucket:
@@ -1791,7 +2116,9 @@ class OfflineExactDataset:
                     f"plan row_id {row} decodes to bucket {decoded_bucket}, step {step} uses {bucket}"
                 )
             items.append(
-                _PlannedItem(step, slot, row, self.domains[d], d, bucket)
+                _PlannedItem(
+                    step, slot, row, self.domains[d], d, bucket, int(band_raw)
+                )
             )
         return bucket, items
 
@@ -3306,6 +3633,110 @@ class OfflineExactDataset:
             )
         return raw
 
+    def _validate_anime_source_bound_native_mismatch(
+        self,
+        prepared: _PreparedItem,
+        raw: bytes,
+        decoded_rgb: np.ndarray,
+    ) -> str:
+        """Bind an Anime native-size mismatch to its exact source pixels.
+
+        This gate is intentionally used only when the existing decoded-pixel
+        compatibility path would otherwise fail because upsampling is needed.
+        The catalog's source locator and metadata must agree with the exact
+        source-Parquet row, and that row's MD5 must identify the currently
+        decoded RGB pixels.
+        """
+
+        planned = prepared.planned
+        row = prepared.catalog
+        if planned.domain != "anime" or row.get("domain") != "anime":
+            raise OfflineLoaderError(
+                f"source-bound native mismatch requires Anime row_id={planned.row_id}"
+            )
+        source_value = row.get("caption_parquet_path")
+        if type(source_value) is not str:
+            raise OfflineLoaderError(
+                f"Anime source parquet path type drift row_id={planned.row_id}"
+            )
+        source_path = Path(source_value)
+        if (
+            source_path.parent != _ANIME_CAPTION_SOURCE_PARENT
+            or source_path.suffix != ".parquet"
+        ):
+            raise OfflineLoaderError(
+                f"Anime source parquet path drift row_id={planned.row_id}: "
+                f"{source_path}"
+            )
+        for field in ("caption_row_group", "caption_row_in_group"):
+            if type(row.get(field)) is not int or int(row[field]) < 0:
+                raise OfflineLoaderError(
+                    f"Anime source locator drift row_id={planned.row_id}: {field}"
+                )
+        if type(raw) is not bytes:
+            raise OfflineLoaderError(
+                f"Anime source-bound payload is not exact bytes row_id={planned.row_id}"
+            )
+        if (
+            type(decoded_rgb) is not np.ndarray
+            or decoded_rgb.dtype != np.uint8
+            or decoded_rgb.ndim != 3
+            or decoded_rgb.shape[2] != 3
+            or not decoded_rgb.flags.c_contiguous
+        ):
+            raise OfflineLoaderError(
+                f"Anime source-bound decoded RGB type drift row_id={planned.row_id}"
+            )
+        source_rows = self._read_source_rows(
+            [(planned, row)],
+            path_field="caption_parquet_path",
+            row_group_field="caption_row_group",
+            row_in_group_field="caption_row_in_group",
+            columns=_ANIME_SOURCE_IMAGE_BINDING_COLUMNS,
+            workers=1,
+        )
+        token = (planned.step, planned.slot)
+        if set(source_rows) != {token}:
+            raise OfflineLoaderError(
+                f"Anime source row lookup drift row_id={planned.row_id}: "
+                f"{sorted(source_rows)}"
+            )
+        source = source_rows[token]
+        expected_source = {
+            "key": row.get("key"),
+            "s3key": row.get("fetch_url"),
+            "width": row.get("width"),
+            "height": row.get("height"),
+            "image_size": len(raw),
+        }
+        actual_source: dict[str, Any] = {}
+        for field, expected in expected_source.items():
+            actual = source.get(field)
+            if type(actual) is not type(expected):
+                raise OfflineLoaderError(
+                    f"Anime source field type drift row_id={planned.row_id}: {field}"
+                )
+            actual_source[field] = actual
+        if actual_source != expected_source:
+            raise OfflineLoaderError(
+                f"Anime source metadata binding mismatch row_id={planned.row_id}"
+            )
+        expected_md5 = source.get("md5")
+        if (
+            type(expected_md5) is not str
+            or re.fullmatch(r"[0-9a-f]{32}", expected_md5) is None
+        ):
+            raise OfflineLoaderError(
+                f"Anime source decoded-RGB MD5 drift row_id={planned.row_id}"
+            )
+        actual_md5 = hashlib.md5(decoded_rgb.tobytes(order="C")).hexdigest()
+        if actual_md5 != expected_md5:
+            raise OfflineLoaderError(
+                f"Anime source decoded-RGB binding mismatch row_id={planned.row_id}: "
+                f"decoded_md5={actual_md5},source_md5={expected_md5}"
+            )
+        return actual_md5
+
     def _bucket_u8_for_item(self, prepared: _PreparedItem) -> np.ndarray:
         planned = prepared.planned
         target_h, target_w = self.buckets[planned.bucket_idx]
@@ -3353,6 +3784,47 @@ class OfflineExactDataset:
             actual_w, actual_h = image.size
             expected_w = int(prepared.catalog["width"])
             expected_h = int(prepared.catalog["height"])
+            native_upsample_exception = self._anime_native_upsample_exceptions.get(
+                planned.row_id
+            )
+            if native_upsample_exception is not None:
+                try:
+                    bucket_u8 = apply_anime_native_upsample_exception(
+                        native_upsample_exception,
+                        step=planned.step,
+                        rank=self.rank,
+                        slot=planned.slot,
+                        domain=planned.domain,
+                        row=prepared.catalog,
+                        raw=raw,
+                        decoded_rgb=np.asarray(image, dtype=np.uint8),
+                        target_height=target_h,
+                        target_width=target_w,
+                        crop_v_anchor=self._v_anchor_for(planned.domain),
+                        resize_u8_to_bucket=resize_u8_to_bucket,
+                    )
+                except AnimeNativeUpsampleMismatchError as exc:
+                    raise OfflineLoaderError(
+                        "frozen anime native-upsample exception mismatch "
+                        f"row_id={planned.row_id}: {exc}"
+                    ) from exc
+                print(
+                    "[offline_dataset] WARNING applying frozen weighted-plan "
+                    f"Anime native-upsample exception step={planned.step},"
+                    f"rank={self.rank},slot={planned.slot},row_id={planned.row_id}",
+                    flush=True,
+                )
+                return bucket_u8
+            native_u8 = np.asarray(image, dtype=np.uint8)
+            if (
+                native_u8.ndim != 3
+                or native_u8.shape[2] != 3
+                or not native_u8.flags.c_contiguous
+            ):
+                raise OfflineLoaderError(
+                    f"decoded RGB array has invalid shape/layout "
+                    f"row_id={planned.row_id}: {native_u8.shape}"
+                )
             if (actual_w, actual_h) != (expected_w, expected_h):
                 # Anime HTTP-served payloads can have upstream width/height
                 # metadata that disagrees with valid current pixels.  The
@@ -3364,7 +3836,16 @@ class OfflineExactDataset:
                     and actual_w >= target_w
                     and actual_h >= target_h
                 )
-                if not anime_no_upsample:
+                source_bound_md5: str | None = None
+                if not anime_no_upsample and planned.domain == "anime":
+                    source_bound_md5 = (
+                        self._validate_anime_source_bound_native_mismatch(
+                            prepared,
+                            raw,
+                            native_u8,
+                        )
+                    )
+                elif not anime_no_upsample:
                     raise OfflineLoaderError(
                         f"native size mismatch step={planned.step},rank={self.rank},"
                         f"slot={planned.slot},row_id={planned.row_id}: "
@@ -3372,21 +3853,18 @@ class OfflineExactDataset:
                         f"catalog={expected_w}x{expected_h}, "
                         f"target={target_w}x{target_h}"
                     )
+                if source_bound_md5 is None:
+                    detail = "without upsampling"
+                else:
+                    detail = f"with source-bound decoded_rgb_md5={source_bound_md5}"
                 print(
                     "[offline_dataset] WARNING anime native-size metadata "
-                    f"mismatch tolerated without upsampling step={planned.step},"
+                    f"mismatch tolerated {detail} step={planned.step},"
                     f"rank={self.rank},slot={planned.slot},row_id={planned.row_id}: "
                     f"decoded={actual_w}x{actual_h}, "
                     f"catalog={expected_w}x{expected_h}, "
                     f"target={target_w}x{target_h}",
                     flush=True,
-                )
-
-            native_u8 = np.asarray(image, dtype=np.uint8)
-            if native_u8.ndim != 3 or native_u8.shape[2] != 3:
-                raise OfflineLoaderError(
-                    f"decoded RGB array has invalid shape row_id={planned.row_id}: "
-                    f"{native_u8.shape}"
                 )
             # This remains the loader's only resize/crop operation.  Prepare-
             # ahead merely overlaps the same serialized image math with GPU
@@ -3418,6 +3896,7 @@ class OfflineExactDataset:
         trace_rows: list[int] = []
         trace_uids: list[str] = []
         trace_domains: list[str] = []
+        trace_bands: list[int] = []
         successful_domains: Counter = Counter()
 
         for slot, prepared in enumerate(items):
@@ -3441,7 +3920,11 @@ class OfflineExactDataset:
             rng = random.Random(
                 self._slot_seed(self.plan_id, step, self.rank, slot)
             )
-            band = self._select_band(planned.domain, prepared.caption_record, rng)
+            band = self._validate_planned_band(
+                planned.domain,
+                prepared.caption_record,
+                planned.caption_band,
+            )
             prompt = self._finalize_caption(
                 planned.domain, prepared.caption_record, band, rng
             )
@@ -3453,6 +3936,7 @@ class OfflineExactDataset:
             trace_rows.append(planned.row_id)
             trace_uids.append(str(prepared.catalog["uid"]))
             trace_domains.append(planned.domain)
+            trace_bands.append(band)
             successful_domains[planned.domain] += 1
 
         pixels = torch.stack(tensors, dim=0)
@@ -3470,6 +3954,7 @@ class OfflineExactDataset:
             "item_rows": trace_rows,
             "uids": trace_uids,
             "domains": trace_domains,
+            "caption_bands": trace_bands,
         }
         return {"prompts": prompts, "pixels": pixels, "cfg_keep": cfg_keep}
 

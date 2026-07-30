@@ -17,10 +17,12 @@ from training.dataline_offline.image_exceptions_v1 import (
     ALLOWLIST_SUGGESTION_SHA256,
     CATALOG_HASH,
     CATALOG_HEADER_SHA256,
+    ELIGIBILITY,
     INTEGRITY_AUDIT_SHA256,
     PLAN_HASH,
     PLAN_HEADER_SHA256,
     PLAN_ID,
+    STAGE,
     REPAIRED_PAYLOAD_BINDINGS_SHA256,
     TEXTATLAS_JPEG_EOI_REPAIRS,
     ImageExceptionBindingError,
@@ -143,6 +145,8 @@ def main() -> int:
     decoder = _VirtualRowDecoder(plan["domains"], plan["N"])
     decode_domain = lambda row_id: plan["domains"][decoder.decode(row_id)[0]]
     bound = bind_image_exceptions(
+        stage=STAGE,
+        eligibility=ELIGIBILITY,
         plan_id=PLAN_ID,
         plan_hash=PLAN_HASH,
         catalog_hash=CATALOG_HASH,
@@ -198,6 +202,8 @@ def main() -> int:
         assert verified["repaired_rgb_sha256"] == repair.pixel_sha256
 
     unrelated = bind_image_exceptions(
+        stage="512a",
+        eligibility="elig_512",
         plan_id="synthetic-test-plan",
         plan_hash="3" * 64,
         catalog_hash="0" * 64,
@@ -208,6 +214,8 @@ def main() -> int:
     assert not unrelated
     _expect_error(
         lambda: bind_image_exceptions(
+            stage=STAGE,
+            eligibility=ELIGIBILITY,
             plan_id=PLAN_ID,
             plan_hash=PLAN_HASH,
             catalog_hash="0" * 64,
@@ -219,6 +227,8 @@ def main() -> int:
     )
     _expect_error(
         lambda: bind_image_exceptions(
+            stage=STAGE,
+            eligibility=ELIGIBILITY,
             plan_id=PLAN_ID,
             plan_hash=PLAN_HASH,
             catalog_hash=CATALOG_HASH,
@@ -228,6 +238,19 @@ def main() -> int:
         ),
         "not textatlas",
     )
+    _expect_error(
+        lambda: bind_image_exceptions(
+            stage="512a",
+            eligibility="elig_512",
+            plan_id=PLAN_ID,
+            plan_hash=PLAN_HASH,
+            catalog_hash=CATALOG_HASH,
+            plan_header_sha256=PLAN_HEADER_SHA256,
+            catalog_header_sha256=CATALOG_HEADER_SHA256,
+            decode_domain=lambda _row_id: "textatlas",
+        ),
+        "binding mismatch",
+    )
 
     textatlas_idx = plan["domains"].index("textatlas")
     textatlas_base = int(sum(sum(row[:textatlas_idx]) for row in plan["N"]))
@@ -236,6 +259,7 @@ def main() -> int:
     dataset = object.__new__(OfflineExactDataset)
     dataset.buckets = tuple(tuple(int(v) for v in pair) for pair in plan["buckets"])
     dataset._image_repairs = bound
+    dataset._anime_native_upsample_exceptions = {}
     dataset._crop_v_anchor = {}
     dataset.rank = 0
 
@@ -267,6 +291,7 @@ def main() -> int:
             domain="textatlas",
             domain_idx=textatlas_idx,
             bucket_idx=int(row["bucket_idx"]),
+            caption_band=-1,
         )
         prepared = _PreparedItem(planned=planned, catalog=row, caption_record={}, raw=raw)
         target_h, target_w = dataset.buckets[planned.bucket_idx]

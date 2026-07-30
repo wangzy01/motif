@@ -782,7 +782,7 @@ def negative_catalog_and_token_closure() -> None:
         _PlannedItem,
     )
 
-    item = _PlannedItem(0, 0, 100, "gpic", 2, 0)
+    item = _PlannedItem(0, 0, 100, "gpic", 2, 0, 0)
     try:
         OfflineExactDataset._payload_token_closure(
             [(item, {})], {}, "negative-test"

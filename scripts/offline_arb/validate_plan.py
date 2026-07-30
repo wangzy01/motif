@@ -43,7 +43,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-FORMAT_VERSION_EXPECTED = 1
+FORMAT_VERSIONS_EXPECTED = frozenset({1, 2})
 ROW_SCHEME_EXPECTED = "virtual_catalog_v1"  # §9.3 / §9.6 钉死
 
 # §1.5 输入契约字段(精确名)
@@ -62,6 +62,15 @@ REQUIRED_INPUT_KEYS = [
     "N",
     "R_max",
     "block_steps",
+]
+V2_REQUIRED_INPUT_KEYS = [
+    "stage",
+    "image_size",
+    "eligibility",
+    "requires_nl",
+    "anime_nl_filter_applied",
+    "catalog_hash",
+    "assignment_hash",
 ]
 
 # §9.6 header.json 必含字段(精确名)
@@ -86,6 +95,13 @@ REQUIRED_HEADER_FIELDS = [
     "hashes",
     "solver",
     "row_scheme",
+]
+V2_REQUIRED_HEADER_FIELDS = [
+    "stage",
+    "image_size",
+    "eligibility",
+    "requires_nl",
+    "anime_nl_filter_applied",
 ]
 
 STATUS_ORDER = {"ERROR": 0, "FAIL": 1, "WARN": 2, "SKIP": 3, "PASS": 4, "INFO": 5}
@@ -217,7 +233,15 @@ def guarded(report: Report, code: str, name: str):
 def load_input(path: Path, report: Report) -> Dict[str, Any]:
     with open(path, "r") as f:
         raw = json.load(f)
-    missing = [k for k in REQUIRED_INPUT_KEYS if k not in raw]
+    format_version = raw.get("format_version")
+    if isinstance(format_version, bool) or format_version not in FORMAT_VERSIONS_EXPECTED:
+        raise ValueError(
+            f"format_version={format_version!r} 不在支持集合 {sorted(FORMAT_VERSIONS_EXPECTED)}"
+        )
+    required = REQUIRED_INPUT_KEYS + (
+        V2_REQUIRED_INPUT_KEYS if format_version >= 2 else []
+    )
+    missing = [k for k in required if k not in raw]
     if missing:
         raise ValueError(f"planner_input.json 缺少 §1.5 契约要求字段: {missing}")
 
@@ -268,6 +292,51 @@ def load_input(path: Path, report: Report) -> Dict[str, Any]:
     total_steps = int(raw["total_steps"])
     G = world_size * per_rank_bs
     M = total_steps * G
+
+    if format_version >= 2:
+        stage = raw["stage"]
+        expected_sizes = {"256": 256, "512a": 512, "512b": 512}
+        if stage not in expected_sizes:
+            raise ValueError(f"v2 stage 非 canonical 值: {stage!r}")
+        image_size = raw["image_size"]
+        if isinstance(image_size, bool) or image_size != expected_sizes[stage]:
+            raise ValueError(
+                f"v2 stage/image_size 不闭合: stage={stage!r}, image_size={image_size!r}"
+            )
+        if raw["eligibility"] != f"elig_{image_size}":
+            raise ValueError(
+                f"v2 eligibility={raw['eligibility']!r} != elig_{image_size}"
+            )
+        if not isinstance(raw["requires_nl"], bool):
+            raise ValueError("v2 requires_nl 必须是 JSON bool")
+        if not isinstance(raw["anime_nl_filter_applied"], bool):
+            raise ValueError("v2 anime_nl_filter_applied 必须是 JSON bool")
+        expected_nl_policy = {
+            "256": (True, False),
+            "512a": (False, False),
+            "512b": (False, False),
+        }[stage]
+        actual_nl_policy = (
+            raw["requires_nl"], raw["anime_nl_filter_applied"]
+        )
+        if actual_nl_policy != expected_nl_policy:
+            raise ValueError(
+                f"v2 stage NL policy不闭合: stage={stage!r}, "
+                f"actual={actual_nl_policy!r}, expected={expected_nl_policy!r}"
+            )
+        expected_prefix = f"stage{stage}_offline_exact_v2_"
+        if not str(raw["plan_id"]).startswith(expected_prefix):
+            raise ValueError(
+                f"v2 plan_id 必须以 {expected_prefix!r} 开头: {raw['plan_id']!r}"
+            )
+        for key in ("catalog_hash", "assignment_hash"):
+            value = raw[key]
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(char not in "0123456789abcdef" for char in value)
+            ):
+                raise ValueError(f"v2 {key} 必须是 lowercase SHA-256")
 
     data = dict(raw)
     data.update(
@@ -410,12 +479,19 @@ def feasibility_check(input_data: Dict[str, Any], report: Report) -> Dict[str, A
 
 
 def check_header_required(header: Dict[str, Any], report: Report) -> None:
-    missing = [k for k in REQUIRED_HEADER_FIELDS if k not in header]
+    header_version = header.get("format_version")
+    required = REQUIRED_HEADER_FIELDS + (
+        V2_REQUIRED_HEADER_FIELDS if header_version == 2 else []
+    )
+    missing = [k for k in required if k not in header]
     problems = []
     if missing:
         problems.append(f"缺少 §9.6 必含字段: {missing}")
-    if "format_version" in header and header["format_version"] != FORMAT_VERSION_EXPECTED:
-        problems.append(f"format_version={header['format_version']!r} != 期望 {FORMAT_VERSION_EXPECTED}")
+    if "format_version" in header and header["format_version"] not in FORMAT_VERSIONS_EXPECTED:
+        problems.append(
+            f"format_version={header['format_version']!r} 不在支持集合 "
+            f"{sorted(FORMAT_VERSIONS_EXPECTED)}"
+        )
     if "row_scheme" in header and header["row_scheme"] != ROW_SCHEME_EXPECTED:
         problems.append(f"row_scheme={header['row_scheme']!r} != §9.3/§9.6 钉死的 {ROW_SCHEME_EXPECTED!r}")
     status = "PASS" if not problems else "FAIL"
@@ -495,6 +571,17 @@ def check_input_header_binding(input_data: Dict[str, Any], header: Dict[str, Any
     cmp("square_bucket_idx", input_data["square_bucket_idx"])
     cmp("buckets", [list(b) for b in input_data["buckets"]])
     cmp("R_max", input_data["R_max"])
+    if input_data["format_version"] >= 2:
+        for key in (
+            "stage",
+            "image_size",
+            "eligibility",
+            "requires_nl",
+            "anime_nl_filter_applied",
+            "catalog_hash",
+            "assignment_hash",
+        ):
+            cmp(key, input_data[key])
 
     if "G" in header and int(header["G"]) != input_data["G"]:
         problems.append(f"G: header={header['G']} != W*bs={input_data['G']}")

@@ -85,29 +85,44 @@ from training.dataline.multi_ar import (
 )
 
 
-CANONICAL_OUTPUT_DIR = Path(
-    "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/"
-    "offline_arb_catalog_v1"
+OUTPUT_BASE = Path(
+    "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop"
 )
+CANONICAL_OUTPUT_DIRS = {
+    "256": OUTPUT_BASE / "offline_arb_catalog_v1",
+    "512a": OUTPUT_BASE / "offline_arb_catalog_stage512a_v1",
+}
+CANONICAL_OUTPUT_DIR = CANONICAL_OUTPUT_DIRS["256"]
 DEFAULT_TAR_INDEX_DIR = Path(
     "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/"
     "offline_arb_tarindex_v1"
 )
-DEFAULT_N_MATRIX = Path(
-    "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/"
-    "offline_arb_bucketstats_v1/N_matrix.parquet"
+CANONICAL_BUCKET_STATS_DIRS = {
+    "256": OUTPUT_BASE / "offline_arb_bucketstats_v1",
+    "512a": OUTPUT_BASE / "offline_arb_bucketstats_stage512a_v1",
+}
+DEFAULT_N_MATRIX = CANONICAL_BUCKET_STATS_DIRS["256"] / "N_matrix.parquet"
+DEFAULT_BUCKET_REPORT = (
+    CANONICAL_BUCKET_STATS_DIRS["256"] / "bucket_decision_report.json"
 )
 DEFAULT_PIPELINE_CONFIG = "configs/stage256_redesign_naifu_arb_v1.yaml"
 
 DOMAINS = ("anime", "monet_real", "gpic", "synthetic", "textatlas")
 REAL_DOMAINS = frozenset(("monet_real", "gpic", "synthetic"))
 TAR_DOMAINS = frozenset(("monet_real", "synthetic"))
-STAGE = "256"
-FLOOR = 0.005
+LEGACY_STAGE256_FLOOR = 0.005
 DEFAULT_ROW_GROUP_SIZE = 65_536
 DEFAULT_SOURCE_PARTITIONS = 256
 TAR_MISS_MAX_FRACTION = 0.001
 MIB = 1 << 20
+ELIGIBILITY_FALLBACK_DOMAINS = {
+    "256": frozenset(("monet_real", "gpic", "synthetic", "textatlas")),
+    "512a": frozenset(("anime", "monet_real", "gpic", "synthetic")),
+}
+
+
+class EligibilityContractError(RuntimeError):
+    """A manifest omitted the configured eligibility column outside the audit whitelist."""
 
 # Fork workers inherit this read-mostly context.  It avoids serializing bucket
 # tables, sampling config, stats, and the tar-index row-group map per task.
@@ -151,15 +166,58 @@ def product_name(stem: str, extension: str, diagnostic: bool) -> str:
     return f"{stem}{'.diag' if diagnostic else ''}.{extension}"
 
 
-def validate_output_dir(raw: str) -> Path:
+def validate_output_dir(raw: str, stage: str) -> Path:
     path = Path(raw).expanduser().resolve(strict=False)
-    if str(path) != str(CANONICAL_OUTPUT_DIR):
-        raise ValueError(f"--output-dir must be exactly {CANONICAL_OUTPUT_DIR}; got {path}")
+    expected = CANONICAL_OUTPUT_DIRS.get(stage)
+    if expected is None:
+        raise ValueError(f"unsupported offline catalog stage {stage!r}")
+    if path != expected:
+        raise ValueError(f"--output-dir must be exactly {expected} for stage={stage}; got {path}")
     return path
+
+
+def _strict_positive_int(value: Any, label: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{label} must be a positive integer, got {value!r}")
+    return value
 
 
 def load_runtime_config(config_path: str) -> dict[str, Any]:
     cfg = OmegaConf.load(config_path)
+    stage_raw = OmegaConf.select(cfg, "dataset.stage")
+    if not isinstance(stage_raw, str) or stage_raw not in CANONICAL_OUTPUT_DIRS:
+        raise ValueError(f"unsupported dataset.stage {stage_raw!r}")
+    stage = stage_raw
+    image_size = _strict_positive_int(
+        OmegaConf.select(cfg, "dataset.image_size"), "dataset.image_size"
+    )
+    expected_image_size = {"256": 256, "512a": 512}[stage]
+    if image_size != expected_image_size:
+        raise ValueError(
+            f"stage={stage} requires dataset.image_size={expected_image_size}, got {image_size}"
+        )
+    if OmegaConf.select(cfg, "dataset.multi_ar.enabled") is not True:
+        raise ValueError("offline catalog requires dataset.multi_ar.enabled=true")
+    if OmegaConf.select(cfg, "dataset.multi_ar.bucket_mode") != "adaptive":
+        raise ValueError(
+            "offline catalog requires multi_ar.bucket_mode=adaptive; refusing legacy "
+            "fixed ar_list/bucket_probs/native_bucket_dist configuration"
+        )
+    required_adaptive = (
+        "target_area",
+        "divisor",
+        "adaptive_no_upscale",
+        "adaptive_min_area_ratio",
+        "adaptive_max_aspect",
+        "square_only_domains",
+    )
+    missing = [
+        key
+        for key in required_adaptive
+        if OmegaConf.select(cfg, f"dataset.multi_ar.{key}") is None
+    ]
+    if missing:
+        raise ValueError(f"adaptive bucket config is incomplete: missing {missing}")
     mar = cfg.dataset.multi_ar
     mar_params = {
         "target_area": int(mar.target_area),
@@ -168,11 +226,32 @@ def load_runtime_config(config_path: str) -> dict[str, Any]:
         "min_area_ratio": float(mar.adaptive_min_area_ratio),
         "max_aspect": float(mar.adaptive_max_aspect),
     }
+    if mar_params["target_area"] != image_size * image_size:
+        raise ValueError(
+            f"stage={stage} image_size={image_size} requires multi_ar.target_area="
+            f"{image_size * image_size}, got {mar_params['target_area']}"
+        )
     square_only = tuple(str(x) for x in mar.square_only_domains)
+    if set(square_only) - set(DOMAINS):
+        raise ValueError(f"unknown square_only_domains: {square_only}")
     sampling_path = str(cfg.dataset.sampling_config)
     stats_cache = str(cfg.dataset.stats_cache)
     sampling_cfg = load_sampling_config(sampling_path)
-    domain_mix = {d: float(sampling_cfg.domain_mix[STAGE][d]) for d in DOMAINS}
+    if stage not in sampling_cfg.domain_mix:
+        raise ValueError(f"sampling config has no domain_mix for stage={stage}")
+    stage_mix = sampling_cfg.domain_mix[stage]
+    if set(stage_mix) != set(DOMAINS):
+        raise ValueError(
+            f"stage={stage} domain_mix keys must be exactly {list(DOMAINS)}, got {sorted(stage_mix)}"
+        )
+    domain_mix = {d: float(stage_mix[d]) for d in DOMAINS}
+    if not math.isclose(sum(domain_mix.values()), 1.0, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError(f"stage={stage} domain_mix must sum to 1")
+    requires_nl = bool(sampling_cfg.anime_caption.requires_nl(stage))
+    if stage == "512a" and requires_nl:
+        raise ValueError(
+            "stage512a offline catalog requires requires_nl=false; refusing tag-only row loss"
+        )
     buckets = build_adaptive_buckets(
         mar_params["target_area"],
         mar_params["divisor"],
@@ -180,6 +259,13 @@ def load_runtime_config(config_path: str) -> dict[str, Any]:
         max_aspect=mar_params["max_aspect"],
     )
     return {
+        "stage": stage,
+        "image_size": image_size,
+        "eligibility": f"elig_{image_size}",
+        "requires_nl": requires_nl,
+        "anime_elig_always_true": stage == "256",
+        "anime_nl_filter_applied": False,
+        "eligibility_fallback_domains": ELIGIBILITY_FALLBACK_DOMAINS[stage],
         "pipeline_cfg": cfg,
         "mar_params": mar_params,
         "square_only": square_only,
@@ -299,6 +385,18 @@ def _bool_np(column: pa.ChunkedArray | pa.Array) -> np.ndarray:
         return np.array([bool(x) if x is not None else False for x in column.to_pylist()])
 
 
+def eligibility_mode_for_schema(names: set[str], domain: str) -> str:
+    if domain == "anime" and _CTX["anime_elig_always_true"]:
+        return "stage256_anime_all_true_compatibility"
+    if _CTX["eligibility"] in names:
+        return "column"
+    if domain in _CTX["eligibility_fallback_domains"]:
+        return "short_dim_fallback"
+    raise EligibilityContractError(
+        f"domain={domain} is missing required {_CTX['eligibility']} outside fallback whitelist"
+    )
+
+
 def filter_and_assign(
     table: pa.Table, domain: str, *, folded: bool
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, int]]:
@@ -312,12 +410,14 @@ def filter_and_assign(
         holdout_keep = _int_np(table.column("holdout")) == 0
     else:
         holdout_keep = np.ones(n, dtype=bool)
-    if domain == "anime":
+    eligibility_column = _CTX["eligibility"]
+    eligibility_mode = eligibility_mode_for_schema(names, domain)
+    if eligibility_mode == "stage256_anime_all_true_compatibility":
         elig = np.ones(n, dtype=bool)
-    elif "elig_256" in names:
-        elig = _bool_np(table.column("elig_256"))
+    elif eligibility_mode == "column":
+        elig = _bool_np(table.column(eligibility_column))
     else:
-        elig = np.minimum(w, h) >= 256.0
+        elig = np.minimum(w, h) >= float(_CTX["image_size"])
     wh_valid = np.isfinite(w) & np.isfinite(h) & (w > 0) & (h > 0)
     keep = holdout_keep & elig & wh_valid
     selected = np.flatnonzero(keep)
@@ -334,6 +434,9 @@ def filter_and_assign(
         "rows_elig_dropped": int((holdout_keep & ~elig).sum()),
         "rows_invalid_wh_dropped": int((holdout_keep & elig & ~wh_valid).sum()),
         "rows_kept": int(selected.size),
+        "eligibility_fallback_rows": (
+            int(n) if eligibility_mode == "short_dim_fallback" else 0
+        ),
     }
     return selected, wk, hk, bucket, counters
 
@@ -342,13 +445,23 @@ def count_manifest_shard(task: tuple[str, str, int]) -> dict[str, Any]:
     domain, shard_path, task_idx = task
     pf = pq.ParquetFile(shard_path)
     names = set(pf.schema_arrow.names)
+    eligibility_mode = eligibility_mode_for_schema(names, domain)
     cols = ["width", "height"]
     if "holdout" in names:
         cols.append("holdout")
-    if domain != "anime" and "elig_256" in names:
-        cols.append("elig_256")
+    eligibility_column = _CTX["eligibility"]
+    if not (domain == "anime" and _CTX["anime_elig_always_true"]):
+        if eligibility_column in names:
+            cols.append(eligibility_column)
     nvec = np.zeros(len(_CTX["buckets"]), dtype=np.int64)
     totals = defaultdict(int)
+    totals["eligibility_column_shards"] = int(eligibility_mode == "column")
+    totals["eligibility_fallback_shards"] = int(
+        eligibility_mode == "short_dim_fallback"
+    )
+    totals["eligibility_compatibility_shards"] = int(
+        eligibility_mode == "stage256_anime_all_true_compatibility"
+    )
     for rg in range(pf.num_row_groups):
         table = pf.read_row_group(rg, columns=cols, use_threads=False)
         _sel, _w, _h, bucket, counters = filter_and_assign(table, domain, folded=False)
@@ -384,13 +497,14 @@ def compute_floor_mapping(
     buckets: list[tuple[int, int]],
     domain_mix: dict[str, float],
     square_idx: int,
+    floor: float,
 ) -> tuple[set[int], np.ndarray, np.ndarray, np.ndarray]:
-    """Exact make_planner_input.py --floor 0.005 semantics."""
+    """Exact make_planner_input.py --floor semantics."""
     totals = raw_n.sum(axis=0)
     probs = np.zeros(raw_n.shape[0], dtype=np.float64)
     for j, domain in enumerate(DOMAINS):
         probs += domain_mix[domain] * raw_n[:, j] / max(int(totals[j]), 1)
-    kept = {b for b in range(len(buckets)) if probs[b] >= FLOOR}
+    kept = {b for b in range(len(buckets)) if probs[b] >= floor}
     kept.add(square_idx)
     fold_map = np.empty(len(buckets), dtype=np.int64)
     folded = np.zeros_like(raw_n)
@@ -400,6 +514,168 @@ def compute_floor_mapping(
         fold_map[b] = target
         folded[target, :] += raw_n[b, :]
     return kept, fold_map, folded, probs
+
+
+def assignment_hash_payload(
+    runtime: dict[str, Any],
+    *,
+    bucket_table_hash: str,
+    floor: float,
+    kept: Iterable[int],
+    fold_map: np.ndarray,
+) -> dict[str, Any]:
+    """Return the canonical assignment identity while preserving stage256 bytes."""
+    payload: dict[str, Any] = {
+        "bucket_table_hash": bucket_table_hash,
+        "floor": floor,
+        "kept": sorted(int(value) for value in kept),
+        "fold_map": [int(value) for value in fold_map.tolist()],
+        "square_only_domains": list(runtime["square_only"]),
+        "square_bucket_idx": int(runtime["square_idx"]),
+        "assignment": "phase3a_vectorized_with_production_scalar_fallback_v1",
+        # This historical string is part of the stage256 assignment ABI.  It is
+        # intentionally distinct from the new top-level artifact eligibility.
+        "eligibility": "phase3a_stage256_v1",
+    }
+    if runtime["stage"] == "512a":
+        payload.update(
+            {
+                "stage": runtime["stage"],
+                "image_size": runtime["image_size"],
+                "eligibility": runtime["eligibility"],
+                "requires_nl": runtime["requires_nl"],
+            }
+        )
+    return payload
+
+
+def _contract_fields(runtime: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "stage": runtime["stage"],
+        "image_size": runtime["image_size"],
+        "eligibility": runtime["eligibility"],
+        "requires_nl": runtime["requires_nl"],
+        "anime_nl_filter_applied": runtime["anime_nl_filter_applied"],
+    }
+
+
+def _validate_stage_input_path(path: Path, expected: Path, label: str, stage: str) -> Path:
+    resolved = path.expanduser().resolve(strict=False)
+    if resolved != expected:
+        raise ValueError(f"{label} must be {expected} for stage={stage}; got {resolved}")
+    return resolved
+
+
+def validate_bucket_report(
+    path: Path,
+    runtime: dict[str, Any],
+    n_matrix_path: Path,
+    n_matrix_sha256: str,
+    floor: float,
+) -> dict[str, Any]:
+    """Bind the floor choice to the same stage-specific Phase-3a evidence."""
+    with path.open("r", encoding="utf-8") as handle:
+        report = json.load(handle)
+    if not isinstance(report, dict) or report.get("schema_version") != "offline_arb_bucketstats_v1":
+        raise ValueError(f"unsupported bucket decision report: {path}")
+    if report.get("diagnostic_run") is not False:
+        raise ValueError("catalog floor must come from a formal, non-diagnostic bucket report")
+
+    expected_contract = _contract_fields(runtime)
+    present = {key for key in expected_contract if key in report}
+    legacy_stage256 = not present
+    if legacy_stage256:
+        if runtime["stage"] != "256":
+            raise ValueError("stage512a bucket report is missing the explicit stage contract")
+        nested = report.get("config")
+        if not isinstance(nested, dict) or nested.get("stage") != "256":
+            raise ValueError("legacy stage256 bucket report identity is not verifiable")
+    else:
+        if present != set(expected_contract):
+            raise ValueError(f"bucket report has a partial stage contract: {sorted(present)}")
+        for key, expected in expected_contract.items():
+            if report.get(key) != expected:
+                raise ValueError(
+                    f"bucket report {key}={report.get(key)!r} != config {expected!r}"
+                )
+
+    report_config = report.get("config")
+    if not isinstance(report_config, dict):
+        raise ValueError("bucket report config section is missing")
+    if report_config.get("multi_ar_params") != runtime["mar_params"]:
+        raise ValueError("bucket report/config multi_ar parameters differ")
+    if report_config.get("square_only_domains") != list(runtime["square_only"]):
+        raise ValueError("bucket report/config square_only_domains differ")
+    if report_config.get("domain_mix") != runtime["domain_mix"]:
+        raise ValueError("bucket report/config domain_mix differs")
+    eligibility_audit = report.get("eligibility_audit")
+    if runtime["stage"] == "512a":
+        if not isinstance(eligibility_audit, dict) or eligibility_audit.get("pass") is not True:
+            raise ValueError("stage512a bucket report eligibility audit is missing or failed")
+        if eligibility_audit.get("fallback_domain_whitelist") != sorted(
+            runtime["eligibility_fallback_domains"]
+        ):
+            raise ValueError("bucket report eligibility fallback whitelist differs")
+        coverage = report.get("coverage")
+        if not isinstance(coverage, dict):
+            raise ValueError("bucket report coverage is missing")
+        for domain in DOMAINS:
+            row = coverage.get(domain)
+            if not isinstance(row, dict):
+                raise ValueError(f"bucket report coverage missing domain={domain}")
+            if domain in runtime["eligibility_fallback_domains"]:
+                valid = (
+                    row.get("eligibility_fallback_shards") == row.get("shards_scanned")
+                    and row.get("eligibility_column_shards") == 0
+                )
+            else:
+                valid = (
+                    row.get("eligibility_column_shards") == row.get("shards_scanned")
+                    and row.get("eligibility_fallback_shards") == 0
+                )
+            if not valid:
+                raise ValueError(
+                    f"bucket report eligibility source mismatch for {domain}: {row}"
+                )
+    report_buckets = report.get("buckets")
+    expected_buckets = [
+        {"idx": i, "h": h, "w": w, "ar": w / h}
+        for i, (h, w) in enumerate(runtime["buckets"])
+    ]
+    if report_buckets != expected_buckets:
+        raise ValueError("bucket report/config adaptive bucket table differs")
+
+    matrix = report.get("N_matrix")
+    if isinstance(matrix, dict):
+        if matrix.get("sha256") != n_matrix_sha256:
+            raise ValueError("bucket report N_matrix SHA does not match selected N_matrix")
+        report_matrix_path = Path(str(matrix.get("path", ""))).expanduser().resolve(strict=False)
+        if report_matrix_path != n_matrix_path:
+            raise ValueError("bucket report N_matrix path does not match selected N_matrix")
+    elif runtime["stage"] != "256" or not legacy_stage256:
+        raise ValueError("bucket report does not bind N_matrix path/SHA")
+
+    candidates = report.get("floors")
+    if not isinstance(candidates, list):
+        raise ValueError("bucket report floors must be a list")
+    matches = [
+        entry
+        for entry in candidates
+        if isinstance(entry, dict)
+        and type(entry.get("floor")) in (int, float)
+        and float(entry["floor"]) == floor
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"selected --floor={floor} must appear exactly once in bucket report; found {len(matches)}"
+        )
+    return {
+        "path": str(path),
+        "sha256": sha256_file(path),
+        "legacy_stage256_contract": legacy_stage256,
+        "selected_floor": floor,
+        "selected_floor_report": matches[0],
+    }
 
 
 def matrix_list(matrix: np.ndarray) -> list[list[int]]:
@@ -620,7 +896,7 @@ def real_derived_columns(
     }
 
 
-def _required_real_columns(names: set[str]) -> list[str]:
+def _required_real_columns(names: set[str], domain: str) -> list[str]:
     required = {
         "uid",
         "sub_source",
@@ -640,8 +916,10 @@ def _required_real_columns(names: set[str]) -> list[str]:
     if missing:
         raise RuntimeError(f"real/synth manifest missing required columns: {sorted(missing)}")
     cols = sorted(required)
-    if "elig_256" in names:
-        cols.append("elig_256")
+    eligibility_mode_for_schema(names, domain)
+    eligibility_column = str(_CTX["eligibility"])
+    if eligibility_column in names:
+        cols.append(eligibility_column)
     return cols
 
 
@@ -709,9 +987,17 @@ def build_manifest_fragment(task: tuple[str, str, int, str]) -> dict[str, Any]:
     token = f"{task_idx:06d}_{hashlib.sha256(shard_path.encode()).hexdigest()[:12]}"
     counts = np.zeros(len(_CTX["buckets"]), dtype=np.int64)
     coverage = defaultdict(int)
+    eligibility_mode = eligibility_mode_for_schema(names, domain)
+    coverage["eligibility_column_shards"] = int(eligibility_mode == "column")
+    coverage["eligibility_fallback_shards"] = int(
+        eligibility_mode == "short_dim_fallback"
+    )
+    coverage["eligibility_compatibility_shards"] = int(
+        eligibility_mode == "stage256_anime_all_true_compatibility"
+    )
 
     if domain in REAL_DOMAINS:
-        columns = _required_real_columns(names)
+        columns = _required_real_columns(names, domain)
         pieces: list[pa.Table] = []
         for rg in range(pf.num_row_groups):
             table = pf.read_row_group(rg, columns=columns, use_threads=False)
@@ -782,6 +1068,9 @@ def build_manifest_fragment(task: tuple[str, str, int, str]) -> dict[str, Any]:
         if missing:
             raise RuntimeError(f"anime manifest missing columns: {sorted(missing)}")
         columns = sorted(required)
+        eligibility_column = str(_CTX["eligibility"])
+        if eligibility_column in names:
+            columns.append(eligibility_column)
         rg_starts = np.cumsum(
             [0] + [pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups - 1)]
         )
@@ -816,7 +1105,10 @@ def build_manifest_fragment(task: tuple[str, str, int, str]) -> dict[str, Any]:
         missing = required - names
         if missing:
             raise RuntimeError(f"textatlas sidecar missing columns: {sorted(missing)}")
-        columns = sorted(required | ({"elig_256"} if "elig_256" in names else set()))
+        eligibility_column = str(_CTX["eligibility"])
+        columns = sorted(
+            required | ({eligibility_column} if eligibility_column in names else set())
+        )
         subset = Path(shard_path).parent.name
         shard_name = Path(shard_path).name
         source_path = str(Path(_CTX["textatlas_source_root"]) / subset / shard_name)
@@ -1457,7 +1749,16 @@ CAPTION_STRATEGY = {
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=DEFAULT_PIPELINE_CONFIG)
-    ap.add_argument("--n-matrix", default=str(DEFAULT_N_MATRIX))
+    ap.add_argument(
+        "--stage", choices=tuple(CANONICAL_OUTPUT_DIRS), default=None,
+        help="explicit stage guard; required for stage512a",
+    )
+    ap.add_argument("--n-matrix", default=None)
+    ap.add_argument("--bucket-report", default=None)
+    ap.add_argument(
+        "--floor", type=float, default=None,
+        help="selected Phase-3a candidate; stage256 defaults to legacy 0.005, stage512a requires explicit value",
+    )
     ap.add_argument("--tar-index-dir", default=str(DEFAULT_TAR_INDEX_DIR))
     ap.add_argument("--output-dir", default=str(CANONICAL_OUTPUT_DIR))
     ap.add_argument("--workers", type=int, default=64)
@@ -1491,6 +1792,10 @@ def _merge_coverage(results: Iterable[dict[str, Any]], shards_total: dict[str, i
             "rows_elig_dropped": 0,
             "rows_invalid_wh_dropped": 0,
             "rows_kept": 0,
+            "eligibility_column_shards": 0,
+            "eligibility_fallback_shards": 0,
+            "eligibility_fallback_rows": 0,
+            "eligibility_compatibility_shards": 0,
         }
         for d in DOMAINS
     }
@@ -1504,7 +1809,48 @@ def _merge_coverage(results: Iterable[dict[str, Any]], shards_total: dict[str, i
 
 def main() -> int:
     args = parse_args()
-    output_dir = validate_output_dir(args.output_dir)
+    runtime = load_runtime_config(args.config)
+    if args.stage is not None and args.stage != runtime["stage"]:
+        raise ValueError(
+            f"--stage={args.stage} does not match config dataset.stage={runtime['stage']}"
+        )
+    if runtime["stage"] == "512a" and args.stage is None:
+        raise ValueError("stage512a catalog build requires explicit --stage 512a")
+    if args.floor is None:
+        if runtime["stage"] == "512a":
+            raise ValueError(
+                "stage512a catalog build requires an explicit --floor chosen from its bucket report"
+            )
+        floor = LEGACY_STAGE256_FLOOR
+    else:
+        floor = float(args.floor)
+    if not math.isfinite(floor) or floor < 0.0:
+        raise ValueError("--floor must be finite and non-negative")
+
+    stage = runtime["stage"]
+    output_dir = validate_output_dir(args.output_dir, stage)
+    stats_root = CANONICAL_BUCKET_STATS_DIRS[stage]
+    n_matrix_path = _validate_stage_input_path(
+        Path(args.n_matrix) if args.n_matrix else stats_root / "N_matrix.parquet",
+        stats_root / "N_matrix.parquet",
+        "--n-matrix",
+        stage,
+    )
+    bucket_report_path = _validate_stage_input_path(
+        Path(args.bucket_report) if args.bucket_report else stats_root / "bucket_decision_report.json",
+        stats_root / "bucket_decision_report.json",
+        "--bucket-report",
+        stage,
+    )
+    if not n_matrix_path.is_file():
+        raise FileNotFoundError(n_matrix_path)
+    if not bucket_report_path.is_file():
+        raise FileNotFoundError(bucket_report_path)
+    n_matrix_sha256 = sha256_file(n_matrix_path)
+    bucket_report_binding = validate_bucket_report(
+        bucket_report_path, runtime, n_matrix_path, n_matrix_sha256, floor
+    )
+
     tar_index_dir = Path(args.tar_index_dir).expanduser().resolve(strict=False)
     success_marker = tar_index_dir / "_SUCCESS"
     if not success_marker.is_file():
@@ -1519,7 +1865,6 @@ def main() -> int:
         shutil.rmtree(work_root)
     work_root.mkdir(parents=True)
 
-    runtime = load_runtime_config(args.config)
     sampling_cfg = runtime["sampling_cfg"]
     all_shards = list_shards(sampling_cfg)
     selected_shards = {
@@ -1574,7 +1919,6 @@ def main() -> int:
     for result in count_results:
         raw_actual[:, domain_index[result["domain"]]] += result["N"]
 
-    n_matrix_path = Path(args.n_matrix)
     if diagnostic:
         raw_baseline = raw_actual.copy()
         n_matrix_source = "scan_derived_diagnostic_same_shards"
@@ -1605,9 +1949,22 @@ def main() -> int:
         runtime["buckets"],
         runtime["domain_mix"],
         runtime["square_idx"],
+        floor,
     )
+    reported_kept = bucket_report_binding["selected_floor_report"].get(
+        "kept_bucket_indices"
+    )
+    # Phase-3a's informational floor=0 candidate suppresses zero-mass buckets,
+    # while make_planner_input's floor=0 semantics leave the full namespace in
+    # place.  Positive floors must agree exactly; floor=0 remains separately
+    # governed by the C6 evidence in the report.
+    if floor > 0.0 and reported_kept != sorted(kept):
+        raise RuntimeError(
+            "selected bucket report floor produces different kept buckets: "
+            f"report={reported_kept}, catalog={sorted(kept)}"
+        )
     _CTX["fold_map"] = fold_map
-    print(f"[catalog] floor={FLOOR}: kept={len(kept)}/{len(runtime['buckets'])} {sorted(kept)}", flush=True)
+    print(f"[catalog] floor={floor}: kept={len(kept)}/{len(runtime['buckets'])} {sorted(kept)}", flush=True)
 
     build_tasks = [(d, p, i, str(work_root)) for d, p, i in tasks]
     print(f"[catalog] pass2 materialize per manifest shard: tasks={len(build_tasks)}", flush=True)
@@ -1705,7 +2062,8 @@ def main() -> int:
     n_diff_report: dict[str, Any] = {
         "schema_version": "offline_arb_catalog_n_diff_v1",
         "diagnostic_run": diagnostic,
-        "floor": FLOOR,
+        **_contract_fields(runtime),
+        "floor": floor,
         "domains": list(DOMAINS),
         "original_planner_N": matrix_list(folded_baseline),
         "tar_index_excluded_N": matrix_list(bad_n),
@@ -1781,24 +2139,44 @@ def main() -> int:
         "domains": list(DOMAINS),
         "files": {d: {"rows": files[d]["rows"], "sha256": files[d]["sha256"]} for d in DOMAINS},
         "row_order": ["domain", "bucket_idx", "uid"],
-        "floor": FLOOR,
+        "floor": floor,
         "bucket_table": [list(x) for x in runtime["buckets"]],
         "kept_bucket_indices": sorted(kept),
     }
     bucket_table_hash = canonical_sha256([list(x) for x in runtime["buckets"]])
-    assignment_hash = canonical_sha256(
-        {
-            "bucket_table_hash": bucket_table_hash,
-            "floor": FLOOR,
-            "kept": sorted(kept),
-            "fold_map": fold_map.tolist(),
-            "square_only_domains": list(runtime["square_only"]),
-            "square_bucket_idx": runtime["square_idx"],
-            "assignment": "phase3a_vectorized_with_production_scalar_fallback_v1",
-            "eligibility": "phase3a_stage256_v1",
-        }
+    assignment_payload = assignment_hash_payload(
+        runtime,
+        bucket_table_hash=bucket_table_hash,
+        floor=floor,
+        kept=kept,
+        fold_map=fold_map,
     )
+    assignment_hash = canonical_sha256(assignment_payload)
     catalog_hash = canonical_sha256(catalog_hash_payload)
+    coverage_summary = _merge_coverage(
+        build_results, {d: len(all_shards[d]) for d in DOMAINS}
+    )
+    eligibility_source_pass = all(
+        (
+            coverage_summary[domain]["eligibility_fallback_shards"]
+            == coverage_summary[domain]["shards_scanned"]
+            and coverage_summary[domain]["eligibility_column_shards"] == 0
+        )
+        if domain in runtime["eligibility_fallback_domains"]
+        else (
+            coverage_summary[domain]["eligibility_column_shards"]
+            == coverage_summary[domain]["shards_scanned"]
+            and coverage_summary[domain]["eligibility_fallback_shards"] == 0
+        )
+        for domain in DOMAINS
+        if not (
+            runtime["stage"] == "256"
+            and domain == "anime"
+            and runtime["anime_elig_always_true"]
+        )
+    )
+    if not eligibility_source_pass:
+        raise RuntimeError(f"catalog eligibility source audit failed: {coverage_summary}")
 
     header: dict[str, Any] = {
         "schema_version": "offline_arb_catalog_v1",
@@ -1806,10 +2184,11 @@ def main() -> int:
         "host": socket.gethostname(),
         "diagnostic_run": diagnostic,
         "max_shards_per_domain": args.max_shards_per_domain,
+        **_contract_fields(runtime),
         "catalog_hash": catalog_hash,
         "bucket_table_hash": bucket_table_hash,
         "assignment_hash": assignment_hash,
-        "floor": FLOOR,
+        "floor": floor,
         "domains": list(DOMAINS),
         "domain_order": list(DOMAINS),
         "square_only_domains": list(runtime["square_only"]),
@@ -1832,9 +2211,13 @@ def main() -> int:
             "tar_index_excluded": matrix_list(bad_n),
             "materialized_after_exclusion": matrix_list(final_n),
         },
-        "coverage": _merge_coverage(
-            build_results, {d: len(all_shards[d]) for d in DOMAINS}
-        ),
+        "coverage": coverage_summary,
+        "eligibility_audit": {
+            "pass": eligibility_source_pass,
+            "column": runtime["eligibility"],
+            "fallback_rule": f"min(width,height)>={runtime['image_size']}",
+            "fallback_domain_whitelist": sorted(runtime["eligibility_fallback_domains"]),
+        },
         "self_checks": validations,
         "caption_strategy": CAPTION_STRATEGY,
         "sort_and_memory": {
@@ -1850,7 +2233,8 @@ def main() -> int:
             "sampling_config": runtime["sampling_path"],
             "sampling_config_sha256": sha256_file(Path(runtime["sampling_path"])),
             "N_matrix": str(n_matrix_path),
-            "N_matrix_sha256": sha256_file(n_matrix_path) if n_matrix_path.is_file() else None,
+            "N_matrix_sha256": n_matrix_sha256,
+            "bucket_decision_report": bucket_report_binding,
             "tar_index": tar_index_summary,
             "multi_ar_params": runtime["mar_params"],
             "domain_mix": runtime["domain_mix"],
@@ -1862,14 +2246,16 @@ def main() -> int:
         "duration_seconds": time.perf_counter() - started,
     }
 
-    # Publish domain files first and header last.  A visible header therefore means every
-    # referenced parquet/report has completed and passed validation.
+    # Publish domain files first, remove all scratch state, and publish the
+    # header last.  A visible header therefore means every referenced product
+    # passed validation and the builder returned through every fallible cleanup
+    # step before the publication marker became visible.
     for d in DOMAINS:
         final_path = output_dir / product_name(d, "parquet", diagnostic)
         os.replace(domain_tmp_paths[d], final_path)
+    shutil.rmtree(work_root)
     header_path = output_dir / product_name("header", "json", diagnostic)
     atomic_write_json(header_path, header)
-    shutil.rmtree(work_root)
 
     print("==== OFFLINE_ARB PHASE5 CATALOG SELF-CHECK ====")
     print(
