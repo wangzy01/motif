@@ -7,17 +7,31 @@
 - `/fsx/evan/doc/mot/current/STAGE512B_REAL_BRIEF.md`
 - `/fsx/evan/doc/mot/current/WORKSPACE_ARCHIVE_INDEX.md`
 
-只有以下两层门同时闭合，本目录才是导航权威：先确认
-`/fsx/evan/doc/mot/current/PUBLICATION_MANIFEST.json`、同目录
-`_SUCCESS`、逐文件 SHA，以及 manifest 绑定的 v5 target-specific
-directory lock、intent、completion 和 prepared hardlink twin 全部通过；
-再确认 fresh 独立只读验证回执
-`/fsx/evan/mot_code/data_analysis/doc_publication_verify_20260731_v5/REPORT.json`
-及同目录 `_SUCCESS` 均为 PASS。缺任一项时 current 仍只是候选发布，不得
-据此启动状态变更。
+先对 `/fsx/evan/doc/mot/current/PUBLICATION_MANIFEST.json`、同目录
+`_SUCCESS`、manifest 声明的逐文件 SHA、exact child closure，以及
+manifest 中 `publication_receipt_path` 指向的 create-once 发布回执做小型
+只读核验。版本号、归档路径和回执路径均以 current manifest 自描述内容为准，
+不要写死或回退到旧 v5 门。缺任一项、身份不闭合或发现未知文件时，current
+仍只视为候选发布，不得据此启动状态变更。
 
 满足上述条件后，远端 FSx current 文档是权威；Mac 本地文件只作缓存。
 不要把历史文档或旧 `stage512b` YAML 当作可执行方案。
+
+## 第一轮对话：只规划和讨论
+
+接手后的**第一轮对话不是执行轮**。这一轮的目标是理解项目、提出思路并和
+用户讨论，而不是马上处理数据或推进远端任务。你应：
+
+1. 用自己的话概括你对现状、目标、已锁定边界和主要风险的理解；
+2. 提出一份分阶段研究/准备思路，说明关键取舍、依赖关系和大致耗时；
+3. 集中列出数据来源、配比、训练预算、评测协议等仍需用户确认或拍板的问题；
+4. 给出你的建议，但清楚区分已知事实、合理推断和待验证假设。
+
+第一轮只允许阅读上述 compact 文档、做必要的小型只读状态核验，以及开展
+不改变项目状态的资料调研。**未经用户在后续对话明确授权，不提交 JCC，
+不全量扫描或审计数据，不构建、复制、清理或改写数据，不运行评测或训练，
+不修改代码、Git、FSx、S3 或远端文档。**下面列出的任务是后续候选工作，
+不是要求第一轮立即执行的清单。
 
 ## 项目现状
 
@@ -39,7 +53,7 @@ Stage512a 已以 8 nodes × 8 H100、global batch 2048、125,000 steps /
 提到 Cosmos3、nanoT2I/MONET 作为调研线索，但名称、参数口径、数据规模和
 评测协议都必须查证，不能据印象下结论。
 
-本阶段先调研和设计，不启动数据构建、评测或训练。首先完成：
+本阶段先调研和设计，不启动数据构建、评测或训练。后续候选工作包括：
 
 1. 对相近体量的最新主流 T2I 做来源可追溯的横向调研，区分可训练生成器
    参数、在线总参数、文本编码器、分辨率、训练 exposures、prompt rewrite
