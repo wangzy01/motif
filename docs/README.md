@@ -12,13 +12,11 @@
 ## 权威性
 
 - `/fsx/evan/doc/mot/current/` 只有在
-  `PUBLICATION_MANIFEST.json`、逐文件 SHA、`_SUCCESS`，manifest 绑定的
-  v5 target-specific directory lock、intent、completion、prepared
-  hardlink twin，以及 fresh 独立只读验证目录
-  `/fsx/evan/mot_code/data_analysis/doc_publication_verify_20260731_v5/`
-  内的 `REPORT.json` 和 `_SUCCESS` 全部通过后，才成为当前文档导航权威；
+  `PUBLICATION_MANIFEST.json`、逐文件 SHA、`_SUCCESS` 和当前版本的
+  create-once publication receipt 全部通过后，才成为当前文档导航权威；
   缺任一项都只是候选稿。本地 Mac 副本只用于编辑和恢复，不作为远端事实
-  来源。
+  来源。2026-07-31 的 v6 文档发布将 FSx 使用上限更新为十进制 2 TB
+  （`2,000,000,000,000` bytes）；v5 及更早记录仅作历史证据。
 - 冻结源码、checkpoint、配置、离线计划和审计报告的身份，以
   `STAGE512A_FINAL.md` 中列出的远端路径和 SHA 为准。
 - 本轮历史文档统一放在
@@ -36,5 +34,7 @@
 - Stage512a W64 8×8 已完整结束并通过独立 full-state 审计。
 - 当前只做 Stage512b-real 的调研、方案和工作区整理；尚未授权构建数据、
   修改训练代码、提交 GPUVAL 或启动正式训练。
+- 当前 `/fsx/evan` 使用上限是十进制 2 TB；耗时或递归用量审计仍必须走
+  JCC，不能把整个挂载的 `df` 当作 `/fsx/evan` 目录用量。
 - 若现场事实与本文档冲突，停止会改变状态的动作，保留证据，并先向用户
   汇报差异。

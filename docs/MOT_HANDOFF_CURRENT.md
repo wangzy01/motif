@@ -71,7 +71,8 @@ Stage512a 已以 8 nodes × 8 H100、global batch 2048、125,000 steps /
 ## 操作边界
 
 - 所有耗时、大内存、大 I/O、全量存储扫描、checkpoint hash/copy 必须走
-  JCC；登录节点只做小型只读检查。`/fsx/evan` 保持低于十进制 1 TB。
+  JCC；登录节点只做小型只读检查。`/fsx/evan` 保持低于十进制 2 TB
+  （`2,000,000,000,000` bytes）。
 - 提交动作前检查 `jcc job list`、目标路径和现有产物；已有同一动作时只
   监控，绝不重复提交或覆盖。未知漂移、半成品或确定性错误 fail-closed。
 - FORMAL/GPUVAL 禁止 `jcc job get`。自动重试最多 `maxRetries:3`，同一

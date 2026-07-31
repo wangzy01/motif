@@ -23,6 +23,9 @@
   服务的样本数为准，不设 150–200M 硬目标。
 - exposures、steps、gates 和指标阈值暂不固定；需以 benchmark 调研和
   Stage512a 可比基线为依据另行提案。
+- `/fsx/evan` 当前使用上限为十进制 2 TB
+  （`2,000,000,000,000` bytes）；任何全量用量审计、数据构建或大 I/O
+  仍必须通过 JCC。
 - 未来只有在用户批准正式方案后，才允许以
   `/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_20260724_weighted_w64_recovery_v2/last.pt`
   （SHA-256
