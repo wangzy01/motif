@@ -503,6 +503,20 @@ class CompleteV1Dataset:
             if self._mar_assignment_mode not in {"current", "item_queue"}:
                 raise ValueError("dataset.multi_ar.assignment_mode must be one of {'current','item_queue'}")
             self._mar_bucket_mode = str(_mar.get("bucket_mode", "fixed") or "fixed")
+            if self._mar_bucket_mode == "anchors_v1":
+                # Refuse loudly instead of silently falling through to build_buckets()'s
+                # 7-entry fixed AR table with adaptive=False. anchors_v1 is an
+                # offline-only geometry: this streaming producer assigns through
+                # Bucketer -> assign_bucket/assign_adaptive_bucket, neither of which has
+                # a feasible-anchor test, so it would upsample (a 400x300 image lands on
+                # 576x432, a 1.44x enlargement). Zero upsampling only holds through the
+                # offline catalog path plus anchors_v1.verify_binding() at runtime.
+                raise ValueError(
+                    "dataset.multi_ar.bucket_mode=anchors_v1 is offline-only; the "
+                    "streaming CompleteV1Dataset producer cannot honour its "
+                    "zero-upsampling contract. Use the offline dataline "
+                    "(training.dataline_offline.offline_dataset.OfflineExactDataset)."
+                )
             if self._mar_bucket_mode not in {"fixed", "adaptive"}:
                 raise ValueError("dataset.multi_ar.bucket_mode must be one of {'fixed','adaptive'}")
             self._mar_target_area = int(_mar.get("target_area", 262144))

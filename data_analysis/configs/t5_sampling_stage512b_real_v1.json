@@ -1,0 +1,383 @@
+{
+  "_doc": "MoT 数据+训练阶段 REDESIGN v1 (2026-06-29). 新四阶段课程的前三段 256/512a/512b 采样权威 (设计权威见 docs/数据+训练阶段_重设计方案_v1_20260629.md, 执行追踪见 docs/数据+训练阶段_执行计划与进度_v1_20260629.md). 相对 live 的 t5_sampling_complete_v1_textatlas.json 的关键变更: (1) domain_mix 改为 256/512a/512b 三阶段新配比; (2) real 池 daily_v1(21M) -> rich_v1(60M), synth 池 daily monet_synth(3M) -> synthetic_v1(13.8M), 经新增 manifest.real_synth_roots per-domain 根 (gated, code 优先用它, 缺则回退单 glob real_synth); (3) MONET 子源权重 count^-0.2 软拉平 -> 新增显式 monet_subsource_explicit_probs (gated); (4) anime caption per-stage token: 新增 model_text_max_length_per_stage (256=384/512a=512b=512), 缺则回退标量 384; (5) caption 路由 256=50/20/20/10, 512a=512b=35/20/20/25. cluster_beta 簇内拉平/anime sampling priority/band 机制全沿用. STAGES 由 domain_mix.keys() 派生 (code 改, gated). 绝不喂给 live 训练.",
+  "created_at_utc": "2026-06-29",
+  "supersedes": "t5_sampling_complete_v1_textatlas.json 的 stage mix/源权重/caption路由/token 部分 (REDESIGN; live 原文件不动)",
+  "manifest": {
+    "real_synth": "/s3-pixai-test-uw2/evan/mot_filtering_v1/t5_manifest/daily_v1/{gpic,monet,monet_synth}",
+    "real_synth_roots": {
+      "_note": "REDESIGN (gated): 每域显式 manifest 根, 替代单 base glob real_synth (现 code 假设三域同 base). real->rich_v1 60M, synth->synthetic_v1 13.8M. code 若识别此字段则按域取 *.parquet; 缺则回退 real_synth glob. monet_real=rich_v1/monet(40M,256shard), gpic=rich_v1/gpic(20M,256shard), synthetic=synthetic_v1/monet_synth(13.8M,64shard,全>=1024px,全schema带caption band/dominant_cat).",
+      "monet_real": "/s3-pixai-test-uw2/evan/mot_filtering_v1/t5_manifest/rich_v1/monet",
+      "gpic": "/s3-pixai-test-uw2/evan/mot_filtering_v1/t5_manifest/rich_v1/gpic",
+      "synthetic": "/s3-pixai-test-uw2/evan/mot_filtering_v1/t5_manifest/synthetic_v1/monet_synth"
+    },
+    "anime": "/s3-pixai-test-uw2/evan/mot_filtering_v1/t5_manifest/daily_v1/anime",
+    "anime_caption_source": "/s3/evan/anime_core_ditv04_ct_soft/data (read caption fields back by `key` at train time)",
+    "textatlas": "/fsx/evan/textatlas_manifest_v1",
+    "textatlas_source": "/s3/evan/textatlas5m",
+    "_textatlas_note": "5th domain (2026-06-27). textatlas = sidecar manifest root (per-subset/<shard>.parquet: uid/image_path/w/h/elig_512/elig_1024/caption1-5, built by scripts/build_textatlas_manifest.py). textatlas_source = inline-image source parquets (read image bytes by row, joined to sidecar by image_path). At train time the reader prefers a /local NVMe pre-stage (dataset.textatlas_local_root) and falls back to textatlas_source on S3 for correctness. textatlas_subsets = the 9 included subsets (CoverBook dropped: only 15 imgs >=512px). elig_256 computed on-the-fly from sidecar w/h.",
+    "textatlas_subsets": [
+      "CleanTextSynth",
+      "LongWordsSubset-A",
+      "LongWordsSubset-M",
+      "PPT2Details",
+      "PPT2Structured",
+      "Paper2Text",
+      "StyledTextSynth",
+      "TextScenesHQ",
+      "TextVisionBlend"
+    ]
+  },
+  "pool": {
+    "gpic": 20000000,
+    "monet_real": 40000000,
+    "synthetic": 13808747,
+    "anime_static": 16499287,
+    "_note": "REDESIGN: real=rich_v1 60M (MONET 40M + GPIC 20M), synth=synthetic_v1 13.8M (全>=1024px), anime 16.5M (NSFW 保留, 不静态裁剪, 曝光由 domain_mix + ct_weight bounded resample 塑形). high-res 子集: MONET>=512=32M / GPIC>=512=4.24M (rich_v1 内, 512a/512b 用). 512b anime 精选<10M 在 sampling 侧筛.",
+    "total_static": 90308034
+  },
+  "domain_mix": {
+    "_note": "REDESIGN 三阶段 (256/512a/512b), 每 stage 和=1.0, Evan 2026-06-29 全锁. STAGES 由本 dict 的 keys 派生 (code 改). 256=foundation/breadth(不过早anime对齐, textatlas 10%->1.5% 腾出按现比回填 real/synth); 512a=锐化+抬anime(保守抬 text/synth, real仍非anime主力); 512b=anime高质量对齐(anime 0.78, real/synth/text 压地板). real内 monet:gpic 见 monet_real_gpic_ratio. Loader 须对缺/空域 renorm.",
+    "256": {
+      "anime": 0.27,
+      "monet_real": 0.405,
+      "gpic": 0.259,
+      "synthetic": 0.051,
+      "textatlas": 0.015
+    },
+    "512a": {
+      "anime": 0.37,
+      "monet_real": 0.4,
+      "gpic": 0.13,
+      "synthetic": 0.05,
+      "textatlas": 0.05
+    },
+    "512b": {
+      "anime": 0.3,
+      "monet_real": 0.4,
+      "gpic": 0.2,
+      "synthetic": 0.05,
+      "textatlas": 0.05
+    },
+    "_stage_meta": {
+      "_note": "曝光量 (image-views, 非step): 256=384M / 512a=128M / 512b=256M. image_size: 256=256 / 512a=512b=512. anime池/重复: 256=16.5M(~6ep) / 512a=elig_512 16.29M(~3ep) / 512b=精选<10M(~20ep, cluster分层+多caption护栏, eval gate@64/128/192/256M). 1024+末尾收尾段=暂缓(看512b效果)."
+    },
+    "_stage512b_real_note": "Stage512b-real (2026-08-01): REPLACES the 2026-06-29 anime-alignment 512b design (anime 0.78 / 256M exposures / anime curated <10M at ~20 epochs), which is no longer planned. This stage is a real-photo breadth stage: 512M exposures = 250,000 steps at global batch 2048, full-survivor real pool, bucket_mode=anchors_v1 (13 anchors)."
+  },
+  "resolution_routing": {
+    "_note": "Eligibility masks (elig_256/elig_512 列直接用). REDESIGN: 256=all(elig_256). 512a/512b 都 elig_512==1 (>=512px): anime>=512=16.29M, MONET>=512=32M(rich_v1), GPIC>=512=4.24M(rich_v1), synthetic_v1 全>=1024 故全 elig_512. 512b 的 anime 精选<10M 在 sampling 侧(高 ct_weight/aes + cluster 分层)筛, 不在此 mask. stage->elig 列映射: 256->elig_256, 512a/512b->elig_512 (code 改: 按 image_size 或 stage 前缀映射).",
+    "256": {
+      "all": "elig_256==1",
+      "textatlas": "elig_256==1 (min(w,h)>=256, computed from sidecar w/h)"
+    },
+    "512a": {
+      "anime": "elig_512==1",
+      "monet_real": "elig_512==1",
+      "gpic": "elig_512==1",
+      "synthetic": "elig_512==1",
+      "textatlas": "elig_512==1"
+    },
+    "512b": {
+      "anime": "elig_512==1",
+      "monet_real": "elig_512==1",
+      "gpic": "elig_512==1",
+      "synthetic": "elig_512==1",
+      "textatlas": "elig_512==1"
+    }
+  },
+  "anime": {
+    "_note": "Anime domain (target domain). Manifest = thin pointer index (t5_manifest/daily_v1/anime). Caption text + raw booru tags are NOT in the manifest; read from the source parquet by `key` at train time. Recommended: reuse naifu caption builder directly (it consumes these source fields). Sampling aligns to naifu sampling_plan.md.",
+    "_implementation_note": "This spec EXTENDS naifu; it is NOT auto-consumed by stock naifu code -- the training-side loader must read THIS config and implement: (1) a REFETCH/JOIN layer keyed by `key` to the source parquet /s3/evan/anime_core_ditv04_ct_soft/data -- the thin manifest deliberately omits caption text / raw tags, but naifu PretrainImagesBuilder needs tags_*/refined_description/medium/short/quality_z/caption_policy etc.; (2) ct_weight as the priority BASE (naifu's active sampler uses ct_weight_power=0 i.e. IGNORES ct_weight -- here ct_weight drives, per exec doc §8 #6); (3) per-stage (256/512/1024) caption route weights (naifu caption_builder uses a single fixed policy table with no curriculum-stage concept -- per-stage schedule is per v3 canon). Pointing stock naifu at this config without these changes will silently fall back to naifu defaults.",
+    "manifest_columns": "uid,key,uuid,s3key,dataset,width,height,elig_256/512/1024,rating_bucket,is_non_ai,aes(=compound_aes_score),ct_quality_score,ct_weight,ct_filter_score,ct_lanes,cluster_balance(=cluster_clipl14_level2),style_l1,risk_bucket,cls_bucket,person_bucket,has_nl,has_short,n_tags_general",
+    "image_fetch": "R2 HTTP via s3key (https://ncotar-worker.mewtant.workers.dev/r2/<key>); loader uses naifu training/r2_utils.py. NOT on local mount.",
+    "caption": {
+      "_note": "Per v3 设计正本 (model+train doc §Caption) + exec doc §7, aligned to naifu caption_builder. Field mapping: NL-long=refined_description; NL-short=short_description (medium_description fallback); tag=tags_{artist,character,copyright,general,meta} category-ordered; rating ONLY questionable/explicit render as 'rating:<x>' (general/sensitive not emitted, naifu caption_plan.md:128).",
+      "route_mapping_to_naifu": {
+        "NL_long": "rich_nl",
+        "hybrid": "nl",
+        "NL_short": "nl_short",
+        "tag": "tag_medium"
+      },
+      "stage_route_weights_has_nl": {
+        "_note": "REDESIGN per-stage NL<->tag schedule. Evan 2026-06-30 早期减 tag 更新: 256 去 tag(has_nl 行不再路由 tag, 那 10% 挪到中等 nl); 512a tag 25->10(挪 长句 rich_nl +5 + 中等 nl +10). ⚠ route 仅作用于 has_nl 行; ~29% tag-only(无 NL)行恒走 tag(route_weights_no_nl), 故 256 整体 tag 暴露≈该 no-NL 地板, 非字面 0. 512b 保持 35/20/20/25(Evan 2026-06-30 拍板: 仅改 256+512a, 512b 留 25 承担晚期 anime booru-tag 兼容, tag 全程 0->10->25 非单调刻意为之). 1024(暂缓)=15/10/15/60 备查. keys 须与 domain_mix 派生的 STAGES 一致.",
+        "256": {
+          "rich_nl": 50,
+          "nl": 30,
+          "nl_short": 20,
+          "tag_medium": 0
+        },
+        "512a": {
+          "rich_nl": 40,
+          "nl": 30,
+          "nl_short": 20,
+          "tag_medium": 10
+        },
+        "512b": {
+          "rich_nl": 35,
+          "nl": 20,
+          "nl_short": 20,
+          "tag_medium": 25
+        }
+      },
+      "route_weights_no_nl": {
+        "tag_medium": 100,
+        "_note": "rows without visual NL (has_nl==0, measured ~27.5% global, per-shard 2.9-75.9%): pure tag route. NOTE require_nl_stages below drops these rows at listed stages (256) so '256 不用 tag'; at 512a/512b they remain and take the intended tag route (10%/25%)."
+      },
+      "require_nl_stages": [
+        "256"
+      ],
+      "_require_nl_stages_note": "REDESIGN gated (Evan 2026-06-30): stages listed here drop no-NL(tag-only) anime rows at eligibility -> that stage's anime caption is 100% NL, zero tag. 256 listed = 256 不用 tag (anime pool 16.5M->~12.0M, exposure-driven mix unchanged, ~6.3->~8.7ep). 512a/512b not listed -> keep tag-only rows + route tag 10%/25%. empty/missing field = old behavior, byte-level zero change. read side: complete_dataset.iter_anime_shard filters elig by has_nl.",
+      "other_naifu_policy_tables": {
+        "_note": "Carried verbatim from naifu caption_plan.md for rows whose caption_policy/strategy selects them (concept/artist/character/nl_heavy). Unknown policy -> quality_default (the stage table above).",
+        "concept_locked|concept_backfill": {
+          "rich_nl": 8,
+          "nl": 7,
+          "nl_short": 5,
+          "tag_medium": 80
+        },
+        "artist_anchor|artist_backfill|character_anchor|character_backfill": {
+          "rich_nl": 20,
+          "nl": 15,
+          "nl_short": 12,
+          "tag_medium": 53
+        },
+        "nl_heavy": {
+          "rich_nl": 40,
+          "nl": 35,
+          "nl_short": 25
+        }
+      },
+      "tag_frequency_dropout": {
+        "_note": "naifu common-trait dropout (frequency_weighted_tag_dropout). Emphasized at Stage2 (1024) per v3 canon: drop high-frequency general tags to prevent popular-tag overfit + protect long-tail characters/styles. Shard-local tag frequencies (naifu set_general_tag_frequency).",
+        "base_p": 0.65,
+        "alpha": 0.75,
+        "min_p": 0.1,
+        "max_p": 0.9,
+        "min_keep": 6,
+        "min_keep_ratio": 0.2,
+        "stage_emphasis": {
+          "256": "naifu default",
+          "512": "naifu default",
+          "1024": "primary (tag-dominant routes + freq dropout)"
+        }
+      },
+      "length_cap": {
+        "_note": "naifu _apply_length_cap on general-body tags (anchors/aux protected): 30% keep<=max(10,ceil(0.3N)); 10% keep<=min(6,N); 15% keep rand[1,5]; 45% no cap.",
+        "p_cap_30": 0.3,
+        "p_cap_10": 0.1,
+        "p_cap_random_1_5": 0.15,
+        "p_no_cap": 0.45
+      },
+      "anchor_keep_probs": {
+        "_note": "naifu meta-anchor throttling (caption_plan.md). rating only q/e emitted.",
+        "quality": 0.3,
+        "year_period": 0.3,
+        "series": 0.4,
+        "rating": 0.6,
+        "count": 0.6,
+        "raw_meta": 0.4,
+        "artist": 1.0,
+        "character_label": 0.5
+      },
+      "caption_truncate_tok": [
+        300,
+        340
+      ],
+      "caption_truncate_tok_per_stage": {
+        "256": [
+          300,
+          340
+        ],
+        "512a": [
+          410,
+          450
+        ],
+        "512b": [
+          410,
+          450
+        ]
+      },
+      "model_text_max_length": 384,
+      "model_text_max_length_per_stage": {
+        "256": 384,
+        "512a": 512,
+        "512b": 512
+      },
+      "_text_max_length_note": "REDESIGN per-stage token (Evan 2026-06-29): 256=384 (text 在256主导省算力, ~16% 干净尾截可接受, budget=384-41=343); 512a/512b=512 (image 主导, 升512近免费, 截断~0, budget=512-41=471). code: 若 model_text_max_length_per_stage[stage] 存在用之, 缺则回退标量 model_text_max_length(384). caption_truncate_tok_per_stage 同理 (构造期 proxy-tok 上限, 512 放宽到 [410,450] 以喂满 471 budget). 实测真截断 @384=256:16.1%/512:12.6%, @512≈0% (experiments/results/token_trunc_audit_20260629_anime_only). 注意 real/synth 截断现硬编码 (224,256) 于 caption_build.py:108, Phase1 一并理顺.",
+      "caption_dropout": 0.1,
+      "_caption_dropout_note": "10% caption dropout全程 (CFG support), consistent with real/synth. naifu gates uncond drop to quality-pool rows (is_quality_cfg_dropout_eligible); concept/artist/character anchor rows never blanked.",
+      "builder": "reuse naifu training/caption_builder.py (consumes source parquet fields directly); or equivalent in MoT loader aligned to the above."
+    },
+    "sampling": {
+      "_note": "naifu sampling_plan.md priority model: cluster-balanced construction primary, then bounded per-row priority -> integer repeat (exposure shaping, NOT static selection). NO real-style static Gumbel select (team soft-calibration is designed for full weighted use).",
+      "balance_axis": "cluster_balance (= cluster_clipl14_level2)",
+      "balance_axis_cardinality": "~5000 (QC full 16.5M: 4863 unique / top1 share 0.53% / top10 4.27%)",
+      "priority": {
+        "_note": "priority = clip( ct_weight + quality_bonus + Σ lane_bonus + rare_concept_bonus + composition_clean_bonus, 1.0, max_priority). ct_weight (1.0-2.5, manifest col) is the bounded base per exec doc §8 (#6); naifu additive bonuses stack on top; clipped at cap; then -> integer repeat up to max_repeat. ct_weight/ct_lanes are cell-relative (do NOT compare across sources/levels).",
+        "base": "ct_weight",
+        "max_priority": 3.0,
+        "max_repeat": 4,
+        "quality_bonus": {
+          "value": 0.3,
+          "when": "quality_z >= 1.5 AND hps_v3_score_qwen3vl >= 0.0",
+          "_note": "quality_z/hps read from source parquet at train time"
+        },
+        "lane_bonus": {
+          "_note": "Per ct_lanes member (manifest col). naifu defaults; keys map to the delivered ct_lanes vocab (e.g. artist_canonical, quality_completion, concept_*, base_supplement). Lanes not present just contribute 0.",
+          "hq": 0.7,
+          "wb_focus": 0.3,
+          "artist_canonical": 0.3,
+          "artist_curated": 0.85,
+          "artist_coverage": 1.1,
+          "coverage_floor": 1.0,
+          "concept_balance_floor": 0.5,
+          "concept_meme": 0.4,
+          "concept_locations": 0.3,
+          "concept_image_type": 0.2,
+          "concept_censorship": 0.2
+        },
+        "lane_prefix_bonus": {
+          "concept_": 0.1
+        },
+        "composition_clean_bonus": {
+          "value": 0.5,
+          "_note": "naifu row-level clean predicate (simple-bg + no watermark/sig tag + near-zero YOLO added-text + quality_z>=0.4)"
+        }
+      },
+      "lane_caps": {
+        "_note": "Evan 2026-06-17: SOFT down-weight (×0.3), keep in pool (not excluded). Guards against no-prompt text rendering / comic-panel / photoreal drift. plain_illustration (13.57M bulk) untouched. v3 设计正本 §四 text-side-effect monitoring backs this intent.",
+        "risk_bucket_downweight": {
+          "buckets": [
+            "text_layout",
+            "comic_text",
+            "photoish",
+            "photoish_3d",
+            "meme",
+            "game_ui"
+          ],
+          "priority_multiplier": 0.3
+        }
+      },
+      "static_select": "NONE (manifest holds all 16.5M; exposure via domain_mix + this priority model)"
+    },
+    "exploration_scale": {
+      "_note": "Do NOT statically trim anime. Static available = 16.5M (all kept). Per-epoch anime EXPOSURE target ~10-12M-equiv is a goal, NOT a static cut -- the realized number depends on the per-stage step/epoch budget, which is TBD (training-side; v3 '绝对步数待定'). The 30M-nominal epoch in QC oversample_factor is illustrative only (used to flag any domain forced to oversample). A smaller static subset can be cut separately if ever needed; default = no trim."
+    }
+  },
+  "source_alpha": 0.2,
+  "_source_alpha_note": "REDESIGN: 当 monet_subsource_explicit_probs 存在时, MONET 子源权重改用显式表 (code: manifest_index.py:287 src_f 门控), source_alpha 不再用于 MONET 源拉平 (仅作回退). cluster_beta 簇内拉平仍生效. || Stage512b-real: source_alpha is INERT for monet_real because monet_subsource_explicit_probs is populated and takes priority (phase5_build_catalog.py source_factor branch). It still governs synthetic.",
+  "monet_subsource_explicit_probs": {
+    "_note": "REDESIGN (gated, Evan 2026-06-29): MONET 子源显式概率表, 替代 count^-0.2 软拉平 (现 count^-0.2 反把单调小源 commoncatalog/megalith 抬高). 回归自然比+轻多元倾斜. 和≈1.0. code 若识别此字段, 每行 src_f = probs[sub_source]/源内行数 (即把该源总质量设为 probs[src], 行内再由 cluster_beta 拉平); 缺则回退 count^-0.2. photo%: laion63.7/coyo71.1/cc12m72.2(多元) vs commoncatalog96.2/megalith96.5(单调). 短caption 几乎全来自 laion/coyo/cc12m, 压单调与保短档同向. da4k(0.01M) 忽略.",
+    "laion": 0.34,
+    "coyo": 0.33,
+    "cc12m": 0.11,
+    "commoncatalog-cc-by": 0.13,
+    "megalith10m": 0.09
+  },
+  "cluster_beta": 0.0,
+  "_cluster_beta_note": "Stage512b-real: 0.0 (DISABLED). cluster_id exists only in t5_manifest/rich_v1 (the curated 60M); the full-survivor pool has none, and phase5's _int_np turns a null into INT64_MIN whose cluster_size lookup misses, yielding factor 1.0 -- the MAXIMUM -- so un-clustered rows would be systematically over-exposed (~5x per row). sscd_cluster_id is a per-image dedup id (all singletons), useless as a substitute. With VA the real pool is 2.5x larger and real epochs drop to 1.5-2.8, so the flattening this provided is much less needed. Previous value 0.2.",
+  "aes_weighting": false,
+  "_aes_note": "off for real (aes already a soft selection weight in daily_v1). anime uses ct_weight/quality, aes is soft reference only.",
+  "monet_real_gpic_ratio": {
+    "256": [
+      0.61,
+      0.39
+    ],
+    "512a": [
+      0.755,
+      0.245
+    ],
+    "512b": [
+      0.765,
+      0.235
+    ]
+  },
+  "_monet_real_gpic_ratio_note": "REDESIGN: within-real (MONET-real:GPIC) split per stage, 直接由 domain_mix 推出 (信息性, band-first 实际用 domain_mix). 256 = 0.405:0.259 = [0.610,0.390]; 512a = 0.40:0.13 = [0.755,0.245]; 512b = 0.13:0.04 = [0.765,0.235]. keys 须与 STAGES 一致.",
+  "tier_bounds_tok": {
+    "T1": [
+      1,
+      24
+    ],
+    "T2": [
+      25,
+      64
+    ],
+    "T3": [
+      65,
+      128
+    ],
+    "T4": [
+      129,
+      1000000
+    ]
+  },
+  "band_mix_real": {
+    "T1": 0.18,
+    "T2": 0.27,
+    "T3": 0.15,
+    "T4": 0.4
+  },
+  "stage_band_supply_warning": {
+    "_note": "daily_v1 1024 (real+synth) CANNOT assume T1/T2/T3/T4=18/27/15/40 without resampling (audit 2026-06-17). complete_v1: anime dominates 1024 (domain_mix anime=0.80; anime>=1024 10.99M, of which 8.17M carry NL/refined -> abundant T4), greatly relieving the real/synth 1024 caption supply. But the real/synth 1024 slice (domain_mix 0.08+0.12) still follows its own band-first supply — confirm via complete_v1 QC stage_caption_supply before training 1024.",
+    "source": "/s3-pixai-test-uw2/evan/mot_filtering_v1/t5_manifest/daily_v1/daily_v1_qc.json",
+    "1024_real_synth": {
+      "pool": 5049529,
+      "true_band_supply": {
+        "T1": 756176,
+        "T2": 3231334,
+        "T3": 2857970,
+        "T4": 1036240
+      },
+      "oversample_factor_true": {
+        "T1": 1.202,
+        "T2": 0.422,
+        "T3": 0.265,
+        "T4": 1.949
+      },
+      "required_action": "For the real/synth portion of 1024, do not use band_mix_real unchanged unless allowing controlled resampling; otherwise choose a 1024-specific band mix. anime portion is caption-rich and unaffected."
+    }
+  },
+  "band_to_captioner_priority": {
+    "_note": "real/synth only (identical to母池 t5_sampling_weights_v1.json). MONET: first captioner whose tok_* is in the drawn band; soft preference. GPIC uses i1 caption; synth uses generation prompt. anime uses its own caption routing (see anime.caption).",
+    "fallback": "any_captioner_with_tok_in_band",
+    "T4": [
+      "gemini",
+      "sharegpt4v",
+      "internvl"
+    ],
+    "T3": [
+      "internvl",
+      "sharegpt4v",
+      "gemini"
+    ],
+    "T2": [
+      "florence",
+      "original"
+    ],
+    "T1": [
+      "original"
+    ],
+    "megalith_T2": [
+      "florence_first_sentence"
+    ],
+    "gpic_clean_tag_preference": true,
+    "internvl_drop_trailing_incomplete_sentence": true
+  },
+  "caption_truncate_tok": [
+    300,
+    340
+  ],
+  "caption_dropout": 0.1,
+  "caption_dropout_text_rich": "reduce_or_off_or_tag_poster_domain",
+  "daily_extra_columns": {
+    "_note": "daily_v1 real/synth manifest columns beyond the 33-col rich schema (unchanged).",
+    "wk": "watermark prob (float; GPIC=NaN). Already hard-cut >source-p95 at selection.",
+    "sscd_nn": "nearest-neighbor SSCD cos (float; GPIC/synth=NaN).",
+    "elig_256": "always 1",
+    "elig_512": "min(w,h)>=512",
+    "elig_1024": "min(w,h)>=1024"
+  },
+  "loader_rules": {
+    "_note": "real/synth: same 8 rules as configs/t5_sampling_weights_v1.json (holdout exclude, band eligibility by tok>0, GPIC@512/1024=0, aes-missing, global stats, domain_mix renorm, image-source=.tar). anime: image via R2 (s3key); caption via source-parquet re-fetch by `key`; stage routing by elig_*; exposure by anime.sampling priority + lane_caps; NSFW kept; tag-only rows never dropped.",
+    "domain_mix_renorm": "renormalize present domains per stage to sum 1.0 (e.g. 512/1024 have no GPIC)."
+  }
+}

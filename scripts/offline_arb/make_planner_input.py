@@ -27,7 +27,8 @@ from omegaconf import OmegaConf
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 from training.dataline.config import load_sampling_config          # noqa: E402
-from training.dataline.multi_ar import build_adaptive_buckets, square_index  # noqa: E402
+from training.dataline.multi_ar import build_adaptive_buckets, square_index
+from training.dataline import anchors_v1  # noqa: E402
 
 DOMAINS = ["anime", "monet_real", "gpic", "synthetic", "textatlas"]   # 与 N_matrix/planner 列序契约一致
 R_MAX_DEFAULT = {"anime": 20, "monet_real": 20, "gpic": 20, "synthetic": 200, "textatlas": 200}
@@ -139,10 +140,16 @@ def main() -> int:
             f"--stage {args.stage!r} != config dataset.stage {config_stage!r}"
         )
     mar = cfg.dataset.multi_ar
-    buckets = build_adaptive_buckets(
-        int(mar.target_area), int(mar.divisor),
-        min_area_ratio=float(mar.adaptive_min_area_ratio),
-        max_aspect=float(mar.adaptive_max_aspect))   # no_upscale 是指派期参数,桶表构建不收
+    bucket_mode = str(OmegaConf.select(cfg, "dataset.multi_ar.bucket_mode") or "adaptive")
+    if bucket_mode == anchors_v1.BUCKET_MODE:
+        # anchor_id order IS the bucket index and is the identity key the Stage512b
+        # audits are written against; it must not be re-sorted by aspect ratio.
+        buckets = anchors_v1.anchors_hw()
+    else:
+        buckets = build_adaptive_buckets(
+            int(mar.target_area), int(mar.divisor),
+            min_area_ratio=float(mar.adaptive_min_area_ratio),
+            max_aspect=float(mar.adaptive_max_aspect))   # no_upscale 是指派期参数,桶表构建不收
     sq = square_index(buckets)
     square_only = [str(d) for d in mar.square_only_domains]
     sampling_path = Path(str(cfg.dataset.sampling_config))

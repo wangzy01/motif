@@ -102,6 +102,11 @@ from training.dataline.multi_ar import (
     nearest_allowed_bucket,
     square_index,
 )
+from training.dataline import anchors_v1
+
+BUCKET_MODES = ("adaptive", anchors_v1.BUCKET_MODE)
+#: The only stage bucket_mode=anchors_v1 may run under; see phase5 ANCHORS_STAGE.
+ANCHORS_STAGE = "512b"
 
 OUTPUT_BASE = Path(
     "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop"
@@ -109,6 +114,9 @@ OUTPUT_BASE = Path(
 CANONICAL_OUTPUT_DIRS = {
     "256": OUTPUT_BASE / "offline_arb_bucketstats_v1",
     "512a": OUTPUT_BASE / "offline_arb_bucketstats_stage512a_v1",
+    # Stage512b-real: its own root so a 13-anchor run can never overwrite the frozen
+    # 361-bucket stage512a artifacts.
+    "512b": OUTPUT_BASE / "offline_arb_bucketstats_stage512b_v1",
 }
 CANONICAL_OUTPUT_DIR = CANONICAL_OUTPUT_DIRS["256"]
 DEFAULT_PIPELINE_CONFIG = "configs/stage256_redesign_naifu_arb_v1.yaml"
@@ -128,6 +136,11 @@ ELIGIBILITY_FALLBACK_DOMAINS = {
     # Schema audit: the four source manifests derive elig_512 from width/height;
     # TextAtlas is the only enumerated manifest that physically stores elig_512.
     "512a": frozenset(("anime", "monet_real", "gpic", "synthetic")),
+    # 512b runs bucket_mode=anchors_v1, which reads no elig_* column at all: the gate is
+    # the source area gate plus the feasible-anchor test. The whitelist is unused there,
+    # but the key must exist because ELIGIBILITY_FALLBACK_DOMAINS[stage] is indexed
+    # unconditionally.
+    "512b": frozenset(("anime", "monet_real", "gpic", "synthetic", "textatlas")),
 }
 ANIME_NL_COLUMNS = (
     "refined_description",
@@ -195,7 +208,7 @@ def load_pipeline_config(config_path: str) -> dict[str, Any]:
     image_size = _strict_config_int(
         OmegaConf.select(cfg, "dataset.image_size"), "dataset.image_size"
     )
-    expected_image_size = {"256": 256, "512a": 512}[stage]
+    expected_image_size = {"256": 256, "512a": 512, "512b": 512}[stage]
     if image_size != expected_image_size:
         raise ValueError(
             f"stage={stage} requires dataset.image_size={expected_image_size}, got {image_size}"
@@ -203,10 +216,11 @@ def load_pipeline_config(config_path: str) -> dict[str, Any]:
     mar = cfg.dataset.multi_ar
     if OmegaConf.select(cfg, "dataset.multi_ar.enabled") is not True:
         raise ValueError("offline bucket stats require dataset.multi_ar.enabled=true")
-    if OmegaConf.select(cfg, "dataset.multi_ar.bucket_mode") != "adaptive":
+    bucket_mode = OmegaConf.select(cfg, "dataset.multi_ar.bucket_mode")
+    if bucket_mode not in BUCKET_MODES:
         raise ValueError(
-            "offline bucket stats require multi_ar.bucket_mode=adaptive; "
-            "the legacy fixed ar_list/bucket_probs table must not be reused"
+            f"offline bucket stats require multi_ar.bucket_mode in {BUCKET_MODES}, got "
+            f"{bucket_mode!r}; the legacy fixed ar_list/bucket_probs table must not be reused"
         )
     required_adaptive = (
         "target_area",
@@ -233,6 +247,19 @@ def load_pipeline_config(config_path: str) -> dict[str, Any]:
         "min_area_ratio": float(mar.adaptive_min_area_ratio),
         "max_aspect": float(mar.adaptive_max_aspect),
     }
+    if bucket_mode == anchors_v1.BUCKET_MODE:
+        if stage != ANCHORS_STAGE:
+            raise ValueError(
+                f"bucket_mode={anchors_v1.BUCKET_MODE} requires dataset.stage="
+                f"{ANCHORS_STAGE!r}, got {stage!r}"
+            )
+        # phase5 gates on `report_config["multi_ar_params"] != runtime["mar_params"]`, so
+        # the anchors keys must be produced by the SAME expression on both sides or that
+        # equality can never hold and anchors mode is unreachable end to end.
+        multi_ar_params.update(anchors_v1.params_from_values(
+            OmegaConf.select(cfg, "dataset.multi_ar.anchors_area_gate"),
+            OmegaConf.select(cfg, "dataset.multi_ar.anchors_crop_loss_max"),
+        ))
     if multi_ar_params["target_area"] != image_size * image_size:
         raise ValueError(
             f"stage={stage} image_size={image_size} requires multi_ar.target_area="
@@ -244,6 +271,7 @@ def load_pipeline_config(config_path: str) -> dict[str, Any]:
     sampling_config_path = str(cfg.dataset.sampling_config)
     return {
         "stage": stage,
+        "bucket_mode": bucket_mode,
         "image_size": image_size,
         "eligibility": f"elig_{image_size}",
         "anime_elig_always_true": stage == "256",
@@ -268,7 +296,7 @@ def bind_sampling_contract(runtime: dict[str, Any], sampling_cfg: Any) -> None:
     if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-12):
         raise ValueError(f"stage={stage} domain_mix must sum to 1, got {total}")
     requires_nl = bool(sampling_cfg.anime_caption.requires_nl(stage))
-    if stage == "512a" and requires_nl:
+    if stage in ("512a", "512b") and requires_nl:
         raise ValueError(
             "stage512a offline catalog contract requires requires_nl=false; "
             "refusing to silently drop tag-only anime rows"
@@ -419,6 +447,9 @@ def scan_domain_shard(task: dict[str, Any]) -> dict[str, Any]:
     extreme_long = task["extreme_long"]
     extreme_short = task["extreme_short"]
     batch_size = task["batch_size"]
+    anchors_mode = task["bucket_mode"] == anchors_v1.BUCKET_MODE
+    area_gate = task.get("area_gate")
+    crop_loss_max = task.get("crop_loss_max") or anchors_v1.CROP_LOSS_MAX
     n_buckets = len(buckets_h)
 
     n_matrix = np.zeros(n_buckets, dtype=np.int64)
@@ -428,6 +459,7 @@ def scan_domain_shard(task: dict[str, Any]) -> dict[str, Any]:
     rows_holdout_dropped = 0
     rows_elig_dropped = 0
     rows_invalid_wh_dropped = 0
+    rows_unservable_dropped = 0
     rows_kept = 0
     anime_has_nl_by_bucket = np.zeros(n_buckets, dtype=np.int64)
     anime_tag_only_by_bucket = np.zeros(n_buckets, dtype=np.int64)
@@ -437,8 +469,13 @@ def scan_domain_shard(task: dict[str, Any]) -> dict[str, Any]:
         names = set(pf.schema_arrow.names)
         cols = ["width", "height"]
         has_holdout = "holdout" in names
-        has_elig = (not elig_always_true) and (eligibility_column in names)
-        if elig_always_true:
+        # anchors mode reads no elig_* column: the gate is the source area gate plus the
+        # feasible-anchor test. Consulting the schema here would raise
+        # EligibilityContractError over a column this path never touches.
+        has_elig = (not anchors_mode) and (not elig_always_true) and (eligibility_column in names)
+        if anchors_mode:
+            eligibility_mode = "anchors_v1_area_gate_and_feasible_anchor"
+        elif elig_always_true:
             eligibility_mode = "stage256_anime_all_true_compatibility"
         elif has_elig:
             eligibility_mode = "column"
@@ -471,7 +508,12 @@ def scan_domain_shard(task: dict[str, Any]) -> dict[str, Any]:
                 holdout_keep = np.ones(n, dtype=bool)
             rows_holdout_dropped += int((~holdout_keep).sum())
 
-            if elig_always_true:
+            if anchors_mode:
+                elig = (
+                    np.ones(n, dtype=bool) if area_gate is None
+                    else (w * h) >= float(area_gate)
+                )
+            elif elig_always_true:
                 # Historical stage256 production semantics: anime elig_256 is all true.
                 elig = np.ones(n, dtype=bool)
             elif has_elig:
@@ -481,23 +523,54 @@ def scan_domain_shard(task: dict[str, Any]) -> dict[str, Any]:
                 elig = short_dim >= float(image_size)
 
             wh_valid = np.isfinite(w) & np.isfinite(h) & (w > 0) & (h > 0)
+            if anchors_mode:
+                # anchors_v1 raises above MAX_DIM so its exact integer arithmetic cannot
+                # overflow; screen those rows out rather than let one absurd manifest row
+                # abort a full-pool scan.
+                wh_valid &= (w < anchors_v1.MAX_DIM) & (h < anchors_v1.MAX_DIM)
             keep = holdout_keep & elig & wh_valid
             rows_elig_dropped += int((holdout_keep & ~elig).sum())
             rows_invalid_wh_dropped += int((holdout_keep & elig & ~wh_valid).sum())
             kept_n = int(keep.sum())
-            rows_kept += kept_n
             if kept_n == 0:
                 continue
             wk = w[keep]
             hk = h[keep]
 
-            if is_square_only:
+            if anchors_mode:
+                # Run the real assignment for every domain, square-only included:
+                # force-pinning square_idx without a feasibility test would upsample any
+                # row that cannot cover the square anchor.
+                bidx = anchors_v1.assign_anchor_batch(
+                    np.rint(wk).astype(np.int64), np.rint(hk).astype(np.int64),
+                    crop_loss_max=crop_loss_max, area_gate=area_gate,
+                )[0]
+                if is_square_only:
+                    bidx = np.where(bidx == sq_idx, bidx, np.int64(-1))
+                servable = bidx >= 0
+                n_unserv = int((~servable).sum())
+                if n_unserv:
+                    rows_unservable_dropped += n_unserv
+                    # `keep` must be narrowed too, not just wk/hk/bidx: `has_nl_all[keep]`
+                    # below reads it, so leaving it wide would pair anime NL flags with
+                    # the wrong rows.
+                    kept_pos = np.flatnonzero(keep)
+                    keep = keep.copy()
+                    keep[kept_pos[~servable]] = False
+                    wk = wk[servable]
+                    hk = hk[servable]
+                    bidx = bidx[servable]
+                    kept_n = int(keep.sum())
+                    if kept_n == 0:
+                        continue
+            elif is_square_only:
                 bidx = np.full(kept_n, sq_idx, dtype=np.int64)
             else:
                 bidx = vectorized_adaptive_assign(
                     wk, hk, table, divisor, target_area, no_upscale, max_aspect,
                     extreme_long, extreme_short, buckets_list,
                 )
+            rows_kept += kept_n
             n_matrix += np.bincount(bidx, minlength=n_buckets)[:n_buckets]
 
             if domain == "anime":
@@ -533,6 +606,7 @@ def scan_domain_shard(task: dict[str, Any]) -> dict[str, Any]:
             "n_matrix": n_matrix, "hist_native": hist_native, "hist_square": hist_square,
             "rows_raw": rows_raw, "rows_holdout_dropped": rows_holdout_dropped,
             "rows_elig_dropped": rows_elig_dropped, "rows_invalid_wh_dropped": rows_invalid_wh_dropped,
+            "rows_unservable_dropped": rows_unservable_dropped,
             "rows_kept": rows_kept,
             "eligibility_column_shards": int(eligibility_mode == "column"),
             "eligibility_fallback_shards": int(eligibility_mode == "short_dim_fallback"),
@@ -713,7 +787,7 @@ def anime_caption_availability_report(
         }
 
     estimate: dict[str, Any]
-    if runtime["stage"] == "512a" and total > 0:
+    if runtime["stage"] in ("512a", "512b") and total > 0:
         has_weights = sampling_cfg.anime_caption.route_weights(runtime["stage"], True)
         no_nl_weights = sampling_cfg.anime_caption.route_weights(runtime["stage"], False)
         has_weight_sum = sum(float(value) for value in has_weights.values())
@@ -800,6 +874,11 @@ def build_tasks(
                 "no_upscale": mar_params["no_upscale"], "max_aspect": mar_params["max_aspect"],
                 "extreme_long": extreme_long, "extreme_short": extreme_short,
                 "batch_size": batch_size,
+                # The worker runs in a separate process and receives this dict, not
+                # `runtime`, so the anchors parameters must be threaded through here.
+                "bucket_mode": runtime["bucket_mode"],
+                "area_gate": mar_params.get("area_gate"),
+                "crop_loss_max": mar_params.get("crop_loss_max"),
             })
     return tasks
 
@@ -845,8 +924,11 @@ def main() -> int:
         raise ValueError(
             f"--stage={args.stage} does not match config dataset.stage={runtime['stage']}"
         )
-    if runtime["stage"] == "512a" and args.stage is None:
-        raise ValueError("stage512a bucket stats require explicit --stage 512a")
+    if runtime["stage"] in ("512a", "512b") and args.stage is None:
+        raise ValueError(
+            f"stage{runtime['stage']} bucket stats require explicit "
+            f"--stage {runtime['stage']}"
+        )
     output_dir = validate_output_dir(args.output_dir, runtime["stage"])
     output_dir.mkdir(parents=True, exist_ok=True)
     diagnostic_run = args.max_shards_per_domain is not None
@@ -855,10 +937,16 @@ def main() -> int:
     mar_params = runtime["multi_ar_params"]
     square_only_domains = runtime["square_only_domains"]
     sampling_config_path = runtime["sampling_config_path"]
-    buckets = build_adaptive_buckets(
-        target_area=mar_params["target_area"], divisor=mar_params["divisor"],
-        min_area_ratio=mar_params["min_area_ratio"], max_aspect=mar_params["max_aspect"],
-    )
+    if runtime["bucket_mode"] == anchors_v1.BUCKET_MODE:
+        # anchor_id order IS the bucket index and is the identity key every Stage512b
+        # audit is written against, so it must not be re-sorted by aspect ratio the way
+        # build_adaptive_buckets() sorts.
+        buckets = anchors_v1.anchors_hw()
+    else:
+        buckets = build_adaptive_buckets(
+            target_area=mar_params["target_area"], divisor=mar_params["divisor"],
+            min_area_ratio=mar_params["min_area_ratio"], max_aspect=mar_params["max_aspect"],
+        )
     sq_idx = square_index(buckets)
     extreme_long, extreme_short = extreme_aspect_sides(
         mar_params["target_area"], mar_params["divisor"], mar_params["max_aspect"]
@@ -905,7 +993,7 @@ def main() -> int:
         d: {
             "shards_total": len(shards_by_domain.get(d, [])), "shards_scanned": 0, "shards_failed": 0,
             "rows_raw": 0, "rows_holdout_dropped": 0, "rows_elig_dropped": 0,
-            "rows_invalid_wh_dropped": 0, "rows_kept": 0,
+            "rows_invalid_wh_dropped": 0, "rows_unservable_dropped": 0, "rows_kept": 0,
             "eligibility_column_shards": 0, "eligibility_fallback_shards": 0,
             "eligibility_fallback_rows": 0, "eligibility_compatibility_shards": 0,
         }
@@ -933,6 +1021,7 @@ def main() -> int:
             coverage[d]["rows_holdout_dropped"] += res["rows_holdout_dropped"]
             coverage[d]["rows_elig_dropped"] += res["rows_elig_dropped"]
             coverage[d]["rows_invalid_wh_dropped"] += res["rows_invalid_wh_dropped"]
+            coverage[d]["rows_unservable_dropped"] += res["rows_unservable_dropped"]
             coverage[d]["rows_kept"] += res["rows_kept"]
             coverage[d]["eligibility_column_shards"] += res["eligibility_column_shards"]
             coverage[d]["eligibility_fallback_shards"] += res["eligibility_fallback_shards"]

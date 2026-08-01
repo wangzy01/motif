@@ -1,0 +1,174 @@
+# Stage512b-real: 512-resolution breadth stage, bucket_mode=anchors_v1 (13 fixed
+# anchors) over the full-survivor real pool. 512M exposures = 250,000 steps @ 2048.
+#
+# This stage REPLACES the 2026-06-29 anime-alignment 512b design; that one is no
+# longer planned (Evan, 2026-08-01).
+#
+# Launch remains forbidden. The offline plan/catalog/sidecar roots below are
+# PLACEHOLDERS: they do not exist yet and must be produced by phase3a -> phase5 ->
+# planner under this config before any training reference to them is valid. This file
+# is currently usable only for the offline catalog chain.
+
+model_cls: networks.model_mot.MoTT2IModel
+target_device: cuda
+
+model:
+  pretrained_path: /fsx/models/Qwen3-VL-2B-Instruct
+  tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct
+  patch_size: 1
+  time_gap: 2048
+  timestep_multiplier: 1.0
+  text_max_length: 512
+  cfg_dropout_prob: 0.1
+  text_rich_cfg_dropout_prob: 0.0
+  prompt_template:
+    enabled: true
+  gradient_checkpointing: true
+  sandwich_norm: true
+  noise_condition: true
+  long_skip:
+    enabled: false
+    mode: A_full
+  text_adapter:
+    enabled: true
+    num_layers: 2
+    bidirectional: false
+    rope: false
+    multi_layer_fusion:
+      enabled: true
+      num_layers: 12
+  und_lora:
+    enabled: false
+    num_layers: 8
+    rank: 32
+    alpha: 32
+    lr_scale: 0.3
+    target_modules: [q, k, v, o]
+  abs_sincos:
+    enabled: false
+
+vae:
+  name: flux2
+  pretrained_path: /fsx/models/FLUX.2-klein-4B/vae
+  dtype: bfloat16
+
+dataset:
+  store_cls: training.dataline_offline.offline_dataset.OfflineExactDataset
+  sampling_config: /fsx/evan/mot_code_s512b_impl/data_analysis/configs/t5_sampling_stage512b_real_v1.json
+  stage: "512b"
+  image_size: 512
+  offline_plan_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_plan_stage512b_PLACEHOLDER
+  offline_plan_hash: PLACEHOLDER_no_plan_built_yet
+  offline_weighted_contract_sha256: PLACEHOLDER_no_contract_yet
+  offline_catalog_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512b_v1
+  offline_anime_freq_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_animefreq_stage512b_v1
+  offline_caption_sidecar_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_caption_sidecar_stage512b_v1
+  caption_sidecar_workers: 16
+  caption_workers_anime: 8
+  caption_workers_monet_real: 8
+  caption_workers_gpic: 4
+  caption_workers_synthetic: 2
+  fetch_workers_anime: 8
+  fetch_workers_tar: 8
+  gpic_payload_in_memory: true
+  gpic_threads_per_node: 16
+  gpic_source_consistency_mode: strict_path
+
+  buffer_size: 4096
+  queue_size: 128
+  min_fill: 64
+  first_fill_policy: all_min
+  first_fill_timeout_s: 180
+  fetch_workers: 8
+  producer_native_io_serial: false
+  drain_mode: proportional
+  textatlas_local_root: /local/evan/textatlas5m
+  anime_nrows: 20000
+  anime_cache_dir: /local/evan/anime_img_cache
+  stats_cache: /fsx/evan/mot_code/data_analysis/outputs/monet_global_stats_rich_v1.json
+  tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct
+  use_latent_cache: false
+
+  crop_v_anchor:
+    anime: 0.15
+
+  multi_ar:
+    enabled: true
+    assignment_mode: offline_weighted_band_v1
+    bucket_mode: anchors_v1
+    # Required and explicit: it materially changes admission. 262144 reproduces the
+    # Stage512b audits; 0 would disable it (servability then decided purely by the
+    # feasible-anchor test, which is what guarantees zero upsampling).
+    anchors_area_gate: 262144
+    anchors_crop_loss_max: 0.20
+    target_area: 262144
+    divisor: 16
+    adaptive_no_upscale: true
+    adaptive_min_area_ratio: 0.75
+    adaptive_max_aspect: 4.0
+    bucket_buffer_size: 256
+    bucket_min_fill: 1
+    bucket_wait_timeout_s: 180
+    bucket_wait_native_s: 0
+    # anchors_v1 requires an identity fold: nearest_allowed_bucket has no feasibility
+    # test, so folding a pruned extent lands on a taller anchor and upsamples.
+    bucket_prob_floor: 0.0
+    warmup_exposure_images: 0
+    warmup_steps: 0
+    # D5: TextAtlas unpinned from the square anchor (it was square_only in 512a).
+    square_only_domains: [synthetic]
+
+sigma_sampling:
+  dist: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  shift: 1.0
+
+optimizer:
+  name: torch.optim.AdamW
+  params:
+    lr: 1.732051e-4
+    weight_decay: 0.0
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+scheduler:
+  num_warmup_steps: 500
+  decay: constant
+
+trainer:
+  seed: 42
+  amp_dtype: bfloat16
+  batch_size: 32
+  max_steps: 125000
+  max_exposure_images: 256000000
+  gradient_clip_val: 1.0
+  log_every: 10
+  dataline_metrics_every: 50
+  checkpoint_steps: 3000
+  checkpoint_keep_every: 60000
+  checkpoint_keep_max: 4
+  checkpoint_keep_format: weights_ema
+  checkpoint_dir: /fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_20260722_weighted_w64_v1
+  resume: true
+  init_from: /fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage256_20260718_step45000_v6/last.pt
+  init_load_optimizer: true
+  skip_distributed_teardown: true
+  force_os_exit_after_train: true
+  gc_gen2_threshold: 200
+  gc_freeze_after_steps: 50
+  gc_refreeze_every: 10000
+  debug_step_trace: false
+  debug_step_trace_dir: null
+  debug_trace_dump_interval: 0
+  batch_ready_barrier: false
+  batch_ready_barrier_dir: null
+  batch_ready_barrier_run_id: null
+  batch_ready_barrier_timeout_s: 300
+  ema:
+    enabled: true
+    decay: 0.9999
+  use_wandb: false
+  wandb_project: mot-pilot-v1
+  wandb_entity: null
+  wandb_mode: offline

@@ -301,6 +301,28 @@ def verify_binding(w, h, anchor_id: int, *,
             f"-> anchor {anchor_id} ({W}x{H}) {context}")
 
 
+def params_from_values(area_gate, crop_loss_max) -> dict:
+    """把配置里的两个锚参数归一化成 `mar_params` 的增补字典。**唯一来源。**
+
+    phase5 用 `report_config["multi_ar_params"] != runtime["mar_params"]` 校验它与
+    phase3a 报告的一致性，所以两边**必须走同一个表达式**：任何一边自己写一遍归一化，
+    这个等值门就永远过不了，锚模式端到端不可达。
+
+    `area_gate`：`None` 或 `0` = 关闭（服务性纯由可行锚判定）；正整数 = 额外面积门。
+    """
+    if area_gate is None:
+        raise AnchorGeometryError(
+            "anchors_area_gate must be stated explicitly (0 disables it; "
+            f"{AREA_GATE_STAGE512A} reproduces the Stage512b audits)")
+    gate = int(area_gate)
+    if gate < 0:
+        raise AnchorGeometryError(f"anchors_area_gate must be >= 0, got {gate}")
+    clm = CROP_LOSS_MAX if crop_loss_max is None else float(crop_loss_max)
+    if not (0.0 <= clm <= 1.0):
+        raise AnchorGeometryError(f"anchors_crop_loss_max must be in [0,1], got {clm}")
+    return {"area_gate": gate or None, "crop_loss_max": clm}
+
+
 def probs_from_mapping(mapping: dict) -> list[float]:
     """把 config 里的 `{anchor "624x416" | anchor_id: prob}` 归一化成 13 长概率向量。
 

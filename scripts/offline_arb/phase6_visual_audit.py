@@ -509,6 +509,7 @@ def _resolve_repo_path(path: str) -> Path:
 
 
 def load_bucket_policy(config_path: str, n_matrix_path: str, stage: str, floor: float) -> BucketPolicy:
+    from training.dataline import anchors_v1
     from training.dataline.multi_ar import (
         assign_adaptive_bucket,
         build_adaptive_buckets,
@@ -528,6 +529,17 @@ def load_bucket_policy(config_path: str, n_matrix_path: str, stage: str, floor: 
         "adaptive_min_area_ratio": float(mar["adaptive_min_area_ratio"]),
         "adaptive_max_aspect": float(mar["adaptive_max_aspect"]),
     }
+    if str(mar.get("bucket_mode") or "adaptive") == anchors_v1.BUCKET_MODE:
+        # Refuse rather than half-port. This audit re-derives assignment itself with
+        # assign_adaptive_bucket and force-pins square_idx for square-only domains with
+        # no feasibility test, so under anchors_v1 it would disagree with the catalog
+        # row-for-row AND would itself upsample. A wrong visual audit is worse than none;
+        # it gates nothing in the build chain.
+        raise RuntimeError(
+            f"phase6_visual_audit does not support bucket_mode={anchors_v1.BUCKET_MODE}: "
+            "its independent assignment path has no feasible-anchor test and would "
+            "disagree with the catalog. Port it before auditing an anchors catalog."
+        )
     buckets = build_adaptive_buckets(
         mar_params["target_area"],
         mar_params["divisor"],

@@ -86,6 +86,10 @@ from training.dataline.multi_ar import (
 from training.dataline import anchors_v1
 
 BUCKET_MODES = ("adaptive", anchors_v1.BUCKET_MODE)
+#: The only stage bucket_mode=anchors_v1 may build under. Every stage pins its own
+#: canonical output/stats roots, so this is what keeps a 13-anchor build away from the
+#: frozen 361-bucket Stage512a artifacts.
+ANCHORS_STAGE = "512b"
 
 
 OUTPUT_BASE = Path(
@@ -94,6 +98,9 @@ OUTPUT_BASE = Path(
 CANONICAL_OUTPUT_DIRS = {
     "256": OUTPUT_BASE / "offline_arb_catalog_v1",
     "512a": OUTPUT_BASE / "offline_arb_catalog_stage512a_v1",
+    # Stage512b-real: its own root so a 13-anchor build can never os.replace() the
+    # frozen 361-bucket stage512a parquets in place.
+    "512b": OUTPUT_BASE / "offline_arb_catalog_stage512b_v1",
 }
 CANONICAL_OUTPUT_DIR = CANONICAL_OUTPUT_DIRS["256"]
 DEFAULT_TAR_INDEX_DIR = Path(
@@ -103,6 +110,7 @@ DEFAULT_TAR_INDEX_DIR = Path(
 CANONICAL_BUCKET_STATS_DIRS = {
     "256": OUTPUT_BASE / "offline_arb_bucketstats_v1",
     "512a": OUTPUT_BASE / "offline_arb_bucketstats_stage512a_v1",
+    "512b": OUTPUT_BASE / "offline_arb_bucketstats_stage512b_v1",
 }
 DEFAULT_N_MATRIX = CANONICAL_BUCKET_STATS_DIRS["256"] / "N_matrix.parquet"
 DEFAULT_BUCKET_REPORT = (
@@ -121,6 +129,9 @@ MIB = 1 << 20
 ELIGIBILITY_FALLBACK_DOMAINS = {
     "256": frozenset(("monet_real", "gpic", "synthetic", "textatlas")),
     "512a": frozenset(("anime", "monet_real", "gpic", "synthetic")),
+    # 512b runs bucket_mode=anchors_v1, which reads no elig_* column at all; the key
+    # must exist because ELIGIBILITY_FALLBACK_DOMAINS[stage] is indexed unconditionally.
+    "512b": frozenset(("anime", "monet_real", "gpic", "synthetic", "textatlas")),
 }
 
 
@@ -194,7 +205,7 @@ def load_runtime_config(config_path: str) -> dict[str, Any]:
     image_size = _strict_positive_int(
         OmegaConf.select(cfg, "dataset.image_size"), "dataset.image_size"
     )
-    expected_image_size = {"256": 256, "512a": 512}[stage]
+    expected_image_size = {"256": 256, "512a": 512, "512b": 512}[stage]
     if image_size != expected_image_size:
         raise ValueError(
             f"stage={stage} requires dataset.image_size={expected_image_size}, got {image_size}"
@@ -253,47 +264,35 @@ def load_runtime_config(config_path: str) -> dict[str, Any]:
     if not math.isclose(sum(domain_mix.values()), 1.0, rel_tol=0.0, abs_tol=1e-12):
         raise ValueError(f"stage={stage} domain_mix must sum to 1")
     requires_nl = bool(sampling_cfg.anime_caption.requires_nl(stage))
-    if stage == "512a" and requires_nl:
+    if stage in ("512a", "512b") and requires_nl:
         raise ValueError(
-            "stage512a offline catalog requires requires_nl=false; refusing tag-only row loss"
+            f"stage{stage} offline catalog requires requires_nl=false; refusing tag-only row loss"
         )
     if bucket_mode == anchors_v1.BUCKET_MODE:
-        # Stage "512a" pins --output-dir to offline_arb_catalog_stage512a_v1 and the
-        # stats/N-matrix roots to the stage512a ones. A 13-anchor build under that stage
-        # would os.replace() the five production 361-bucket parquets in place. The new
-        # geometry must come with its own stage identity; refuse until it exists.
-        if stage == "512a":
+        # Positive assertion, not a blacklist. Each stage pins its own canonical
+        # output/stats/N-matrix roots, so a 13-anchor build under stage 512a would
+        # os.replace() the five frozen 361-bucket Stage512a parquets in place; and stage
+        # 256 has target_area 65,536, which the 262,144-area anchor table does not serve.
+        if stage != ANCHORS_STAGE:
             raise ValueError(
-                f"bucket_mode={anchors_v1.BUCKET_MODE} must not run under stage=512a: "
-                "that stage's canonical output/stats/N-matrix paths belong to the frozen "
-                "361-bucket Stage512a catalog and would be overwritten in place. Give "
-                "Stage512b-real its own stage key and canonical directories first."
+                f"bucket_mode={anchors_v1.BUCKET_MODE} requires dataset.stage="
+                f"{ANCHORS_STAGE!r}, got {stage!r}. Other stages pin canonical output "
+                "directories belonging to a different geometry (stage 512a's frozen "
+                "361-bucket catalog would be overwritten in place)."
             )
         # Fixed 13-anchor table. anchor_id order IS the bucket index, and it is the
         # identity key every Stage512b audit is written against, so it must not be
         # re-sorted the way build_adaptive_buckets() sorts by aspect ratio.
         buckets = anchors_v1.anchors_hw()
-        # Required, not defaulted: the area gate materially changes which rows are
-        # admitted (704x352 = 247,808 is itself below 262,144), so it must be an
-        # explicit, auditable statement in the config. `or DEFAULT` would also make 0
-        # unexpressible; 0 / null mean "off", i.e. servability decided purely by the
-        # feasible-anchor test.
-        gate = OmegaConf.select(cfg, "dataset.multi_ar.anchors_area_gate")
-        if gate is None:
-            raise ValueError(
-                f"bucket_mode={anchors_v1.BUCKET_MODE} requires an explicit "
-                "dataset.multi_ar.anchors_area_gate (use 0 to disable it; "
-                f"{anchors_v1.AREA_GATE_STAGE512A} reproduces the Stage512b audits)"
-            )
-        gate = int(gate)
-        if gate < 0:
-            raise ValueError(f"anchors_area_gate must be >= 0, got {gate}")
-        mar_params["area_gate"] = gate or None
-        clm = OmegaConf.select(cfg, "dataset.multi_ar.anchors_crop_loss_max")
-        clm = anchors_v1.CROP_LOSS_MAX if clm is None else float(clm)
-        if not (0.0 <= clm <= 1.0):
-            raise ValueError(f"anchors_crop_loss_max must be in [0,1], got {clm}")
-        mar_params["crop_loss_max"] = clm
+        # Normalized by anchors_v1.params_from_values(), which phase3a also calls, so the
+        # `report_config["multi_ar_params"] != runtime["mar_params"]` equality gate
+        # compares dicts produced by one expression rather than two transcriptions.
+        # The gate is required, not defaulted: it materially changes which rows are
+        # admitted (704x352 = 247,808 is itself below 262,144). 0 means off.
+        mar_params.update(anchors_v1.params_from_values(
+            OmegaConf.select(cfg, "dataset.multi_ar.anchors_area_gate"),
+            OmegaConf.select(cfg, "dataset.multi_ar.anchors_crop_loss_max"),
+        ))
     else:
         buckets = build_adaptive_buckets(
             mar_params["target_area"],
@@ -663,7 +662,7 @@ def assignment_hash_payload(
         # intentionally distinct from the new top-level artifact eligibility.
         "eligibility": "phase3a_stage256_v1",
     }
-    if runtime["stage"] == "512a":
+    if runtime["stage"] in ("512a", "512b"):
         payload.update(
             {
                 "stage": runtime["stage"],
@@ -744,9 +743,14 @@ def validate_bucket_report(
     if report_config.get("domain_mix") != runtime["domain_mix"]:
         raise ValueError("bucket report/config domain_mix differs")
     eligibility_audit = report.get("eligibility_audit")
-    if runtime["stage"] == "512a":
+    if runtime["stage"] in ("512a", "512b"):
         if not isinstance(eligibility_audit, dict) or eligibility_audit.get("pass") is not True:
-            raise ValueError("stage512a bucket report eligibility audit is missing or failed")
+            raise ValueError(
+                f"stage{runtime['stage']} bucket report eligibility audit is missing or failed"
+            )
+    # The remaining cross-checks describe the elig_*-column / short-side-fallback
+    # bookkeeping, which anchors mode does not produce: it reads no elig_* column.
+    if runtime["bucket_mode"] != anchors_v1.BUCKET_MODE and runtime["stage"] == "512a":
         if eligibility_audit.get("fallback_domain_whitelist") != sorted(
             runtime["eligibility_fallback_domains"]
         ):
@@ -1953,12 +1957,16 @@ def main() -> int:
         raise ValueError(
             f"--stage={args.stage} does not match config dataset.stage={runtime['stage']}"
         )
-    if runtime["stage"] == "512a" and args.stage is None:
-        raise ValueError("stage512a catalog build requires explicit --stage 512a")
+    if runtime["stage"] in ("512a", "512b") and args.stage is None:
+        raise ValueError(
+            f"stage{runtime['stage']} catalog build requires explicit "
+            f"--stage {runtime['stage']}"
+        )
     if args.floor is None:
-        if runtime["stage"] == "512a":
+        if runtime["stage"] in ("512a", "512b"):
             raise ValueError(
-                "stage512a catalog build requires an explicit --floor chosen from its bucket report"
+                f"stage{runtime['stage']} catalog build requires an explicit --floor "
+                "chosen from its bucket report (anchors_v1 requires --floor 0)"
             )
         floor = LEGACY_STAGE256_FLOOR
     else:
