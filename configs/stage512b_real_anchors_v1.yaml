@@ -153,19 +153,36 @@ trainer:
   checkpoint_keep_every: 60000
   checkpoint_keep_max: 4
   checkpoint_keep_format: weights_ema
-  # PLACEHOLDER, and it MUST stay distinct from the Stage512a run directory. This block
-  # was inherited verbatim from stage512a_20260722_weighted_w64_v1.yaml, which pointed
-  # checkpoint_dir at the LIVE frozen Stage512a formal run (that directory holds its
-  # FORMAL_RUN.json, last.pt and metrics.jsonl). With resume: true, launching that would
-  # have resumed Stage512a's last.pt and written new checkpoints into the frozen run --
-  # the same hazard as overwriting its catalog parquets, which the stage identity work
-  # exists to prevent.
+  # PLACEHOLDER name, but the DIRECTORY IDENTITY RULE is not a placeholder: this must be
+  # a fresh, create-once directory that no prior run has ever written. This block was
+  # inherited verbatim from stage512a_20260722_weighted_w64_v1.yaml, whose checkpoint_dir
+  # is the ABANDONED step-6000 Stage512a attempt (it still holds a FORMAL_RUN.json and a
+  # 26 GB step-6000 last.pt). Launching Stage512b against it would have resumed a
+  # 6,000-step checkpoint and written new checkpoints into a formal run directory.
+  #
+  # With resume: true (below), a stale or reused checkpoint_dir is SILENTLY resumed
+  # instead of initialised from Stage512a. Verify the directory does not exist -- or is
+  # empty -- immediately before the first submission, and let JCC retries reuse only
+  # this same directory.
   checkpoint_dir: /fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/PLACEHOLDER_stage512b_real_v1
-  # resume is for Stage512b's OWN retries only. Continuation from Stage512a is
-  # init_from + init_load_optimizer against its last.pt; never point resume at another
-  # stage's directory (global step / scheduler / max_steps semantics would misalign).
-  resume: false
-  init_from: PLACEHOLDER_stage512a_last_pt_sha_957bfcf1_pending_verification
+  # resume is for Stage512b's OWN retries and MUST be true; it is not a switch for
+  # "start fresh". train.py:368-384 branches on NOT(local last.pt AND resume):
+  #   resume: true  + empty dir -> init_from Stage512a, global_step reset to 0 (first launch)
+  #   resume: true  + our last.pt -> full Stage512b resume (what a JCC retry needs)
+  #   resume: false -> EVERY retry re-inits from Stage512a and discards Stage512b progress
+  # Continuation from Stage512a is init_from + init_load_optimizer, never resume; pointing
+  # resume at another stage's directory misaligns global step / scheduler / max_steps.
+  resume: true
+  # Verified 2026-08-02: torch.load(mmap=True) reports global_step = 125000 with a full
+  # state dict (trainable_state + optimizer + ema + scheduler), and the run directory's
+  # RECOVERY_FORMAL_RUN.json carries plan_hash 7295ca93..., the frozen Stage512a plan.
+  # This is NOT stage512a_20260722_weighted_w64_v1 (that one stopped at step 6000 and only
+  # seeded this run) -- the terminal Stage512a state lives under recovery_v2.
+  #   sha256(last.pt)      = 957bfcf12b89c4042a32056566012a2451e72aa0b2706b0ca51808ab79155c31
+  #   sha256(metrics.jsonl)= f51b83038f00f60e85c889f1d4114017c4934df016719e658ba0e7e5bce586e6  (125,000 rows)
+  # Re-verify sha256(last.pt) before the first submission; it is a mutable path that the
+  # Stage512a job would overwrite if that job were ever relaunched.
+  init_from: /fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_20260724_weighted_w64_recovery_v2/last.pt
   init_load_optimizer: true
   skip_distributed_teardown: true
   force_os_exit_after_train: true
