@@ -83,6 +83,9 @@ from training.dataline.multi_ar import (
     nearest_allowed_bucket,
     square_index,
 )
+from training.dataline import anchors_v1
+
+BUCKET_MODES = ("adaptive", anchors_v1.BUCKET_MODE)
 
 
 OUTPUT_BASE = Path(
@@ -198,10 +201,12 @@ def load_runtime_config(config_path: str) -> dict[str, Any]:
         )
     if OmegaConf.select(cfg, "dataset.multi_ar.enabled") is not True:
         raise ValueError("offline catalog requires dataset.multi_ar.enabled=true")
-    if OmegaConf.select(cfg, "dataset.multi_ar.bucket_mode") != "adaptive":
+    bucket_mode = OmegaConf.select(cfg, "dataset.multi_ar.bucket_mode")
+    if bucket_mode not in BUCKET_MODES:
         raise ValueError(
-            "offline catalog requires multi_ar.bucket_mode=adaptive; refusing legacy "
-            "fixed ar_list/bucket_probs/native_bucket_dist configuration"
+            f"offline catalog requires multi_ar.bucket_mode in {BUCKET_MODES}, got "
+            f"{bucket_mode!r}; refusing legacy fixed ar_list/bucket_probs/"
+            "native_bucket_dist configuration"
         )
     required_adaptive = (
         "target_area",
@@ -252,13 +257,52 @@ def load_runtime_config(config_path: str) -> dict[str, Any]:
         raise ValueError(
             "stage512a offline catalog requires requires_nl=false; refusing tag-only row loss"
         )
-    buckets = build_adaptive_buckets(
-        mar_params["target_area"],
-        mar_params["divisor"],
-        min_area_ratio=mar_params["min_area_ratio"],
-        max_aspect=mar_params["max_aspect"],
-    )
+    if bucket_mode == anchors_v1.BUCKET_MODE:
+        # Stage "512a" pins --output-dir to offline_arb_catalog_stage512a_v1 and the
+        # stats/N-matrix roots to the stage512a ones. A 13-anchor build under that stage
+        # would os.replace() the five production 361-bucket parquets in place. The new
+        # geometry must come with its own stage identity; refuse until it exists.
+        if stage == "512a":
+            raise ValueError(
+                f"bucket_mode={anchors_v1.BUCKET_MODE} must not run under stage=512a: "
+                "that stage's canonical output/stats/N-matrix paths belong to the frozen "
+                "361-bucket Stage512a catalog and would be overwritten in place. Give "
+                "Stage512b-real its own stage key and canonical directories first."
+            )
+        # Fixed 13-anchor table. anchor_id order IS the bucket index, and it is the
+        # identity key every Stage512b audit is written against, so it must not be
+        # re-sorted the way build_adaptive_buckets() sorts by aspect ratio.
+        buckets = anchors_v1.anchors_hw()
+        # Required, not defaulted: the area gate materially changes which rows are
+        # admitted (704x352 = 247,808 is itself below 262,144), so it must be an
+        # explicit, auditable statement in the config. `or DEFAULT` would also make 0
+        # unexpressible; 0 / null mean "off", i.e. servability decided purely by the
+        # feasible-anchor test.
+        gate = OmegaConf.select(cfg, "dataset.multi_ar.anchors_area_gate")
+        if gate is None:
+            raise ValueError(
+                f"bucket_mode={anchors_v1.BUCKET_MODE} requires an explicit "
+                "dataset.multi_ar.anchors_area_gate (use 0 to disable it; "
+                f"{anchors_v1.AREA_GATE_STAGE512A} reproduces the Stage512b audits)"
+            )
+        gate = int(gate)
+        if gate < 0:
+            raise ValueError(f"anchors_area_gate must be >= 0, got {gate}")
+        mar_params["area_gate"] = gate or None
+        clm = OmegaConf.select(cfg, "dataset.multi_ar.anchors_crop_loss_max")
+        clm = anchors_v1.CROP_LOSS_MAX if clm is None else float(clm)
+        if not (0.0 <= clm <= 1.0):
+            raise ValueError(f"anchors_crop_loss_max must be in [0,1], got {clm}")
+        mar_params["crop_loss_max"] = clm
+    else:
+        buckets = build_adaptive_buckets(
+            mar_params["target_area"],
+            mar_params["divisor"],
+            min_area_ratio=mar_params["min_area_ratio"],
+            max_aspect=mar_params["max_aspect"],
+        )
     return {
+        "bucket_mode": bucket_mode,
         "stage": stage,
         "image_size": image_size,
         "eligibility": f"elig_{image_size}",
@@ -311,6 +355,47 @@ def build_bucket_table(buckets: list[tuple[int, int]], divisor: int) -> np.ndarr
     for i, (h, w) in enumerate(buckets):
         table[h // divisor, w // divisor] = i
     return table
+
+
+def require_identity_fold(bucket_mode: str, fold_map: np.ndarray, floor: float) -> None:
+    """In anchors mode the fold must be the identity, or refuse to build.
+
+    The fold is exactly the upsampling hole anchors_v1 exists to close.
+    `compute_floor_mapping` -> `nearest_allowed_bucket` is an aspect-ratio nearest
+    neighbour with **no feasibility test**, so a pruned extent folds onto a taller
+    anchor: 704x352 -> 672x384 enlarges by 1.091x, and the extents are precisely the
+    anchors most likely to fall under a probability floor. Shipping that would produce a
+    catalog whose rows `anchors_v1.verify_binding()` rejects at train time.
+    """
+    if bucket_mode != anchors_v1.BUCKET_MODE:
+        return
+    non_identity = [
+        (int(i), int(fold_map[i])) for i in range(len(fold_map)) if int(fold_map[i]) != i
+    ]
+    if non_identity:
+        raise ValueError(
+            f"bucket_mode={anchors_v1.BUCKET_MODE} requires an identity fold, but "
+            f"floor={floor} would remap {non_identity}; the fold has no feasibility test "
+            "and would re-introduce upsampling. Use --floor 0."
+        )
+
+
+def vectorized_anchors_assign(w: np.ndarray, h: np.ndarray) -> np.ndarray:
+    """anchors_v1 assignment. Returns -1 for rows no anchor can serve.
+
+    This cannot reuse vectorized_adaptive_assign(): that function keys a dense
+    (h//divisor, w//divisor) lookup table and falls back to a Python scalar call on a
+    miss. With 13 anchors that table is ~99.9% -1, so every single row would take the
+    scalar path -- a catalog build over ~1e9 rows that never finishes, with no error.
+    """
+    params = _CTX["mar_params"]
+    aid, _crop_loss = anchors_v1.assign_anchor_batch(
+        np.rint(w).astype(np.int64),
+        np.rint(h).astype(np.int64),
+        crop_loss_max=params["crop_loss_max"],
+        area_gate=params["area_gate"],
+    )
+    return aid
 
 
 def vectorized_adaptive_assign(w: np.ndarray, h: np.ndarray) -> np.ndarray:
@@ -411,19 +496,55 @@ def filter_and_assign(
     else:
         holdout_keep = np.ones(n, dtype=bool)
     eligibility_column = _CTX["eligibility"]
-    eligibility_mode = eligibility_mode_for_schema(names, domain)
-    if eligibility_mode == "stage256_anime_all_true_compatibility":
+    anchors_mode = _CTX["bucket_mode"] == anchors_v1.BUCKET_MODE
+    # Do not consult the elig_* schema in anchors mode: it is not read, and
+    # eligibility_mode_for_schema() would raise EligibilityContractError over a column
+    # this path never touches.
+    eligibility_mode = (
+        "anchors_v1_area_gate_and_feasible_anchor"
+        if anchors_mode
+        else eligibility_mode_for_schema(names, domain)
+    )
+    if anchors_mode:
+        # The min(w,h) >= image_size gate is an aspect-ratio filter in disguise and is
+        # replaced by the source area gate; servability itself is decided by the
+        # feasible-anchor test below, which is what actually guarantees no upsampling.
+        gate = _CTX["mar_params"]["area_gate"]
+        elig = np.ones(n, dtype=bool) if gate is None else (w * h) >= float(gate)
+    elif eligibility_mode == "stage256_anime_all_true_compatibility":
         elig = np.ones(n, dtype=bool)
     elif eligibility_mode == "column":
         elig = _bool_np(table.column(eligibility_column))
     else:
         elig = np.minimum(w, h) >= float(_CTX["image_size"])
     wh_valid = np.isfinite(w) & np.isfinite(h) & (w > 0) & (h > 0)
+    if anchors_mode:
+        # anchors_v1 raises above MAX_DIM so its exact integer arithmetic cannot
+        # overflow. Screen those rows out here instead: one absurd manifest row must
+        # not abort a multi-hour build with a message naming neither shard nor uid.
+        wh_valid &= (w < anchors_v1.MAX_DIM) & (h < anchors_v1.MAX_DIM)
     keep = holdout_keep & elig & wh_valid
     selected = np.flatnonzero(keep)
     wk = w[selected]
     hk = h[selected]
-    if domain in _CTX["square_only"]:
+    unservable = 0
+    if anchors_mode:
+        # Run the real assignment for every domain, including square-only ones: forcing
+        # square_idx without a feasibility test would upsample any row that cannot cover
+        # 512x512.
+        raw_bucket = vectorized_anchors_assign(wk, hk)
+        if domain in _CTX["square_only"]:
+            raw_bucket = np.where(
+                raw_bucket == int(_CTX["square_idx"]), raw_bucket, np.int64(-1)
+            )
+        servable = raw_bucket >= 0
+        unservable = int((~servable).sum())
+        if unservable:
+            selected = selected[servable]
+            wk = wk[servable]
+            hk = hk[servable]
+            raw_bucket = raw_bucket[servable]
+    elif domain in _CTX["square_only"]:
         raw_bucket = np.full(selected.size, _CTX["square_idx"], dtype=np.int64)
     else:
         raw_bucket = vectorized_adaptive_assign(wk, hk)
@@ -433,6 +554,7 @@ def filter_and_assign(
         "rows_holdout_dropped": int((~holdout_keep).sum()),
         "rows_elig_dropped": int((holdout_keep & ~elig).sum()),
         "rows_invalid_wh_dropped": int((holdout_keep & elig & ~wh_valid).sum()),
+        "rows_unservable_dropped": unservable,
         "rows_kept": int(selected.size),
         "eligibility_fallback_rows": (
             int(n) if eligibility_mode == "short_dim_fallback" else 0
@@ -532,7 +654,11 @@ def assignment_hash_payload(
         "fold_map": [int(value) for value in fold_map.tolist()],
         "square_only_domains": list(runtime["square_only"]),
         "square_bucket_idx": int(runtime["square_idx"]),
-        "assignment": "phase3a_vectorized_with_production_scalar_fallback_v1",
+        "assignment": (
+            "anchors_v1_feasible_argmax_retention_v1"
+            if runtime.get("bucket_mode") == anchors_v1.BUCKET_MODE
+            else "phase3a_vectorized_with_production_scalar_fallback_v1"
+        ),
         # This historical string is part of the stage256 assignment ABI.  It is
         # intentionally distinct from the new top-level artifact eligibility.
         "eligibility": "phase3a_stage256_v1",
@@ -546,6 +672,15 @@ def assignment_hash_payload(
                 "requires_nl": runtime["requires_nl"],
             }
         )
+    if runtime.get("bucket_mode") == anchors_v1.BUCKET_MODE:
+        # Without this, a legacy-361 catalog and an anchors-13 catalog would differ only
+        # in bucket_table_hash, and the mismatch error would give no hint that two
+        # incompatible geometries were involved.
+        payload["bucket_mode"] = anchors_v1.BUCKET_MODE
+        payload["anchor_identity"] = anchors_v1.identity()
+        gate = runtime["mar_params"]["area_gate"]
+        payload["source_area_gate"] = None if gate is None else int(gate)
+        payload["crop_loss_max"] = float(runtime["mar_params"]["crop_loss_max"])
     return payload
 
 
@@ -1791,6 +1926,10 @@ def _merge_coverage(results: Iterable[dict[str, Any]], shards_total: dict[str, i
             "rows_holdout_dropped": 0,
             "rows_elig_dropped": 0,
             "rows_invalid_wh_dropped": 0,
+            # anchors_v1 drops rows after assignment when no anchor can serve them.
+            # Always present (0 in legacy) so the coverage identity is one expression:
+            #   rows_raw - holdout - elig - invalid - unservable == rows_kept
+            "rows_unservable_dropped": 0,
             "rows_kept": 0,
             "eligibility_column_shards": 0,
             "eligibility_fallback_shards": 0,
@@ -1951,6 +2090,7 @@ def main() -> int:
         runtime["square_idx"],
         floor,
     )
+    require_identity_fold(runtime["bucket_mode"], fold_map, floor)
     reported_kept = bucket_report_binding["selected_floor_report"].get(
         "kept_bucket_indices"
     )
@@ -2200,7 +2340,13 @@ def main() -> int:
         "kept_bucket_indices": sorted(kept),
         "fold_map": fold_map.tolist(),
         "row_scheme": "virtual_catalog_v1_materialized",
-        "row_order": ["domain_order", "bucket_idx_0_to_94", "uid_lexicographic"],
+        # Generated, not a literal: "bucket_idx_0_to_94" was already wrong for the
+        # 361-bucket stage512a catalogs in production and would be doubly wrong at 13.
+        "row_order": [
+            "domain_order",
+            f"bucket_idx_0_to_{len(runtime['buckets']) - 1}",
+            "uid_lexicographic",
+        ],
         "row_count": int(row_cursor),
         "row_group_target_rows": args.row_group_size,
         "files": files,
@@ -2212,12 +2358,35 @@ def main() -> int:
             "materialized_after_exclusion": matrix_list(final_n),
         },
         "coverage": coverage_summary,
-        "eligibility_audit": {
-            "pass": eligibility_source_pass,
-            "column": runtime["eligibility"],
-            "fallback_rule": f"min(width,height)>={runtime['image_size']}",
-            "fallback_domain_whitelist": sorted(runtime["eligibility_fallback_domains"]),
-        },
+        "eligibility_audit": (
+            {
+                # anchors_v1 reads neither the elig_* column nor the short-side rule, so
+                # reporting them here would be a false record of what was applied.
+                "pass": eligibility_source_pass,
+                "bucket_mode": anchors_v1.BUCKET_MODE,
+                "column": None,
+                "rule": (
+                    "source_area_gate"
+                    + (
+                        f">={runtime['mar_params']['area_gate']}"
+                        if runtime["mar_params"]["area_gate"] is not None
+                        else "=disabled"
+                    )
+                    + " AND a feasible anchor exists (w>=W_k and h>=H_k) with"
+                    f" crop_loss<={runtime['mar_params']['crop_loss_max']}"
+                ),
+                "fallback_domain_whitelist": [],
+            }
+            if runtime["bucket_mode"] == anchors_v1.BUCKET_MODE
+            else {
+                "pass": eligibility_source_pass,
+                "column": runtime["eligibility"],
+                "fallback_rule": f"min(width,height)>={runtime['image_size']}",
+                "fallback_domain_whitelist": sorted(
+                    runtime["eligibility_fallback_domains"]
+                ),
+            }
+        ),
         "self_checks": validations,
         "caption_strategy": CAPTION_STRATEGY,
         "sort_and_memory": {
