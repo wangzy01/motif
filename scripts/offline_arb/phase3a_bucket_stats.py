@@ -1134,13 +1134,35 @@ def main() -> int:
             "path": str(n_matrix_path.resolve(strict=True)),
             "sha256": n_matrix_sha256,
         },
-        "eligibility_audit": {
-            "column": runtime["eligibility"],
-            "fallback_rule": f"min(width,height)>={runtime['image_size']}",
-            "fallback_domain_whitelist": sorted(runtime["eligibility_fallback_domains"]),
-            "unexpected_missing_column_failures": eligibility_contract_failures,
-            "pass": not eligibility_contract_failures,
-        },
+        "eligibility_audit": (
+            {
+                # anchors mode reads neither the elig_* column nor the short-side rule;
+                # recording them would be a false record of what was applied.
+                "bucket_mode": anchors_v1.BUCKET_MODE,
+                "column": None,
+                "rule": (
+                    "source_area_gate"
+                    + (
+                        f">={runtime['multi_ar_params']['area_gate']}"
+                        if runtime["multi_ar_params"].get("area_gate") is not None
+                        else "=disabled"
+                    )
+                    + " AND a feasible anchor exists (w>=W_k and h>=H_k) with"
+                    f" crop_loss<={runtime['multi_ar_params']['crop_loss_max']}"
+                ),
+                "fallback_domain_whitelist": [],
+                "unexpected_missing_column_failures": eligibility_contract_failures,
+                "pass": not eligibility_contract_failures,
+            }
+            if runtime["bucket_mode"] == anchors_v1.BUCKET_MODE
+            else {
+                "column": runtime["eligibility"],
+                "fallback_rule": f"min(width,height)>={runtime['image_size']}",
+                "fallback_domain_whitelist": sorted(runtime["eligibility_fallback_domains"]),
+                "unexpected_missing_column_failures": eligibility_contract_failures,
+                "pass": not eligibility_contract_failures,
+            }
+        ),
         "buckets": [{"idx": i, "h": h, "w": w, "ar": w / h} for i, (h, w) in enumerate(buckets)],
         "square_bucket_idx": sq_idx,
         "coverage": coverage,
@@ -1203,14 +1225,31 @@ def write_markdown_summary(path: Path, report: dict[str, Any]) -> None:
                       f"`{report['config']['domain_mix_reference_mismatch']}`\n")
 
     lines.append("\n## 覆盖率\n")
-    lines.append("| domain | shards_total | scanned | failed | elig-column shards | fallback shards | fallback rows | rows_raw | rows_kept |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    lines.append(
+        "| domain | shards_total | scanned | failed | elig-column shards | fallback shards "
+        "| fallback rows | rows_raw | holdout | elig | invalid wh | unservable | rows_kept |"
+    )
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for d, c in report["coverage"].items():
+        # Every drop reason is listed: rows_raw - holdout - elig - invalid - unservable
+        # == rows_kept. Showing only raw and kept left the gap unexplained, which for
+        # anchors mode is the whole unservable population.
         lines.append(
             f"| {d} | {c['shards_total']} | {c['shards_scanned']} | {c['shards_failed']} | "
             f"{c['eligibility_column_shards']} | {c['eligibility_fallback_shards']} | "
-            f"{c['eligibility_fallback_rows']:,} | {c['rows_raw']:,} | {c['rows_kept']:,} |"
+            f"{c['eligibility_fallback_rows']:,} | {c['rows_raw']:,} | "
+            f"{c['rows_holdout_dropped']:,} | {c['rows_elig_dropped']:,} | "
+            f"{c['rows_invalid_wh_dropped']:,} | {c['rows_unservable_dropped']:,} | "
+            f"{c['rows_kept']:,} |"
         )
+        residual = (
+            c["rows_raw"] - c["rows_holdout_dropped"] - c["rows_elig_dropped"]
+            - c["rows_invalid_wh_dropped"] - c["rows_unservable_dropped"] - c["rows_kept"]
+        )
+        if residual:
+            lines.append(
+                f"| **{d} COVERAGE IDENTITY BROKEN** | residual {residual:,} | | | | | | | | | | | |"
+            )
     lines.append(f"\n合计 kept 行数: **{report['domain_totals_sum']:,}**"
                   f"（对照 Phase-1 D 项 95.7M 量级 uid 全量口径)\n")
 

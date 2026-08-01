@@ -256,6 +256,63 @@ def test_params_from_values_is_the_single_source() -> None:
         check("crop_loss_max out of range rejected", True)
 
 
+def _fake_report(unservable=61565, break_identity=False):
+    """write_markdown_summary 需要的最小完整 report。数字取自 12-shard 诊断实跑。"""
+    kept = 11938033 - (7 if break_identity else 0)
+    return {
+        "schema_version": "offline_arb_bucketstats_v1", "generated_at": "x", "host": "h",
+        "duration_seconds": 1.0, "diagnostic_run": True, "stage": "512b",
+        "image_size": 512, "eligibility": "elig_512", "requires_nl": False,
+        "domain_totals_sum": kept,
+        "config": {
+            "multi_ar_params": {"area_gate": 262144, "crop_loss_max": 0.2},
+            "square_only_domains": ["synthetic"],
+            "domain_mix_reference_mismatch": {},
+        },
+        "coverage": {"anime": {
+            "shards_total": 17, "shards_scanned": 12, "shards_failed": 0,
+            "rows_raw": 11999598, "rows_holdout_dropped": 0, "rows_elig_dropped": 0,
+            "rows_invalid_wh_dropped": 0, "rows_unservable_dropped": unservable,
+            "rows_kept": kept, "eligibility_column_shards": 0,
+            "eligibility_fallback_shards": 0, "eligibility_fallback_rows": 0,
+            "eligibility_compatibility_shards": 0,
+        }},
+        "anime_caption_availability": {
+            "has_nl": 1, "tag_only": 0, "has_nl_fraction": 1.0, "tag_only_fraction": 0.0,
+            "expected_tag_exposure": {"anime_tag_fraction": None},
+        },
+        "retained_percentiles": {}, "floors": [], "failed_shard_count": 0,
+        "failed_shards": [], "known_simplifications": [],
+    }
+
+
+def test_summary_reports_every_drop_reason() -> None:
+    """REGRESSION（由 12-shard 诊断实跑发现）：摘要原先只列 rows_raw 和 rows_kept，
+    anime 那 61,565 行的缺口在人读摘要里毫无解释 —— 正是静默截断的模式。"""
+    out = os.path.join(TMP, "sum.md")
+    try:
+        P3.write_markdown_summary(__import__("pathlib").Path(out), _fake_report())
+        text = open(out, encoding="utf-8").read()
+    except Exception as exc:                                   # noqa: BLE001
+        check("write_markdown_summary runs", False, f"{type(exc).__name__}: {exc}")
+        return
+    check("summary has an unservable column", "unservable" in text, text[:200])
+    check("summary prints the unservable count", "61,565" in text,
+          [l for l in text.splitlines() if "anime" in l][:1])
+    for label in ("holdout", "invalid wh"):
+        check(f"summary has a {label!r} column", label in text)
+    # 恒等式被破坏时必须大声报出来，而不是静静少一点
+    out2 = os.path.join(TMP, "sum_bad.md")
+    P3.write_markdown_summary(__import__("pathlib").Path(out2),
+                              _fake_report(break_identity=True))
+    t2 = open(out2, encoding="utf-8").read()
+    check("broken coverage identity is called out loudly",
+          "COVERAGE IDENTITY BROKEN" in t2,
+          [l for l in t2.splitlines() if "anime" in l][:2])
+    check("a sound report carries no broken-identity marker",
+          "COVERAGE IDENTITY BROKEN" not in text)
+
+
 def test_stage_and_dir_wiring() -> None:
     check("phase3a has a 512b bucketstats root", "512b" in P3.CANONICAL_OUTPUT_DIRS)
     check("512b root is distinct from 512a",
