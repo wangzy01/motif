@@ -264,7 +264,7 @@
     }
   },
   "source_alpha": 0.2,
-  "_source_alpha_note": "REDESIGN: 当 monet_subsource_explicit_probs 存在时, MONET 子源权重改用显式表 (code: manifest_index.py:287 src_f 门控), source_alpha 不再用于 MONET 源拉平 (仅作回退). cluster_beta 簇内拉平仍生效. || Stage512b-real: source_alpha is INERT for monet_real because monet_subsource_explicit_probs is populated and takes priority (phase5_build_catalog.py source_factor branch). It still governs synthetic.",
+  "_source_alpha_note": "source_alpha 0.2 is INERT for monet_real: monet_subsource_explicit_probs is populated and takes priority in phase5's source_factor branch (kept deliberately, Evan 2026-08-01 -- the explicit table also excludes diffusion-aesthetic-4k by omission, which is what the exclude-da4k decision wanted). So the earlier 'raise source_alpha to 0.5' item is moot. source_alpha still governs the synthetic domain.",
   "monet_subsource_explicit_probs": {
     "_note": "REDESIGN (gated, Evan 2026-06-29): MONET 子源显式概率表, 替代 count^-0.2 软拉平 (现 count^-0.2 反把单调小源 commoncatalog/megalith 抬高). 回归自然比+轻多元倾斜. 和≈1.0. code 若识别此字段, 每行 src_f = probs[sub_source]/源内行数 (即把该源总质量设为 probs[src], 行内再由 cluster_beta 拉平); 缺则回退 count^-0.2. photo%: laion63.7/coyo71.1/cc12m72.2(多元) vs commoncatalog96.2/megalith96.5(单调). 短caption 几乎全来自 laion/coyo/cc12m, 压单调与保短档同向. da4k(0.01M) 忽略.",
     "laion": 0.34,
@@ -273,8 +273,8 @@
     "commoncatalog-cc-by": 0.13,
     "megalith10m": 0.09
   },
-  "cluster_beta": 0.0,
-  "_cluster_beta_note": "Stage512b-real: 0.0 (DISABLED). cluster_id exists only in t5_manifest/rich_v1 (the curated 60M); the full-survivor pool has none, and phase5's _int_np turns a null into INT64_MIN whose cluster_size lookup misses, yielding factor 1.0 -- the MAXIMUM -- so un-clustered rows would be systematically over-exposed (~5x per row). sscd_cluster_id is a per-image dedup id (all singletons), useless as a substitute. With VA the real pool is 2.5x larger and real epochs drop to 1.5-2.8, so the flattening this provided is much less needed. Previous value 0.2.",
+  "cluster_beta": 0.2,
+  "_cluster_beta_note": "Stage512b-real: 0.2, i.e. UNCHANGED from Stage512a. An earlier draft set this to 0.0 because the full-survivor pool has no cluster_id and phase5's _int_np turns a null into INT64_MIN whose cluster_sizes lookup misses, yielding factor 1.0 -- the MAXIMUM -- so un-clustered rows would have been over-exposed ~5x per row. Evan chose 2026-08-01 to build the CURATED rich_v1 pool first, and rich_v1 has cluster_id on every row (verified over all 512 shards: null_count 0, min 0, max 19999), so the mechanism is fully valid here and disabling it would give up cluster flattening for no reason. Revisit only if the pool is switched to the full survivor set.",
   "aes_weighting": false,
   "_aes_note": "off for real (aes already a soft selection weight in daily_v1). anime uses ct_weight/quality, aes is soft reference only.",
   "monet_real_gpic_ratio": {
