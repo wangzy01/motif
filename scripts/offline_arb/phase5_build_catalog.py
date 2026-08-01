@@ -129,9 +129,12 @@ MIB = 1 << 20
 ELIGIBILITY_FALLBACK_DOMAINS = {
     "256": frozenset(("monet_real", "gpic", "synthetic", "textatlas")),
     "512a": frozenset(("anime", "monet_real", "gpic", "synthetic")),
-    # 512b runs bucket_mode=anchors_v1, which reads no elig_* column at all; the key
-    # must exist because ELIGIBILITY_FALLBACK_DOMAINS[stage] is indexed unconditionally.
-    "512b": frozenset(("anime", "monet_real", "gpic", "synthetic", "textatlas")),
+    # 512b: identical to 512a, because the physical schemas are identical -- textatlas is
+    # the one manifest that really stores elig_512, so it must NOT be whitelisted for the
+    # short-side fallback. The whitelist is not merely indexed: it is evaluated per shard
+    # in eligibility_mode_for_schema() and again as a publication gate
+    # (eligibility_source_pass), so widening it makes that gate unsatisfiable.
+    "512b": frozenset(("anime", "monet_real", "gpic", "synthetic")),
 }
 
 
@@ -676,8 +679,10 @@ def assignment_hash_payload(
         # in bucket_table_hash, and the mismatch error would give no hint that two
         # incompatible geometries were involved.
         payload["bucket_mode"] = anchors_v1.BUCKET_MODE
-        payload["anchor_identity"] = anchors_v1.identity()
         gate = runtime["mar_params"]["area_gate"]
+        payload["anchor_identity"] = anchors_v1.identity(
+            crop_loss_max=runtime["mar_params"]["crop_loss_max"], area_gate=gate
+        )
         payload["source_area_gate"] = None if gate is None else int(gate)
         payload["crop_loss_max"] = float(runtime["mar_params"]["crop_loss_max"])
     return payload
@@ -750,7 +755,10 @@ def validate_bucket_report(
             )
     # The remaining cross-checks describe the elig_*-column / short-side-fallback
     # bookkeeping, which anchors mode does not produce: it reads no elig_* column.
-    if runtime["bucket_mode"] != anchors_v1.BUCKET_MODE and runtime["stage"] == "512a":
+    if runtime["bucket_mode"] != anchors_v1.BUCKET_MODE and runtime["stage"] in (
+        "512a",
+        "512b",
+    ):
         if eligibility_audit.get("fallback_domain_whitelist") != sorted(
             runtime["eligibility_fallback_domains"]
         ):
@@ -2304,7 +2312,10 @@ def main() -> int:
     coverage_summary = _merge_coverage(
         build_results, {d: len(all_shards[d]) for d in DOMAINS}
     )
-    eligibility_source_pass = all(
+    anchors_mode_run = runtime["bucket_mode"] == anchors_v1.BUCKET_MODE
+    # In anchors mode no elig_* column is read, so the per-domain column/fallback shard
+    # bookkeeping describes a rule that was never applied and cannot be a gate.
+    eligibility_source_pass = anchors_mode_run or all(
         (
             coverage_summary[domain]["eligibility_fallback_shards"]
             == coverage_summary[domain]["shards_scanned"]

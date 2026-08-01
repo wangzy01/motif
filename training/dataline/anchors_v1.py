@@ -355,8 +355,13 @@ def probs_from_mapping(mapping: dict) -> list[float]:
     return [p / total for p in probs]
 
 
-def identity() -> dict:
-    """写入 catalog / plan header 的几何身份。"""
+def identity(crop_loss_max: float = CROP_LOSS_MAX, area_gate: int | None = None) -> dict:
+    """写入 catalog / plan header 的几何身份。
+
+    `crop_loss_max` / `area_gate` **必须传入实际生效值**：写死模块常量会让
+    `assignment_hash_payload` 里的 `anchor_identity` 在配置用了非默认阈值时谎报，
+    而紧邻的 `payload["crop_loss_max"]` 报的是真值 —— 同一个 payload 自相矛盾。
+    """
     return {
         "bucket_mode": BUCKET_MODE,
         "anchor_set_id": ANCHOR_SET_ID,
@@ -365,7 +370,8 @@ def identity() -> dict:
         "assignment": "argmax over feasible set of retention, ties by (-area, anchor_id)",
         "feasible_set": "w >= W_k and h >= H_k",
         "retention": "min(w*H_k, h*W_k) / max(w*H_k, h*W_k)  (exact rational)",
-        "crop_loss_max": CROP_LOSS_MAX,
+        "crop_loss_max": float(crop_loss_max),
+        "source_area_gate": None if area_gate is None else int(area_gate),
         "acceptance_test": "den*min >= num*max where (1-crop_loss_max) = num/den (exact integers)",
         "upsampling": ("structurally impossible via assign_anchor*/verify_binding "
                        "(feasible set requires w>=W and h>=H); NOT guaranteed if the anchor "

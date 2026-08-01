@@ -155,7 +155,7 @@ def main() -> int:
     sampling_path = Path(str(cfg.dataset.sampling_config))
     close_catalog_sampling = (
         args.format_version == 2
-        and args.stage == "512a"
+        and args.stage in ("512a", "512b")
         and args.catalog_header is not None
     )
     sampling_sha256 = None
@@ -198,6 +198,18 @@ def main() -> int:
     N = [[int(cols[f"n_{d}"][b]) for d in DOMAINS] for b in range(nb)]
 
     if args.floor > 0:
+        if bucket_mode == anchors_v1.BUCKET_MODE:
+            # Same refusal phase5 has. nearest_allowed_bucket is an aspect-ratio nearest
+            # neighbour with NO feasibility test, so a pruned extent folds onto a TALLER
+            # anchor: 704x352 -> 672x384 enlarges 1.091x, 352x704 -> 384x672 likewise,
+            # 544x480 -> 560x448 1.029x. Without this a positive --floor silently hands the
+            # planner an N matrix whose rows the source images cannot cover, and nothing
+            # downstream re-checks it -- verify_binding() would reject them at train time.
+            raise SystemExit(
+                f"bucket_mode={anchors_v1.BUCKET_MODE} requires an identity fold; "
+                f"--floor={args.floor} would prune anchors and the fold has no "
+                "feasibility test, which would re-introduce upsampling. Use --floor 0."
+            )
         from training.dataline.multi_ar import nearest_allowed_bucket
         nd = [sum(N[b][j] for b in range(nb)) for j in range(len(DOMAINS))]     # N[d]
         pb = [sum(mix[d] * N[b][j] / max(nd[j], 1) for j, d in enumerate(DOMAINS))

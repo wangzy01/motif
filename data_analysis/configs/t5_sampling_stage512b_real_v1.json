@@ -59,7 +59,8 @@
       "textatlas": 0.05
     },
     "_stage_meta": {
-      "_note": "曝光量 (image-views, 非step): 256=384M / 512a=128M / 512b=256M. image_size: 256=256 / 512a=512b=512. anime池/重复: 256=16.5M(~6ep) / 512a=elig_512 16.29M(~3ep) / 512b=精选<10M(~20ep, cluster分层+多caption护栏, eval gate@64/128/192/256M). 1024+末尾收尾段=暂缓(看512b效果)."
+      "_note": "曝光量 (image-views, 非step): 256=384M / 512a=128M / 512b=256M. image_size: 256=256 / 512a=512b=512. anime池/重复: 256=16.5M(~6ep) / 512a=elig_512 16.29M(~3ep) / 512b=精选<10M(~20ep, cluster分层+多caption护栏, eval gate@64/128/192/256M). 1024+末尾收尾段=暂缓(看512b效果).",
+      "_note_superseded_512b": "SUPERSEDED for 512b: the '512b=256M / anime 精选<10M(~20ep)' text in _note describes the 2026-06-29 anime-alignment design, which is no longer planned. Stage512b-real is 512M exposures = 250,000 steps @ 2048 over the curated rich_v1 pool with bucket_mode=anchors_v1. The 256/512a parts of _note still stand."
     },
     "_stage512b_real_note": "Stage512b-real (2026-08-01): REPLACES the 2026-06-29 anime-alignment 512b design (anime 0.78 / 256M exposures / anime curated <10M at ~20 epochs), which is no longer planned. This stage is a real-photo breadth stage: 512M exposures = 250,000 steps at global batch 2048, full-survivor real pool, bucket_mode=anchors_v1 (13 anchors)."
   },
@@ -77,12 +78,13 @@
       "textatlas": "elig_512==1"
     },
     "512b": {
-      "anime": "elig_512==1",
-      "monet_real": "elig_512==1",
-      "gpic": "elig_512==1",
-      "synthetic": "elig_512==1",
-      "textatlas": "elig_512==1"
-    }
+      "anime": "source_area>=262144 AND a feasible anchors_v1 anchor exists (w>=W_k and h>=H_k, crop_loss<=0.20); elig_512 is NOT read",
+      "monet_real": "source_area>=262144 AND a feasible anchors_v1 anchor exists (w>=W_k and h>=H_k, crop_loss<=0.20); elig_512 is NOT read",
+      "gpic": "source_area>=262144 AND a feasible anchors_v1 anchor exists (w>=W_k and h>=H_k, crop_loss<=0.20); elig_512 is NOT read",
+      "synthetic": "source_area>=262144 AND a feasible anchors_v1 anchor exists (w>=W_k and h>=H_k, crop_loss<=0.20); elig_512 is NOT read",
+      "textatlas": "source_area>=262144 AND a feasible anchors_v1 anchor exists (w>=W_k and h>=H_k, crop_loss<=0.20); elig_512 is NOT read"
+    },
+    "_note_512b": "512b uses bucket_mode=anchors_v1: no elig_* mask is read. The gate is the source area gate plus the feasible-anchor test, and it is NOT equivalent to elig_512 -- e.g. 1024x256 has area exactly 262,144 (passes the gate) but min(w,h)=256 < 512."
   },
   "anime": {
     "_note": "Anime domain (target domain). Manifest = thin pointer index (t5_manifest/daily_v1/anime). Caption text + raw booru tags are NOT in the manifest; read from the source parquet by `key` at train time. Recommended: reuse naifu caption builder directly (it consumes these source fields). Sampling aligns to naifu sampling_plan.md.",
@@ -287,9 +289,10 @@
       0.245
     ],
     "512b": [
-      0.765,
-      0.235
-    ]
+      0.666667,
+      0.333333
+    ],
+    "_stage512b_real_note": "512b updated 2026-08-01 from [0.765,0.235] (derived from the superseded 0.13:0.04 mix) to 0.40:0.20 = [0.666667,0.333333]. NOTE this key is DEAD in the training/plan path -- phase5 and the planner use the explicit per-domain domain_mix entries; only the offline analysis script t5_sampling_weights.py reads it. Kept consistent so it cannot mislead."
   },
   "_monet_real_gpic_ratio_note": "REDESIGN: within-real (MONET-real:GPIC) split per stage, 直接由 domain_mix 推出 (信息性, band-first 实际用 domain_mix). 256 = 0.405:0.259 = [0.610,0.390]; 512a = 0.40:0.13 = [0.755,0.245]; 512b = 0.13:0.04 = [0.765,0.235]. keys 须与 STAGES 一致.",
   "tier_bounds_tok": {

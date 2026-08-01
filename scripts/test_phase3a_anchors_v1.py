@@ -313,6 +313,77 @@ def test_summary_reports_every_drop_reason() -> None:
           "COVERAGE IDENTITY BROKEN" not in text)
 
 
+def test_512b_whitelist_matches_512a() -> None:
+    """REGRESSION：512b 的 fallback 白名单曾被放宽到含 textatlas，理由是"锚模式下不生效"。
+    错了 —— textatlas **物理上就带 elig_512 列**，会被判为 column 模式，而白名单要求它是
+    fallback 模式；phase5 把这个白名单当**发布门**用，于是整个构建在最后一步炸掉。"""
+    a, b = P3.ELIGIBILITY_FALLBACK_DOMAINS["512a"], P3.ELIGIBILITY_FALLBACK_DOMAINS["512b"]
+    check("512b whitelist == 512a whitelist", a == b, f"512a={sorted(a)} 512b={sorted(b)}")
+    check("textatlas is NOT whitelisted (it really stores elig_512)",
+          "textatlas" not in b, str(sorted(b)))
+    # 直接核实那条物理事实，别只依赖注释
+    import pyarrow.parquet as _pq
+    try:
+        cols = [c.name for c in _pq.ParquetFile(
+            "/fsx/evan/textatlas_manifest_v1/CleanTextSynth/"
+            "train-00000-of-00067.parquet").schema_arrow]
+        check("textatlas manifest physically has elig_512", "elig_512" in cols, str(cols))
+    except OSError as exc:
+        check("textatlas manifest readable", False, str(exc))
+
+
+def test_crop_loss_max_zero_survives_to_the_worker() -> None:
+    """REGRESSION：`task.get("crop_loss_max") or DEFAULT` 会把合法的 0.0 换成 0.20，
+    于是 N_matrix 按 0.20 算、报告记 0.0，而 phase5 的 mar_params 等值门照样通过 ——
+    分歧要等到"manifest raw N differs from Phase-3a N_matrix"才暴露。"""
+    rows = [(1024, 1024), (1030, 1024), (767, 512)]
+    t = task(write_shard(rows, "clm0.parquet"))
+    t["crop_loss_max"] = 0.0
+    res = P3.scan_domain_shard(t)
+    check("worker ok at crop_loss_max=0.0", res.get("ok") is True, str(res.get("error")))
+    if not res.get("ok"):
+        return
+    # 0.0 = 只接受 AR 精确匹配 => 只有正方 1024x1024 落在方锚
+    check("crop_loss_max=0.0 keeps only the exact-AR row",
+          res["rows_kept"] == 1 and int(res["n_matrix"][0]) == 1,
+          f'kept={res["rows_kept"]} n0={int(res["n_matrix"][0])}')
+    check("the other two counted as unservable",
+          res["rows_unservable_dropped"] == 2, str(res["rows_unservable_dropped"]))
+    # 对照：默认 0.20 下三行应该都留
+    res2 = P3.scan_domain_shard(task(write_shard(rows, "clm2.parquet")))
+    check("default 0.20 keeps all three", res2["rows_kept"] == 3, str(res2["rows_kept"]))
+
+
+def test_identity_reports_the_effective_thresholds() -> None:
+    """REGRESSION：identity() 曾写死模块常量，于是 assignment_hash 的 anchor_identity
+    在配置用非默认阈值时谎报，而紧邻的 payload["crop_loss_max"] 报真值。"""
+    i = anchors_v1.identity(crop_loss_max=0.05, area_gate=262144)
+    check("identity reflects the passed crop_loss_max", i["crop_loss_max"] == 0.05, str(i["crop_loss_max"]))
+    check("identity reflects the passed area_gate", i["source_area_gate"] == 262144, str(i["source_area_gate"]))
+    d = anchors_v1.identity()
+    check("identity defaults to the module constant with the gate off",
+          d["crop_loss_max"] == anchors_v1.CROP_LOSS_MAX and d["source_area_gate"] is None, str(d))
+
+
+def test_known_simplifications_are_true_under_anchors() -> None:
+    """REGRESSION：正式报告的 known_simplifications 曾声明三件锚模式下为假的事
+    （读 elig_512 / 短边回退 / square_only 域被强钉到方桶）。"""
+    import re
+    src = open(_P3_PATH, encoding="utf-8").read()
+    i = src.index('"known_simplifications"')
+    block = src[i:i + 4000]
+    anchors_branch = block[:block.index('if runtime["bucket_mode"] == anchors_v1.BUCKET_MODE')]
+    check("anchors branch does not claim the elig_* column is read",
+          "runtime['eligibility']" not in anchors_branch
+          and "{runtime['eligibility']}" not in anchors_branch, "still references eligibility")
+    check("anchors branch says no elig_* column is read",
+          "不读任何 elig_" in anchors_branch)
+    check("anchors branch says square_only is verified, not forced",
+          "不是**" in anchors_branch or "落不到方锚的行被丢弃" in anchors_branch)
+    check("anchors branch mentions rows_unservable_dropped",
+          "rows_unservable_dropped" in anchors_branch)
+
+
 def test_stage_and_dir_wiring() -> None:
     check("phase3a has a 512b bucketstats root", "512b" in P3.CANONICAL_OUTPUT_DIRS)
     check("512b root is distinct from 512a",

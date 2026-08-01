@@ -60,9 +60,11 @@ dataset:
   offline_plan_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_plan_stage512b_PLACEHOLDER
   offline_plan_hash: PLACEHOLDER_no_plan_built_yet
   offline_weighted_contract_sha256: PLACEHOLDER_no_contract_yet
+  # Will be written by phase5 under this exact path (== CANONICAL_OUTPUT_DIRS['512b']);
+  # does not exist yet.
   offline_catalog_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512b_v1
-  offline_anime_freq_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_animefreq_stage512b_v1
-  offline_caption_sidecar_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_caption_sidecar_stage512b_v1
+  offline_anime_freq_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_animefreq_stage512b_v1   # PLACEHOLDER: never built
+  offline_caption_sidecar_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_caption_sidecar_stage512b_v1   # PLACEHOLDER: never built
   caption_sidecar_workers: 16
   caption_workers_anime: 8
   caption_workers_monet_real: 8
@@ -140,8 +142,10 @@ trainer:
   seed: 42
   amp_dtype: bfloat16
   batch_size: 32
-  max_steps: 125000
-  max_exposure_images: 256000000
+  # 512M exposures = 250,000 steps @ global batch 2048 (world 64 x bs 32). The file
+  # inherited 512a's 125,000/256M, which contradicted its own header.
+  max_steps: 250000
+  max_exposure_images: 512000000
   gradient_clip_val: 1.0
   log_every: 10
   dataline_metrics_every: 50
@@ -149,9 +153,19 @@ trainer:
   checkpoint_keep_every: 60000
   checkpoint_keep_max: 4
   checkpoint_keep_format: weights_ema
-  checkpoint_dir: /fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_20260722_weighted_w64_v1
-  resume: true
-  init_from: /fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage256_20260718_step45000_v6/last.pt
+  # PLACEHOLDER, and it MUST stay distinct from the Stage512a run directory. This block
+  # was inherited verbatim from stage512a_20260722_weighted_w64_v1.yaml, which pointed
+  # checkpoint_dir at the LIVE frozen Stage512a formal run (that directory holds its
+  # FORMAL_RUN.json, last.pt and metrics.jsonl). With resume: true, launching that would
+  # have resumed Stage512a's last.pt and written new checkpoints into the frozen run --
+  # the same hazard as overwriting its catalog parquets, which the stage identity work
+  # exists to prevent.
+  checkpoint_dir: /fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/PLACEHOLDER_stage512b_real_v1
+  # resume is for Stage512b's OWN retries only. Continuation from Stage512a is
+  # init_from + init_load_optimizer against its last.pt; never point resume at another
+  # stage's directory (global step / scheduler / max_steps semantics would misalign).
+  resume: false
+  init_from: PLACEHOLDER_stage512a_last_pt_sha_957bfcf1_pending_verification
   init_load_optimizer: true
   skip_distributed_teardown: true
   force_os_exit_after_train: true

@@ -136,11 +136,10 @@ ELIGIBILITY_FALLBACK_DOMAINS = {
     # Schema audit: the four source manifests derive elig_512 from width/height;
     # TextAtlas is the only enumerated manifest that physically stores elig_512.
     "512a": frozenset(("anime", "monet_real", "gpic", "synthetic")),
-    # 512b runs bucket_mode=anchors_v1, which reads no elig_* column at all: the gate is
-    # the source area gate plus the feasible-anchor test. The whitelist is unused there,
-    # but the key must exist because ELIGIBILITY_FALLBACK_DOMAINS[stage] is indexed
-    # unconditionally.
-    "512b": frozenset(("anime", "monet_real", "gpic", "synthetic", "textatlas")),
+    # 512b: identical to 512a. textatlas is the one manifest that really stores elig_512,
+    # so it must not be whitelisted for the short-side fallback -- phase5 evaluates this
+    # same whitelist as a publication gate.
+    "512b": frozenset(("anime", "monet_real", "gpic", "synthetic")),
 }
 ANIME_NL_COLUMNS = (
     "refined_description",
@@ -449,7 +448,13 @@ def scan_domain_shard(task: dict[str, Any]) -> dict[str, Any]:
     batch_size = task["batch_size"]
     anchors_mode = task["bucket_mode"] == anchors_v1.BUCKET_MODE
     area_gate = task.get("area_gate")
-    crop_loss_max = task.get("crop_loss_max") or anchors_v1.CROP_LOSS_MAX
+    crop_loss_max = task.get("crop_loss_max")
+    # `or` would discard a legal, documented crop_loss_max of 0.0 ("exact AR only"),
+    # making the N_matrix disagree with the params the report records -- and phase5's
+    # mar_params equality gate would still pass, so it would only surface much later
+    # as "manifest raw N differs from Phase-3a N_matrix".
+    if crop_loss_max is None:
+        crop_loss_max = anchors_v1.CROP_LOSS_MAX
     n_buckets = len(buckets_h)
 
     n_matrix = np.zeros(n_buckets, dtype=np.int64)
@@ -1176,26 +1181,51 @@ def main() -> int:
         "retained_histograms_20bin": retained_hist20,
         "anime_caption_availability": anime_caption_availability,
         "floors": floor_reports,
-        "known_simplifications": [
-            f"N[d] 分母 = holdout==0(若该域有此列) 且 {runtime['eligibility']} 的域内全量池，未按 source_alpha/"
-            "cluster_beta 做 base_w 降权，不代表最终采样器的精确边际分布(只影响分母权重，不影响"
-            "单行的桶指派)。",
-            (
-                "stage256 compatibility: 未复刻 anime 的 has_nl/composition_clean 等采样期过滤；"
-                "anime elig_256 保持生产历史语义恒为 True，且即使 sampling requires_nl=true，"
-                "本统计仍未丢弃 tag-only 行。"
-                if runtime["stage"] == "256"
-                else (
-                    "stage512a 使用 elig_512（列存在时直接读取，否则按短边>=512 回退），"
-                    "sampling contract 已硬校验 requires_nl=false；不做额外 anime NL 过滤。"
-                )
-            ),
-            "C6 precheck 是标量粗筛(ceil(global_batch*P(d|B))<=N'[B,d])，不是 build_plan.py 的整数"
-            "规划解；真正的 C[B,d] 由 Phase-4 planner 给出。",
-            "square_only_domains(synthetic/textatlas) 的行强制指派到方桶，其 assigned_bucket 与"
-            "square_baseline 的 retained 分布因此逐行恒等（两栏重复不是 bug，是这两域的 AR-preserving"
-            "裁剪本就等价于方图裁剪）；两栏的对比意义只对非 square_only 域(anime/monet_real/gpic)成立。",
-        ],
+        "known_simplifications": (
+            # These are human-facing "review before deciding" notes. Under anchors_v1 the
+            # legacy wording described a gate that was never applied (elig_*, short-side
+            # fallback, force-pinned square-only domains), so it is replaced rather than
+            # printed alongside the real rule.
+            [
+                f"N[d] 分母 = holdout==0(若该域有此列) 且 源准入门"
+                f"({'area>=' + str(runtime['multi_ar_params']['area_gate']) if runtime['multi_ar_params'].get('area_gate') is not None else 'area gate disabled'})"
+                f" 且存在可行锚(w>=W_k and h>=H_k, crop_loss<={runtime['multi_ar_params']['crop_loss_max']})"
+                " 的域内全量池；未按 source_alpha/cluster_beta 做 base_w 降权，不代表最终采样器的"
+                "精确边际分布(只影响分母权重，不影响单行的锚指派)。",
+                f"stage{runtime['stage']} bucket_mode=anchors_v1：**不读任何 elig_* 列**，也不用"
+                "短边>=image_size 回退。资格门是上面那条源准入门；不可服务行(可行集为空或超"
+                "crop_loss 阈值)在指派后被丢弃并计入 rows_unservable_dropped。"
+                "sampling contract 已硬校验 requires_nl=false。",
+                "C6 precheck 是标量粗筛(ceil(global_batch*P(d|B))<=N'[B,d])，不是 build_plan.py 的整数"
+                "规划解；真正的 C[B,d] 由 Phase-4 planner 给出。",
+                f"square_only_domains({'/'.join(runtime['square_only_domains']) or 'none'}) 的行**不是**"
+                "被强制指派到方锚：anchors_v1 对每一行都跑真实指派，落不到方锚的行被丢弃"
+                "(强钉会让覆盖不了 512x512 的行被上采样)。因此这些域的 assigned_bucket 与"
+                "square_baseline 的 retained 分布逐行恒等，两栏重复不是 bug。",
+            ]
+            if runtime["bucket_mode"] == anchors_v1.BUCKET_MODE
+            else [
+                f"N[d] 分母 = holdout==0(若该域有此列) 且 {runtime['eligibility']} 的域内全量池，未按 source_alpha/"
+                "cluster_beta 做 base_w 降权，不代表最终采样器的精确边际分布(只影响分母权重，不影响"
+                "单行的桶指派)。",
+                (
+                    "stage256 compatibility: 未复刻 anime 的 has_nl/composition_clean 等采样期过滤；"
+                    "anime elig_256 保持生产历史语义恒为 True，且即使 sampling requires_nl=true，"
+                    "本统计仍未丢弃 tag-only 行。"
+                    if runtime["stage"] == "256"
+                    else (
+                        f"stage{runtime['stage']} 使用 {runtime['eligibility']}（列存在时直接读取，"
+                        "否则按短边>=image_size 回退），"
+                        "sampling contract 已硬校验 requires_nl=false；不做额外 anime NL 过滤。"
+                    )
+                ),
+                "C6 precheck 是标量粗筛(ceil(global_batch*P(d|B))<=N'[B,d])，不是 build_plan.py 的整数"
+                "规划解；真正的 C[B,d] 由 Phase-4 planner 给出。",
+                "square_only_domains(synthetic/textatlas) 的行强制指派到方桶，其 assigned_bucket 与"
+                "square_baseline 的 retained 分布因此逐行恒等（两栏重复不是 bug，是这两域的 AR-preserving"
+                "裁剪本就等价于方图裁剪）；两栏的对比意义只对非 square_only 域(anime/monet_real/gpic)成立。",
+            ]
+        ),
     }
     atomic_write_json(report_path, report)
     write_markdown_summary(summary_path, report)
