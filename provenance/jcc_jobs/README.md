@@ -52,3 +52,20 @@ interpreter/repo exiting 43; sha-drift exiting 44; create-once violation exiting
 `timeout` wrapper on the long call; `maxRetries: 0`; the local test suites run *before*
 anything touches data; and a postcheck that re-reads the published artifact rather than
 trusting the builder's own exit code.
+
+## What these specs do NOT do — read before copying one
+
+Every spec above only **prints** `git rev-parse HEAD` and `git status --porcelain`.
+Nothing exits on either. Exit 44 appears in exactly one file
+(`20260802_anime_priority_sidecar.yaml`) and it checks *input file* digests, not the
+commit. So the tree-identity story these jobs tell is a log line, not a gate — which is
+precisely how weighted plan v2 came to run against a half-edited working tree.
+
+From 2026-08-02 every new job calls `scripts/jcc_preflight.sh <expected-commit>` as its
+first data-touching step. It exits **46** if HEAD is not the expected commit or if
+`git status --porcelain` is non-empty (untracked files included — an untracked module
+shadows a tracked one just as effectively as an edit). It also warns, using local
+remote-tracking refs only so it needs no credentials, when HEAD is not pushed.
+
+The specs above are kept verbatim as the record of what actually produced each
+artifact. They are not templates.

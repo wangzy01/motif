@@ -17,6 +17,9 @@
 - real 合计 58%。`MONET 44 + GPIC 14` 是当前兜底，不是永久限制；若发现
   新的高质量 native real 来源，可以提出 real 58% 内的重分配，须由用户
   批准后才能实施。
+  > **已被覆盖(2026-08-02)**：实际执行 `Anime 30 / MONET 40 / GPIC 20 /
+  > Synthetic 5 / TextAtlas 5`(real 60%)。见 `STAGE512B_DECISIONS.md`
+  > S512B-01。本行保留作为原始任务书证据。
 - TextAtlas 保持 5%。文字能力提升应同时考察真实文字图、精确 caption、
   结构化 synthetic、CFG 行为和 OCR/排版评测。
 - real 严格不上采样。规模以经过过滤、去重且能由某个 native AR bucket

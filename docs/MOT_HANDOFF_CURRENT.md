@@ -73,6 +73,10 @@ Stage512a 已以 8 nodes × 8 H100、global batch 2048、125,000 steps /
   `Anime / MONET / GPIC / Synthetic / TextAtlas = 32 / 44 / 14 / 5 / 5`。
   其中 real 合计 58%。若发现新的高质量 native real 来源，可提出 real 58%
   内的重新分配，但执行前必须得到用户批准。
+  > **已被覆盖(2026-08-02)**：Stage512b-real 实际执行 `30 / 40 / 20 / 5 / 5`
+  > (real 60%)。该改动出自 commit `879180d`，当时未走上面这条批准流程；
+  > Evan 在看到 512M 曝光下的逐域差异后于 2026-08-02 确认保留。
+  > 见 `STAGE512B_DECISIONS.md` S512B-01。本行保留作为原始任务书证据。
 - TextAtlas 固定 5%。提升文字能力不能简单等同于反复采样 TextAtlas；
   应研究真实文字图、精确 caption、结构化 synthetic 和可比较 OCR benchmark。
 - real 图像严格禁止上采样。原先“150–200M”不是硬目标；应在 native
