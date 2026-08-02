@@ -33,6 +33,9 @@ memGBPerWorker: 900
 maxRetries: 0
 environments:
   EXPECTED_COMMIT: ""
+  # Fresh every attempt. The directory is claimed with mkdir, so reusing a name after a
+  # failure trips exit 45 -- which is the point, not an inconvenience.
+  CKPT_DIR: ""
 command: |
   set -euo pipefail
   REPO=/fsx/evan/mot_code_s512b_impl
@@ -55,7 +58,11 @@ command: |
 
   NNODES=8; PORT=29814; STEPS=200
   CFG=configs/stage512b_real_anchors_v1.yaml
-  CKPT=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512b_20260802_gpuval_w64_v1
+  # Supplied at submission, because create-once means a retry MUST use a new name and
+  # baking one into git guarantees the second attempt trips its own gate.
+  [ -n "${CKPT_DIR:-}" ] || { echo "FATAL: CKPT_DIR unset"; exit 43; }
+  case "$CKPT_DIR" in *PLACEHOLDER*) echo "FATAL: CKPT_DIR is a placeholder"; exit 43;; esac
+  CKPT=$CKPT_DIR
   INIT=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_20260724_weighted_w64_recovery_v2/last.pt
   INIT_SHA=957bfcf12b89c4042a32056566012a2451e72aa0b2706b0ca51808ab79155c31
   A512_METRICS=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_20260724_weighted_w64_recovery_v2/metrics.jsonl
@@ -106,6 +113,27 @@ command: |
     done
     test -n "$MASTER_ADDR" || { echo "FATAL: rendezvous missing"; exit 20; }
   fi
+
+  # NODE ARRIVAL BARRIER. torchrun's static rendezvous waits 900s and then dies with
+  # "N/8 clients joined", which costs fifteen minutes of the nodes that DID arrive and
+  # leaves a claimed directory behind. The first attempt burned exactly that: the
+  # cluster had three schedulable 8-GPU nodes and the job asked for eight.
+  # Counting markers first turns a capacity shortfall into a cheap, legible failure,
+  # and guarantees the rendezvous itself never has to wait once it starts.
+  # Rank 0 marks itself only AFTER hashing init_from, so nobody enters torchrun early.
+  : > "$CKPT/ready.n$NODE_RANK"
+  ARRIVED=0
+  for _ in $(seq 1 360); do                                  # 30 minutes of scheduling slack
+    ARRIVED=$(ls "$CKPT"/ready.n* 2>/dev/null | wc -l)
+    [ "$ARRIVED" -ge "$NNODES" ] && break
+    sleep 5
+  done
+  if [ "$ARRIVED" -lt "$NNODES" ]; then
+    echo "FATAL: only $ARRIVED/$NNODES nodes arrived; the cluster could not schedule this job."
+    echo "       Check free capacity with 'jcc node list' and resubmit with a NEW CKPT_DIR."
+    exit 47
+  fi
+  echo "all $NNODES nodes arrived"
 
   echo "===== STAGE512B GPUVAL node=$NODE_RANK master=$MASTER_ADDR world=64 global=2048 steps=$STEPS ====="
   { hostname; nvidia-smi -L; df -h /local | tail -1;
