@@ -36,6 +36,8 @@ AUDIT_BASE = "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
 P1 = f"{AUDIT_BASE}/stage512b_anchor_audit_part1_20260731_v1/REPORT.json"
 P15 = f"{AUDIT_BASE}/stage512b_curated_audit_part1p5_20260731_v1/REPORT.json"
 P2 = f"{AUDIT_BASE}/stage512b_expansion_audit_part2_20260731_v2/REPORT.json"
+# The authoritative supply table, written by the formal Phase-3a run.
+FORMAL_N_MATRIX = f"{AUDIT_BASE}/offline_arb_bucketstats_stage512b_v1/N_matrix.parquet"
 
 DEFAULT_MIX = {"anime": 0.30, "monet": 0.40, "gpic": 0.20,
                "synthetic": 0.05, "textatlas": 0.05}
@@ -241,6 +243,29 @@ def load_supply(variant: str) -> tuple[list[dict], dict[str, list[int]], dict]:
         sup["monet"] = _rows_by_anchor(d1["results"]["monet_real"]["B13"]["per_anchor"], anchors)
         sup["gpic"] = _rows_by_anchor(d1["results"]["gpic"]["B13"]["per_anchor"], anchors)
         prov["real_source"] = P1
+    elif variant == "formal_n_matrix":
+        # The audit REPORTs above are the 2026-07-31 design-time estimates.  The
+        # formal Phase-3a run has since produced the authoritative N_matrix, and
+        # they disagree where it matters: textatlas is 4,036,998 rows in the
+        # audit (still square-pinned) versus 4,118,484 formally, and its
+        # 704x352 cell is 7,774 versus 13,891.  Planning off the stale table
+        # understates exactly the cells the TextAtlas crop audit cares about.
+        import pyarrow.parquet as pq
+
+        table = pq.read_table(FORMAL_N_MATRIX)
+        cols = {c: table[c].to_pylist() for c in table.column_names}
+        order = {(int(w), int(h)): i for i, (w, h) in
+                 enumerate(zip(cols["bucket_w"], cols["bucket_h"]))}
+        idx = [order[(int(a["width"]), int(a["height"]))] for a in anchors]
+        if len(set(idx)) != len(anchors):
+            raise DesignError("N_matrix anchors do not match the audit anchor set")
+        for dom, col in (("anime", "n_anime"), ("synthetic", "n_synthetic"),
+                         ("textatlas", "n_textatlas"), ("monet", "n_monet_real"),
+                         ("gpic", "n_gpic")):
+            sup[dom] = [int(cols[col][i]) for i in idx]
+        prov["real_source"] = FORMAL_N_MATRIX
+        prov["fixed_pool_domains"] = []
+        prov["note"] = "all five domains from the formal Phase-3a N_matrix"
     else:
         raise DesignError(f"unknown variant {variant!r}")
     return anchors, sup, prov
@@ -555,7 +580,7 @@ def self_test() -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--variant", choices=["curated", "survivor", "stage512a_today"],
+    ap.add_argument("--variant", choices=["curated", "survivor", "stage512a_today", "formal_n_matrix"],
                     default="curated")
     ap.add_argument("--budget", type=int, default=DEFAULT_BUDGET)
     ap.add_argument("--global-batch", type=int, default=GLOBAL_BATCH)
