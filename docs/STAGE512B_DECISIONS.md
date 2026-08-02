@@ -127,7 +127,29 @@ sidecar 按 `row_id` join**,不重建 56 GB caption sidecar。附带要求:
 
 512a 权重已冻结,基线随时可测,不阻塞启动;但协议必须在启动前写死,
 否则早期 eval snapshot 会用到后来会改的协议,失去可比性。Evan,2026-08-02。
-协议见 `EVALUATION_PROTOCOLS.md`。
+协议见 **`STAGE512B_EVAL_PROTOCOL.md`**(`EVALUATION_PROTOCOLS.md` 只讲对外报告纪律)。
+其中三项**阻塞启动**:本协议文件、固定人评图集入 git、OCR exact-string scorer
+(当前 `evaluation/benchmarks/scorers/` 只有 clip 和 tagger,没有 exact-string ——
+本阶段第一次把权威 GT 送进 prompt,却没有能证明它有效的度量)。
+
+## S512B-17 行级重复:实测比 Stage512a 更平,不做任何调整
+
+全 245 blocks 逐行计数,**512,000,000 次引用**(正好 250,000 × 2048)。
+同一审计对**冻结的 Stage512a plan**(`7295ca93…`)跑了一遍作对照 —— 没有这个对照,
+"GPIC 最热 10% 的行吃掉 47% 的 GPIC 曝光"这句话无法判断是缺陷还是常态。
+
+结论:**512b 在每一项集中度指标上都比 512a 更平,而曝光预算翻倍。**
+GPIC 最热 1% 从 10.16% 降到 5.67%,p99 从 61 降到 33;从未被抽到的行
+monet_real 从 499,367 降到 128,411、synthetic 从 1,002,182 降到 63,752。
+唯一没改善的是单行最大重复 123 → 127,按曝光预算折算是减半。
+GPIC 的重复分布是**双峰**的(×3/×4 一大堆,再加 323,630 行正好 ×30),
+512a 同样如此,是加权 planner 的性质,不是 13 锚改动带来的。
+详见 plan 旁的 `*.ROW_REUSE.md`。
+
+**顺带更正**:`*.REALIZED_EXPOSURE.md` 里写的 "513,802,240 row references" 是错的
+(那是假设 245 个 block 全满;末块只有 144 步)。真值 512,000,000,
+也只有对 512,000,000 该报告自己的 40.000% 才成立。该文件是只读的,更正写在
+`*.ROW_REUSE.md` 里。
 
 ## S512B-16 第一次真实 GPU 跑 = 约 200 step 的独立目录 GPUVAL
 
