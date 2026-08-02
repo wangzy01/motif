@@ -282,6 +282,15 @@ class PromptAudit:
                 "would_truncate": self.truncated,
             },
             "cfg_keep_true": self.cfg_keep_true,
+            # The RATE, not just the count. "the field exists and is sometimes true" is
+            # not the question -- tag-only anime rows never get CFG dropout, so their
+            # share of the anime domain is the share of anime that trains with no
+            # unconditional counterpart. A number nobody has looked at is exactly the
+            # kind of inherited design that turns out to be 30% rather than 3%.
+            "cfg_keep_rate_by_domain": {
+                domain: (counter["cfg_keep"] / counter["rows"]) if counter["rows"] else None
+                for domain, counter in sorted(self.by_domain.items())
+            },
             "cfg_keep_non_anime": self.cfg_keep_non_anime,
             "textatlas": {
                 "rows": self.textatlas_rows,
@@ -438,7 +447,9 @@ def run_prompt_audit(args, cfg, plan_root: Path) -> tuple[dict, list[str]]:
     print(f"  rows {summary['rows']:,}   tokens p50 {tl['p50']} p95 {tl['p95']} "
           f"max {tl['max']} / limit {tl['limit']}   would_truncate {tl['would_truncate']}")
     print(f"  cfg_keep true {summary['cfg_keep_true']} "
-          f"(non-anime {summary['cfg_keep_non_anime']})")
+          f"(non-anime {summary['cfg_keep_non_anime']})   rates "
+          + "  ".join(f"{d}={r:.1%}" for d, r in summary["cfg_keep_rate_by_domain"].items()
+                      if r is not None))
     ta = summary["textatlas"]
     print(f"  textatlas rows {ta['rows']}  GT available {ta['gt_available']}  "
           f"GT in prompt {ta['gt_in_prompt']}")
