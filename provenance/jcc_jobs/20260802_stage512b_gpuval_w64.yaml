@@ -95,6 +95,15 @@ command: |
   fi
   RES=$CKPT
 
+  # Both the wait and the freshness window scale with ARRIVAL_WAIT_S. Hard-coding them
+  # at 30 min / 2 h was fine when the barrier could only wait 30 min, and becomes a bug
+  # the moment a submission asks the job to queue for longer: node 0 writes the
+  # rendezvous immediately, so a node scheduled three hours later would reject a
+  # perfectly good address as stale and exit 20 -- failing for a reason that has nothing
+  # to do with the run.
+  WAIT_S=${ARRIVAL_WAIT_S:-1800}
+  RDZV_STALE_S=$((WAIT_S + 3600))
+
   RDZV=$RES/rdzv.$JOBTAG.addr
   if [ "$NODE_RANK" = 0 ]; then
     MYIP=$(hostname -i | awk '{print $1}')
@@ -102,18 +111,18 @@ command: |
     mv "$RDZV.tmp" "$RDZV"; MASTER_ADDR=$MYIP
   else
     MASTER_ADDR=""
-    for _ in $(seq 1 360); do
+    for _ in $(seq 1 $((WAIT_S / 5))); do
       if test -s "$RDZV" && test ! -L "$RDZV"; then
         read -r ADDR TS TOKEN < "$RDZV" || true
         case "$TS" in (*[!0-9]*|'') TS="";; esac
         NOW=$(date +%s)
-        if [ -n "$TS" ] && [ "$TOKEN" = "$JOBTAG" ] && [ $((NOW - TS)) -lt 7200 ]; then
+        if [ -n "$TS" ] && [ "$TOKEN" = "$JOBTAG" ] && [ $((NOW - TS)) -lt "$RDZV_STALE_S" ]; then
           MASTER_ADDR=$ADDR; break
         fi
       fi
       sleep 5
     done
-    test -n "$MASTER_ADDR" || { echo "FATAL: rendezvous missing"; exit 20; }
+    test -n "$MASTER_ADDR" || { echo "FATAL: rendezvous missing after ${WAIT_S}s"; exit 20; }
   fi
 
   # NODE ARRIVAL BARRIER. torchrun's static rendezvous waits 900s and then dies with
@@ -127,7 +136,6 @@ command: |
   # cluster is contended (63 of 90 nodes at 8/8), so this is deliberately a submission
   # parameter, not a constant: waiting holds GPUs idle, which is a real cost to other
   # users, and the right value depends on how badly the run is wanted right now.
-  WAIT_S=${ARRIVAL_WAIT_S:-1800}
   : > "$CKPT/ready.n$NODE_RANK"
   ARRIVED=0
   for _ in $(seq 1 $((WAIT_S / 5))); do
