@@ -301,14 +301,18 @@ def verify_binding(w, h, anchor_id: int, *,
             f"-> anchor {anchor_id} ({W}x{H}) {context}")
 
 
-def params_from_values(area_gate, crop_loss_max) -> dict:
-    """把配置里的两个锚参数归一化成 `mar_params` 的增补字典。**唯一来源。**
+def params_from_values(area_gate, crop_loss_max, crop_loss_max_by_domain=None) -> dict:
+    """把配置里的锚参数归一化成 `mar_params` 的增补字典。**唯一来源。**
 
     phase5 用 `report_config["multi_ar_params"] != runtime["mar_params"]` 校验它与
     phase3a 报告的一致性，所以两边**必须走同一个表达式**：任何一边自己写一遍归一化，
-    这个等值门就永远过不了，锚模式端到端不可达。
+    这个等值门就永远过不了，锚模式端到端不可达。同理，per-domain 覆盖必须归一化成
+    **确定性的**形状（排序后的普通 dict），否则两边键序不同就会让等值门假阴性。
 
     `area_gate`：`None` 或 `0` = 关闭（服务性纯由可行锚判定）；正整数 = 额外面积门。
+    `crop_loss_max_by_domain`：可选的按域收紧。文字域需要它 —— TextAtlas 在全局
+    0.20 下有约 2,388 行会被切掉标题字形，而 caption 仍然引用完整字符串，等于
+    在教模型渲染画面里没有的字。
     """
     if area_gate is None:
         raise AnchorGeometryError(
@@ -320,7 +324,36 @@ def params_from_values(area_gate, crop_loss_max) -> dict:
     clm = CROP_LOSS_MAX if crop_loss_max is None else float(crop_loss_max)
     if not (0.0 <= clm <= 1.0):
         raise AnchorGeometryError(f"anchors_crop_loss_max must be in [0,1], got {clm}")
-    return {"area_gate": gate or None, "crop_loss_max": clm}
+    by_domain: dict[str, float] | None = None
+    if crop_loss_max_by_domain:
+        by_domain = {}
+        for key in sorted(crop_loss_max_by_domain):
+            value = float(crop_loss_max_by_domain[key])
+            if not (0.0 <= value <= 1.0):
+                raise AnchorGeometryError(
+                    f"anchors_crop_loss_max_by_domain[{key!r}] must be in [0,1], got {value}")
+            if value > clm:
+                # A per-domain value ABOVE the global one would loosen the contract
+                # for that domain while the report still advertises the global
+                # figure.  Overrides are for tightening only.
+                raise AnchorGeometryError(
+                    f"anchors_crop_loss_max_by_domain[{key!r}]={value} exceeds the global "
+                    f"anchors_crop_loss_max={clm}; per-domain overrides may only tighten")
+            by_domain[str(key)] = value
+    return {"area_gate": gate or None, "crop_loss_max": clm,
+            "crop_loss_max_by_domain": by_domain}
+
+
+def crop_loss_for_domain(mar_params: dict, domain: str) -> float:
+    """The threshold that actually applies to `domain`.
+
+    Both phase3a and phase5 must resolve this identically or their N matrices
+    diverge in a way no equality gate would catch: `mar_params` would match while
+    the per-row admission differed.
+    """
+    by_domain = mar_params.get("crop_loss_max_by_domain") or {}
+    default = mar_params.get("crop_loss_max")
+    return float(by_domain.get(domain, CROP_LOSS_MAX if default is None else default))
 
 
 def probs_from_mapping(mapping: dict) -> list[float]:

@@ -255,9 +255,16 @@ def load_pipeline_config(config_path: str) -> dict[str, Any]:
         # phase5 gates on `report_config["multi_ar_params"] != runtime["mar_params"]`, so
         # the anchors keys must be produced by the SAME expression on both sides or that
         # equality can never hold and anchors mode is unreachable end to end.
+        by_domain = OmegaConf.select(cfg, "dataset.multi_ar.anchors_crop_loss_max_by_domain")
+        by_domain = None if by_domain is None else OmegaConf.to_container(by_domain, resolve=True)
+        if by_domain and set(by_domain) - set(DOMAINS):
+            raise ValueError(
+                f"anchors_crop_loss_max_by_domain has unknown domains: "
+                f"{sorted(set(by_domain) - set(DOMAINS))}")
         multi_ar_params.update(anchors_v1.params_from_values(
             OmegaConf.select(cfg, "dataset.multi_ar.anchors_area_gate"),
             OmegaConf.select(cfg, "dataset.multi_ar.anchors_crop_loss_max"),
+            by_domain,
         ))
     if multi_ar_params["target_area"] != image_size * image_size:
         raise ValueError(
@@ -852,19 +859,47 @@ def anime_caption_availability_report(
 # --------------------------------------------------------------------------- #
 # 任务队列构建 + 主流程
 # --------------------------------------------------------------------------- #
+
+def select_diagnostic_shards(shards: list, limit: int | None, mode: str) -> list:
+    """Pick the diagnostic subset of a domain's shards.
+
+    `prefix` (the historical behaviour) takes shards[:limit].  Manifest shards are
+    enumerated in sorted path order and sorted path order groups by sub-source --
+    textatlas shards live under <Subset>/ -- so a prefix of 12 lands entirely inside
+    the first subset.  That is not a small bias: the textatlas diagnostic sampled
+    only CleanTextSynth, which is 100% square, so it could not observe a single
+    non-square row and reported "no change" for a per-domain crop_loss cap that
+    removes 2,388 rows in the full pool.
+
+    `stride` walks the sorted list at even spacing instead, so every sub-source with
+    at least one shard per stride window is represented.  It is deterministic (no
+    RNG) and remains a strict subset, so products still carry the .diag suffix.
+    """
+    if limit is None or limit >= len(shards):
+        return list(shards)
+    if mode == "prefix":
+        return list(shards[:limit])
+    if mode == "stride":
+        n = len(shards)
+        # Round to the nearest index rather than truncating so the last pick sits
+        # near the end of the list instead of short of it.
+        return [shards[min(n - 1, round(i * n / limit))] for i in range(limit)]
+    raise ValueError(f"unknown shard selection mode {mode!r}")
+
 def build_tasks(
     shards_by_domain: dict[str, list[str]], square_only_domains: tuple[str, ...],
     buckets: list[tuple[int, int]], table: np.ndarray, mar_params: dict[str, Any],
     sq_idx: int, extreme_long: int, extreme_short: int, batch_size: int,
     max_shards_per_domain: int | None, runtime: dict[str, Any],
+    shard_selection: str = "prefix",
 ) -> list[dict[str, Any]]:
     buckets_h = np.array([h for h, _w in buckets], dtype=np.int64)
     buckets_w = np.array([w for _h, w in buckets], dtype=np.int64)
     tasks: list[dict[str, Any]] = []
     for domain in DOMAINS:
-        shards = shards_by_domain.get(domain, [])
-        if max_shards_per_domain is not None:
-            shards = shards[:max_shards_per_domain]
+        shards = select_diagnostic_shards(
+            shards_by_domain.get(domain, []), max_shards_per_domain, shard_selection
+        )
         is_sq = domain in square_only_domains
         for sp in shards:
             tasks.append({
@@ -883,7 +918,10 @@ def build_tasks(
                 # `runtime`, so the anchors parameters must be threaded through here.
                 "bucket_mode": runtime["bucket_mode"],
                 "area_gate": mar_params.get("area_gate"),
-                "crop_loss_max": mar_params.get("crop_loss_max"),
+                # Resolved per DOMAIN, not globally: textatlas is tightened so a
+                # sliced headline cannot be paired with a caption that still
+                # quotes the whole string.
+                "crop_loss_max": anchors_v1.crop_loss_for_domain(mar_params, domain),
             })
     return tasks
 
@@ -902,6 +940,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--workers", type=int, default=64)
     ap.add_argument("--batch-size", type=int, default=65536, help="pyarrow iter_batches 窄列 batch 行数")
     ap.add_argument("--max-shards-per-domain", type=int, default=None, help="诊断缩放：每域最多扫描 shard 数")
+    ap.add_argument("--shard-selection", choices=("prefix", "stride"), default="prefix",
+                    help="诊断子集的取法。prefix=前 N 个（历史行为，但 shard 按子源分组，"
+                         "会只覆盖第一个子源）；stride=等间隔，覆盖全部子源")
     ap.add_argument("--floors", default=",".join(str(x) for x in FLOORS),
                     help="逗号分隔候选剪枝 floor 列表")
     ap.add_argument(
@@ -986,6 +1027,7 @@ def main() -> int:
     tasks = build_tasks(
         shards_by_domain, square_only_domains, buckets, table, mar_params, sq_idx,
         extreme_long, extreme_short, args.batch_size, args.max_shards_per_domain, runtime,
+        args.shard_selection,
     )
     print(f"[bucket-stats] {len(tasks)} shard 任务（{len(DOMAINS)} 域），workers={args.workers}", flush=True)
 

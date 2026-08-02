@@ -199,6 +199,47 @@ def _strict_positive_int(value: Any, label: str) -> int:
     return value
 
 
+def _crop_loss_by_domain(cfg: Any) -> dict[str, float] | None:
+    """Read the optional per-domain crop_loss tightening, validating the keys."""
+    raw = OmegaConf.select(cfg, "dataset.multi_ar.anchors_crop_loss_max_by_domain")
+    if raw is None:
+        return None
+    mapping = OmegaConf.to_container(raw, resolve=True)
+    unknown = set(mapping) - set(DOMAINS)
+    if unknown:
+        raise ValueError(
+            f"anchors_crop_loss_max_by_domain has unknown domains: {sorted(unknown)}"
+        )
+    return mapping
+
+
+
+def select_diagnostic_shards(shards: list, limit: int | None, mode: str) -> list:
+    """Pick the diagnostic subset of a domain's shards.
+
+    `prefix` (the historical behaviour) takes shards[:limit].  Manifest shards are
+    enumerated in sorted path order and sorted path order groups by sub-source --
+    textatlas shards live under <Subset>/ -- so a prefix of 12 lands entirely inside
+    the first subset.  That is not a small bias: the textatlas diagnostic sampled
+    only CleanTextSynth, which is 100% square, so it could not observe a single
+    non-square row and reported "no change" for a per-domain crop_loss cap that
+    removes 2,388 rows in the full pool.
+
+    `stride` walks the sorted list at even spacing instead, so every sub-source with
+    at least one shard per stride window is represented.  It is deterministic (no
+    RNG) and remains a strict subset, so products still carry the .diag suffix.
+    """
+    if limit is None or limit >= len(shards):
+        return list(shards)
+    if mode == "prefix":
+        return list(shards[:limit])
+    if mode == "stride":
+        n = len(shards)
+        # Round to the nearest index rather than truncating so the last pick sits
+        # near the end of the list instead of short of it.
+        return [shards[min(n - 1, round(i * n / limit))] for i in range(limit)]
+    raise ValueError(f"unknown shard selection mode {mode!r}")
+
 def load_runtime_config(config_path: str) -> dict[str, Any]:
     cfg = OmegaConf.load(config_path)
     stage_raw = OmegaConf.select(cfg, "dataset.stage")
@@ -309,6 +350,7 @@ def load_runtime_config(config_path: str) -> dict[str, Any]:
         mar_params.update(anchors_v1.params_from_values(
             OmegaConf.select(cfg, "dataset.multi_ar.anchors_area_gate"),
             OmegaConf.select(cfg, "dataset.multi_ar.anchors_crop_loss_max"),
+            _crop_loss_by_domain(cfg),
         ))
     else:
         buckets = build_adaptive_buckets(
@@ -431,8 +473,12 @@ def require_identity_fold(bucket_mode: str, fold_map: np.ndarray, floor: float) 
         )
 
 
-def vectorized_anchors_assign(w: np.ndarray, h: np.ndarray) -> np.ndarray:
+def vectorized_anchors_assign(w: np.ndarray, h: np.ndarray, domain: str) -> np.ndarray:
     """anchors_v1 assignment. Returns -1 for rows no anchor can serve.
+
+    `domain` is required, not optional: the crop_loss threshold is per-domain and
+    phase3a resolves it the same way.  Defaulting it here would let phase5 admit
+    rows phase3a counted as unservable while `mar_params` still compared equal.
 
     This cannot reuse vectorized_adaptive_assign(): that function keys a dense
     (h//divisor, w//divisor) lookup table and falls back to a Python scalar call on a
@@ -443,7 +489,7 @@ def vectorized_anchors_assign(w: np.ndarray, h: np.ndarray) -> np.ndarray:
     aid, _crop_loss = anchors_v1.assign_anchor_batch(
         np.rint(w).astype(np.int64),
         np.rint(h).astype(np.int64),
-        crop_loss_max=params["crop_loss_max"],
+        crop_loss_max=anchors_v1.crop_loss_for_domain(params, domain),
         area_gate=params["area_gate"],
     )
     return aid
@@ -583,7 +629,7 @@ def filter_and_assign(
         # Run the real assignment for every domain, including square-only ones: forcing
         # square_idx without a feasibility test would upsample any row that cannot cover
         # 512x512.
-        raw_bucket = vectorized_anchors_assign(wk, hk)
+        raw_bucket = vectorized_anchors_assign(wk, hk, domain)
         if domain in _CTX["square_only"]:
             raw_bucket = np.where(
                 raw_bucket == int(_CTX["square_idx"]), raw_bucket, np.int64(-1)
@@ -734,6 +780,11 @@ def assignment_hash_payload(
         )
         payload["source_area_gate"] = None if gate is None else int(gate)
         payload["crop_loss_max"] = float(runtime["mar_params"]["crop_loss_max"])
+        # Two builds that differ only in the per-domain tightening admit different
+        # rows, so the hash has to see it or they would be indistinguishable.
+        payload["crop_loss_max_by_domain"] = (
+            runtime["mar_params"].get("crop_loss_max_by_domain") or None
+        )
     return payload
 
 
@@ -1993,6 +2044,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--row-group-size", type=int, default=DEFAULT_ROW_GROUP_SIZE)
     ap.add_argument("--source-partitions", type=int, default=DEFAULT_SOURCE_PARTITIONS)
     ap.add_argument(
+        "--shard-selection", choices=("prefix", "stride"), default="prefix",
+        help="how the diagnostic subset is chosen; stride covers every sub-source",
+    )
+    ap.add_argument(
         "--max-shards-per-domain",
         type=int,
         default=None,
@@ -2105,7 +2160,9 @@ def main() -> int:
     all_shards = list_shards(sampling_cfg)
     selected_shards = {
         domain: (
-            all_shards[domain][: args.max_shards_per_domain]
+            select_diagnostic_shards(
+                all_shards[domain], args.max_shards_per_domain, args.shard_selection
+            )
             if diagnostic
             else all_shards[domain]
         )
@@ -2428,6 +2485,7 @@ def main() -> int:
         "host": socket.gethostname(),
         "diagnostic_run": diagnostic,
         "max_shards_per_domain": args.max_shards_per_domain,
+        "shard_selection": args.shard_selection,
         **_contract_fields(runtime),
         "catalog_hash": catalog_hash,
         "bucket_table_hash": bucket_table_hash,

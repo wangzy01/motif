@@ -425,6 +425,74 @@ def test_stage512b_requires_gpic_cluster_stats() -> None:
           "stats_cache_sha256" in hdr and "gpic_cluster_stats_sha256" in hdr)
 
 
+def test_per_domain_crop_loss() -> None:
+    A = anchors_v1
+    p = A.params_from_values(262144, 0.20, {"textatlas": 0.12})
+    check("the map survives normalisation", p["crop_loss_max_by_domain"] == {"textatlas": 0.12})
+    check("an overridden domain gets its own value",
+          A.crop_loss_for_domain(p, "textatlas") == 0.12)
+    check("every other domain keeps the global value",
+          all(A.crop_loss_for_domain(p, d) == 0.20
+              for d in ("anime", "monet_real", "gpic", "synthetic")))
+    check("no map at all falls back to the global value",
+          A.crop_loss_for_domain(A.params_from_values(262144, 0.20, None), "textatlas") == 0.20)
+    check("key order is deterministic, so the equality gate cannot false-negative",
+          list(A.params_from_values(262144, 0.2, {"b": 0.1, "a": 0.1})
+               ["crop_loss_max_by_domain"]) == ["a", "b"])
+
+    # Overrides may only tighten.  A looser per-domain value would admit rows while
+    # the report still advertises the global figure.
+    for bad, why in ((0.30, "above the global max"), (1.5, "outside [0,1]"), (-0.1, "negative")):
+        try:
+            A.params_from_values(262144, 0.20, {"textatlas": bad})
+            ok, detail = False, "accepted"
+        except A.AnchorGeometryError as exc:
+            ok, detail = True, str(exc)[:60]
+        check(f"a per-domain value {why} is refused", ok, detail)
+
+    # The threshold must actually change admission, or the plumbing is decorative.
+    w = np.array([1250], dtype=np.int64)   # 1250x500 is AR 2.5 -> exactly crop_loss 0.20
+    h = np.array([500], dtype=np.int64)
+    at20, _ = A.assign_anchor_batch(w, h, crop_loss_max=0.20, area_gate=262144)
+    at12, _ = A.assign_anchor_batch(w, h, crop_loss_max=0.12, area_gate=262144)
+    check("AR 2.5 is servable at 0.20", int(at20[0]) >= 0, str(at20))
+    check("the same row is refused at 0.12", int(at12[0]) == -1, str(at12))
+
+    src = inspect.getsource(P5.vectorized_anchors_assign)
+    check("phase5 resolves the threshold per domain",
+          "crop_loss_for_domain(params, domain)" in src)
+    check("domain is a required argument, not defaulted",
+          "domain: str)" in src and "domain=None" not in src)
+    hp = inspect.getsource(P5.assignment_hash_payload) if hasattr(P5, "assignment_hash_payload") else ""
+    check("the per-domain map is inside the assignment hash",
+          "crop_loss_max_by_domain" in hp, "two tightenings would otherwise share a hash")
+
+
+def test_stride_shard_selection() -> None:
+    sel = P5.select_diagnostic_shards
+    shards = [f"{sub}/{i:03d}.parquet" for sub in "ABCDE" for i in range(20)]
+    check("no limit returns everything", sel(shards, None, "prefix") == shards)
+    check("a limit at or above the count returns everything",
+          sel(shards, 200, "stride") == shards)
+
+    pre = sel(shards, 10, "prefix")
+    strd = sel(shards, 10, "stride")
+    subs_pre = {x.split("/")[0] for x in pre}
+    subs_str = {x.split("/")[0] for x in strd}
+    check("prefix sees only the first sub-source", subs_pre == {"A"}, str(subs_pre))
+    check("stride sees every sub-source", subs_str == set("ABCDE"), str(subs_str))
+    check("both honour the limit", len(pre) == 10 and len(strd) == 10)
+    check("stride yields distinct shards", len(set(strd)) == 10, str(strd))
+    check("stride stays in range", all(x in shards for x in strd))
+    check("stride is deterministic", sel(shards, 10, "stride") == strd)
+    try:
+        sel(shards, 5, "random")
+        ok, detail = False, "accepted"
+    except ValueError as exc:
+        ok, detail = True, str(exc)[:50]
+    check("an unknown mode is refused", ok, detail)
+
+
 def main() -> int:
     for fn in [v for k, v in sorted(globals().items()) if k.startswith("test_")]:
         print(f"\n{fn.__name__}")

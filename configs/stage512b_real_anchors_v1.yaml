@@ -115,6 +115,20 @@ dataset:
     # feasible-anchor test, which is what guarantees zero upsampling).
     anchors_area_gate: 262144
     anchors_crop_loss_max: 0.20
+    # Per-domain TIGHTENING only (a value above the global one is refused). TextAtlas
+    # renders text, so a crop that slices a glyph is not a mild quality loss -- the
+    # caption still quotes the whole string, which teaches the model to render words
+    # that are not in the picture. Measured over all 595 shards: at the global 0.20,
+    # 2,388 of 909,678 non-square textatlas rows sit at crop_loss >= 0.12, almost all
+    # in LongWordsSubset-M a7/a8, and sampled crops confirm sliced headlines ("5 Tips
+    # for a Really Modern Website Design" -> "ps for a Really Modern Website Des").
+    # Gradient-energy proxies show a clean dose-response: ink-in-cut 0.49% below 0.02
+    # versus 8.07% above 0.12. Capping textatlas at 0.12 drops 2,388 rows = 0.058% of
+    # kept textatlas, 0.0003% of the pool. Unpinning from the square anchor remains a
+    # large net win either way: a 512x512 centre crop would have taken >20% of the
+    # source from 808,928 of these rows and >40% from 84,046.
+    anchors_crop_loss_max_by_domain:
+      textatlas: 0.12
     target_area: 262144
     divisor: 16
     adaptive_no_upscale: true
