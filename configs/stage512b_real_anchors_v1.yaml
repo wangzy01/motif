@@ -1,13 +1,19 @@
 # Stage512b-real: 512-resolution breadth stage, bucket_mode=anchors_v1 (13 fixed
-# anchors) over the full-survivor real pool. 512M exposures = 250,000 steps @ 2048.
+# anchors) over the CURATED rich_v1 real pool. 512M exposures = 250,000 steps @ 2048.
+#
+# (The header said "full-survivor" until 2026-08-02. That was the D18 design; Evan
+# switched to the curated pool on 2026-08-01 because phase5 requires 17 columns for
+# the real domains and the full survivor manifest is missing 20 of them, including the
+# src_* payload locators. Reviving full-survivor needs a new rich_v2 build first.)
 #
 # This stage REPLACES the 2026-06-29 anime-alignment 512b design; that one is no
 # longer planned (Evan, 2026-08-01).
 #
-# Launch remains forbidden. The offline plan/catalog/sidecar roots below are
-# PLACEHOLDERS: they do not exist yet and must be produced by phase3a -> phase5 ->
-# planner under this config before any training reference to them is valid. This file
-# is currently usable only for the offline catalog chain.
+# Launch remains forbidden.
+#   BUILT   offline_catalog_root  -- phase5 formal, 2026-08-02, 89,786,866 rows,
+#           catalog_hash b91e4906df9a1f8b039effa69df83a0555310d964bf22d6e1da7c13e9c781b91
+#   PENDING offline_plan_root / offline_plan_hash / offline_weighted_contract_sha256
+#           (planner has not run) and every trainer: key below.
 
 model_cls: networks.model_mot.MoTT2IModel
 target_device: cuda
@@ -60,8 +66,15 @@ dataset:
   offline_plan_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_plan_stage512b_PLACEHOLDER
   offline_plan_hash: PLACEHOLDER_no_plan_built_yet
   offline_weighted_contract_sha256: PLACEHOLDER_no_contract_yet
-  # Will be written by phase5 under this exact path (== CANONICAL_OUTPUT_DIRS['512b']);
-  # does not exist yet.
+  # BUILT 2026-08-02 by the phase5 formal run at this exact path
+  # (== CANONICAL_OUTPUT_DIRS['512b'], a root distinct from the frozen 512a catalog so a
+  # 13-anchor build can never os.replace() the 361-bucket parquets).
+  #   89,786,866 rows | catalog_hash    b91e4906df9a1f8b039effa69df83a0555310d964bf22d6e1da7c13e9c781b91
+  #                   | assignment_hash d2fb8e837fab2488e66134de831ff72b483acab3c638cb5a959219717989eb4e
+  #   self-checks all pass: N agreement exact at tolerance 0 against BOTH phase3a's
+  #   N_matrix and a raw-manifest recount; 0 duplicate uids; 53,478,305 tar joins with
+  #   0 misses; 0 upsampling rows. The 1,751-row shortfall against phase3a is entirely
+  #   tar_index_miss and is itemised in bad_rows.parquet.
   offline_catalog_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512b_v1
   offline_anime_freq_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_animefreq_stage512b_v1   # PLACEHOLDER: never built
   offline_caption_sidecar_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_caption_sidecar_stage512b_v1   # PLACEHOLDER: never built
