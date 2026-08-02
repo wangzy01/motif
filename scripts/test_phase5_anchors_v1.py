@@ -353,9 +353,18 @@ def test_gpic_cluster_stats_loader() -> None:
         "_rows_no_cluster": 0,
         "_manifest_root": "/somewhere/gpic",
     }
-    sizes = P5.load_gpic_cluster_stats(write(good), 256)
+    sizes, digest = P5.load_gpic_cluster_stats(write(good), 256)
     check("a well-formed gpic table loads with int keys",
           sizes == {0: 10, 5: 90}, repr(sizes))
+    # The digest must be of the bytes actually parsed, not a later re-hash of the
+    # path -- that is the whole TOCTOU fix.
+    import hashlib, pathlib
+    path = write(good)
+    sizes2, digest2 = P5.load_gpic_cluster_stats(path, 256)
+    check("the loader returns the digest of the bytes it parsed",
+          digest2 == hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest(),
+          digest2[:16])
+    check("identical content yields an identical digest", digest == digest2)
 
     for name, mutate, expect in [
         ("wrong shard count is rejected", lambda d: d.update(_n_shards=255), "shard count"),
@@ -581,6 +590,48 @@ def test_weighted_planner_stage_widening() -> None:
         except W.WeightedPlanError as exc:
             ok, detail = "stage/schema mismatch" in str(exc), str(exc)[:70]
         check("a stage/schema mismatch is refused", ok, detail)
+
+
+def test_publication_is_create_once() -> None:
+    """Publication semantics, checked by reading the code rather than by running a
+    26-minute build.  Each check names the specific failure it prevents."""
+    src = inspect.getsource(P5)
+
+    check("the builder itself refuses an existing build",
+          "refusing to overwrite an existing build" in src,
+          "the guard used to live only in a job wrapper, protecting nobody who "
+          "invokes the module directly")
+    check("the refusal has an explicit opt-out rather than being unconditional",
+          "--allow-republish" in src and "args.allow_republish" in src)
+    check("the refusal covers every published product",
+          all(tok in src for tok in ('product_name("bad_rows"', 'product_name("N_diff"',
+                                     'product_name("header"')))
+    check("concurrent builders cannot rmtree each other's scratch",
+          "O_CREAT | os.O_EXCL" in src and ".phase5.lock" in src)
+
+    pub = inspect.getsource(P5.main) if hasattr(P5, "main") else src
+    check("exclusion evidence is published early ONLY on the failing path",
+          "if excessive:" in pub and pub.index("if excessive:") < pub.index("_publish_file(bad_tmp"),
+          "a FAILED re-run used to destroy the previous build's bad_rows.parquet "
+          "while leaving its header.json still naming it")
+    check("publication is atomic, not truncate-then-write",
+          "def _publish_file" in src and "os.replace(tmp, dst)" in src)
+    check("a stale header never outlives the bytes it hashed",
+          'product_name("header", "json", diagnostic)).unlink(missing_ok=True)' in src)
+
+
+def test_stats_digest_is_of_the_parsed_bytes() -> None:
+    src = inspect.getsource(P5.load_stats_cache_read_only)
+    check("the stats cache is read as bytes and hashed in place",
+          "read_bytes()" in src and "hashlib.sha256(raw_bytes)" in src)
+    check("the parsed object comes from those same bytes",
+          "json.loads(raw_bytes)" in src)
+    main_src = inspect.getsource(P5.main) if hasattr(P5, "main") else inspect.getsource(P5)
+    check("the header records the captured digest, not a re-hash of the path",
+          'stats_digests["stats_cache"]' in main_src
+          and 'sha256_file(Path(runtime["stats_cache"]))' not in main_src,
+          "re-hashing at header time can record a digest for content that did not "
+          "produce the weights; the window is the whole ~26 minute build")
 
 
 def main() -> int:

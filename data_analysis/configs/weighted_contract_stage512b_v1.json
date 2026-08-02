@@ -1,0 +1,27 @@
+{
+ "anime_extra_frac": 0.25,
+ "anime_max_repeat": 4,
+ "anime_priority_header_sha256": "71ac6ee291451668adaf26f838582cbbcc339e98f820174c67f900f6acd80159",
+ "anime_priority_parquet_sha256": "cd53bf7e577aac49c713cff1a09b4012234a9b40a5db223d66b21e9bef27a2c3",
+ "anime_priority_root": "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_anime_priority_stage512b_weighted_v1_20260802",
+ "band_weights": [
+  "0.18",
+  "0.27",
+  "0.15",
+  "0.40"
+ ],
+ "catalog_hash": "b91e4906df9a1f8b039effa69df83a0555310d964bf22d6e1da7c13e9c781b91",
+ "catalog_header_sha256": "4ab78bb39715cf596362a8e68eed0e4b77abdfbf1f44f06bbcca454aee366ed8",
+ "catalog_root": "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512b_v1",
+ "image_size": 512,
+ "sampling_config_sha256": "a3ecd965ff41aa359474f7730425d24032f13ac16996fdc4f9b9f1436bded713",
+ "schema": "stage512b_weighted_plan_contract_v1",
+ "stage": "512b",
+ "stream_kinds": {
+  "anime": "anime_repeat_v1",
+  "gpic": "positive_base_weight_band_bound_v1",
+  "monet_real": "positive_base_weight_band_bound_v1",
+  "synthetic": "positive_base_weight_full_pool_v1",
+  "textatlas": "uniform_cycle_v1"
+ }
+}

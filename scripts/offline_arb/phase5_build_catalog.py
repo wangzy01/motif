@@ -38,6 +38,7 @@ Phase-5 job preflight contract.
 from __future__ import annotations
 
 import argparse
+import atexit
 import concurrent.futures
 import gc
 import hashlib
@@ -163,6 +164,18 @@ def canonical_sha256(value: Any) -> str:
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _publish_file(src: Path, dst: Path) -> None:
+    """Publish `src` to `dst` atomically.
+
+    shutil.copyfile truncates the destination and streams into it, so a concurrent
+    reader can observe a zero-length or half-written artifact.  Staging in the
+    destination directory keeps the rename on one filesystem.
+    """
+    tmp = dst.with_name(dst.name + f".tmp.{os.getpid()}")
+    shutil.copyfile(src, tmp)
+    os.replace(tmp, dst)
 
 
 def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
@@ -382,9 +395,18 @@ def load_runtime_config(config_path: str) -> dict[str, Any]:
 
 
 def load_stats_cache_read_only(path: str, expected_monet_shards: int) -> dict[str, Any]:
-    """Read the production stats cache without invoking its write-capable helper."""
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+    """Read the production stats cache without invoking its write-capable helper.
+
+    Returns the digest of the bytes it actually parsed under ``_sha256``.  Hashing the
+    path again later would let the header record a digest for content that did NOT
+    produce the weights: this file is 0644, lives outside this tree, and
+    manifest_index.compute_real_global_stats() os.replace()s it whenever a shard count
+    disagrees -- and the window between the read here and header assembly is the whole
+    build, ~26 minutes on the formal run.
+    """
+    raw_bytes = Path(path).read_bytes()
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    raw = json.loads(raw_bytes)
     fingerprint = raw.get("_n_shards")
     if fingerprint not in (None, expected_monet_shards):
         raise RuntimeError(
@@ -394,10 +416,11 @@ def load_stats_cache_read_only(path: str, expected_monet_shards: int) -> dict[st
     return {
         "source_counts": raw["source_counts"],
         "cluster_sizes": {int(k): int(v) for k, v in raw["cluster_sizes"].items()},
+        "_sha256": digest,
     }
 
 
-def load_gpic_cluster_stats(path: str, expected_gpic_shards: int) -> dict[int, int]:
+def load_gpic_cluster_stats(path: str, expected_gpic_shards: int) -> tuple[dict[int, int], str]:
     """Read GPIC's own within-domain cluster_sizes.
 
     Held to a stricter identity standard than the MONET cache, which carries
@@ -405,8 +428,9 @@ def load_gpic_cluster_stats(path: str, expected_gpic_shards: int) -> dict[int, i
     s512b_gpic_cluster_stats_v1.py, so it always has the provenance fields and
     there is no legacy artifact to stay compatible with.
     """
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+    raw_bytes = Path(path).read_bytes()
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    raw = json.loads(raw_bytes)
     for key in ("cluster_sizes", "_domain", "_n_shards", "_rows_total", "_manifest_root"):
         if key not in raw:
             raise RuntimeError(f"gpic cluster stats missing required key {key!r}: {path}")
@@ -428,7 +452,7 @@ def load_gpic_cluster_stats(path: str, expected_gpic_shards: int) -> dict[int, i
             f"gpic cluster_sizes sums to {total} but the file claims {expected} "
             f"clustered rows: {path}"
         )
-    return sizes
+    return sizes, digest
 
 
 def extreme_aspect_sides(target_area: int, divisor: int, max_aspect: float) -> tuple[int, int]:
@@ -2044,8 +2068,18 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--row-group-size", type=int, default=DEFAULT_ROW_GROUP_SIZE)
     ap.add_argument("--source-partitions", type=int, default=DEFAULT_SOURCE_PARTITIONS)
     ap.add_argument(
-        "--shard-selection", choices=("prefix", "stride"), default="prefix",
-        help="how the diagnostic subset is chosen; stride covers every sub-source",
+        "--shard-selection", choices=("prefix", "stride"), default=None,
+        help="how the diagnostic subset is chosen; stride covers every sub-source. "
+             "Required whenever --max-shards-per-domain is given: prefix is the "
+             "historical behaviour but is sub-source biased, so the choice must be "
+             "deliberate rather than inherited from a default.",
+    )
+    ap.add_argument(
+        "--allow-republish",
+        action="store_true",
+        help="overwrite an existing build in the output dir. Off by default: "
+             "publication is os.replace onto fixed names, so without the guard a "
+             "re-run silently rebuilds over a frozen catalog.",
     )
     ap.add_argument(
         "--max-shards-per-domain",
@@ -2062,6 +2096,18 @@ def parse_args() -> argparse.Namespace:
         ap.error("--source-partitions must be in [1,32767]")
     if args.max_shards_per_domain is not None and args.max_shards_per_domain <= 0:
         ap.error("--max-shards-per-domain must be positive")
+    if args.max_shards_per_domain is not None and args.shard_selection is None:
+        # No default here on purpose.  Shards enumerate in sorted path order, which
+        # groups by sub-source, so `prefix` put an entire textatlas diagnostic inside
+        # CleanTextSynth -- 100% square -- and it reported "no change" for a
+        # per-domain crop_loss cap that removes 2,388 rows.  A default would just
+        # re-arm that; use stride unless the bias is what you want.
+        ap.error(
+            "--max-shards-per-domain requires an explicit --shard-selection "
+            "(prefix is sub-source biased; stride covers every sub-source)"
+        )
+    if args.max_shards_per_domain is None and args.shard_selection is not None:
+        ap.error("--shard-selection only applies to a diagnostic run")
     return args
 
 
@@ -2151,6 +2197,42 @@ def main() -> int:
     started = time.perf_counter()
     diagnostic = args.max_shards_per_domain is not None
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create-once.  Publication is os.replace onto fixed names, so without this a
+    # re-run silently rebuilds over a frozen catalog.  The guard used to live only in
+    # a job wrapper, which protects nobody who invokes this module directly.
+    existing = [
+        name
+        for name in (
+            [product_name(d, "parquet", diagnostic) for d in DOMAINS]
+            + [
+                product_name("bad_rows", "parquet", diagnostic),
+                product_name("N_diff", "json", diagnostic),
+                product_name("header", "json", diagnostic),
+            ]
+        )
+        if (output_dir / name).exists()
+    ]
+    if existing and not args.allow_republish:
+        raise SystemExit(
+            f"refusing to overwrite an existing build in {output_dir}: {sorted(existing)}\n"
+            "these are immutable artifacts; archive them and build under a fresh name, "
+            "or pass --allow-republish if replacing them is genuinely intended"
+        )
+
+    # Two concurrent builders would rmtree each other's scratch.  O_EXCL is the only
+    # part of this that is actually atomic on a shared filesystem.
+    lock_path = output_dir / (".phase5.diag.lock" if diagnostic else ".phase5.lock")
+    try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        raise SystemExit(
+            f"another phase5 build holds {lock_path}; if no builder is running, remove it"
+        ) from None
+    os.write(lock_fd, f"{os.getpid()} {socket.gethostname()}\n".encode())
+    os.close(lock_fd)
+    atexit.register(lambda: lock_path.unlink(missing_ok=True))
+
     work_root = output_dir / ("_work.diag" if diagnostic else "_work")
     if work_root.exists():
         shutil.rmtree(work_root)
@@ -2172,10 +2254,13 @@ def main() -> int:
         raise RuntimeError("one or more domains has no selected manifest shard")
 
     stats = load_stats_cache_read_only(runtime["stats_cache"], len(all_shards["monet_real"]))
+    stats_digests = {"stats_cache": stats.pop("_sha256")}
     if runtime.get("gpic_cluster_stats"):
-        stats["cluster_sizes_gpic"] = load_gpic_cluster_stats(
+        gpic_sizes, gpic_digest = load_gpic_cluster_stats(
             runtime["gpic_cluster_stats"], len(all_shards["gpic"])
         )
+        stats["cluster_sizes_gpic"] = gpic_sizes
+        stats_digests["gpic_cluster_stats"] = gpic_digest
     extreme_long, extreme_short = extreme_aspect_sides(
         runtime["mar_params"]["target_area"],
         runtime["mar_params"]["divisor"],
@@ -2375,11 +2460,17 @@ def main() -> int:
 
     bad_output = output_dir / product_name("bad_rows", "parquet", diagnostic)
     n_diff_output = output_dir / product_name("N_diff", "json", diagnostic)
-    # Publish the exclusion evidence even when the allowance is exceeded; no catalog/header is published.
-    shutil.copyfile(bad_tmp, bad_output)
-    shutil.copyfile(n_diff_tmp, n_diff_output)
     excessive = [d for d, row in tar_join_by_domain.items() if not row["within_0p1pct_allowance"]]
     if excessive:
+        # Only here is the exclusion evidence published early, because this build is
+        # about to abort and the evidence is the whole point of the abort.  It used to
+        # be published unconditionally at this line, which meant a FAILED re-run
+        # destroyed the previous build's bad_rows.parquet and N_diff.json while
+        # leaving its header.json still naming them -- losing the incident evidence
+        # for a build that had succeeded.  On the success path these are now published
+        # with the rest, atomically, below.
+        _publish_file(bad_tmp, bad_output)
+        _publish_file(n_diff_tmp, n_diff_output)
         raise RuntimeError(
             f"tar-index misses exceed 0.1% for {excessive}: {json.dumps(tar_join_by_domain)}"
         )
@@ -2573,14 +2664,12 @@ def main() -> int:
             # that drifted at constant shard count passes.  Hashing it here at
             # least makes the catalog self-describing about which stats produced
             # its weights.
+            # Digests of the bytes that were actually PARSED at the top of the build,
+            # not a re-hash of the path now.  See load_stats_cache_read_only.
             "stats_cache": runtime["stats_cache"],
-            "stats_cache_sha256": sha256_file(Path(runtime["stats_cache"])),
+            "stats_cache_sha256": stats_digests["stats_cache"],
             "gpic_cluster_stats": runtime.get("gpic_cluster_stats"),
-            "gpic_cluster_stats_sha256": (
-                sha256_file(Path(runtime["gpic_cluster_stats"]))
-                if runtime.get("gpic_cluster_stats")
-                else None
-            ),
+            "gpic_cluster_stats_sha256": stats_digests.get("gpic_cluster_stats"),
             "bucket_decision_report": bucket_report_binding,
             "tar_index": tar_index_summary,
             "multi_ar_params": runtime["mar_params"],
@@ -2597,9 +2686,14 @@ def main() -> int:
     # header last.  A visible header therefore means every referenced product
     # passed validation and the builder returned through every fallible cleanup
     # step before the publication marker became visible.
+    # Remove any stale header BEFORE replacing the parquets it hashes, so no header
+    # ever outlives the bytes it describes -- including if we die mid-loop.
+    (output_dir / product_name("header", "json", diagnostic)).unlink(missing_ok=True)
     for d in DOMAINS:
         final_path = output_dir / product_name(d, "parquet", diagnostic)
         os.replace(domain_tmp_paths[d], final_path)
+    _publish_file(bad_tmp, bad_output)
+    _publish_file(n_diff_tmp, n_diff_output)
     shutil.rmtree(work_root)
     header_path = output_dir / product_name("header", "json", diagnostic)
     atomic_write_json(header_path, header)
