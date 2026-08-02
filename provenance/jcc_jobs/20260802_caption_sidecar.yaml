@@ -1,0 +1,61 @@
+name: evan-s512b-caption-sidecar-build-20260802-v1
+description: "Stage512b five-domain typed caption sidecar, aligned to global catalog row_id. Last offline artifact and the final blocker for a real 13-anchor loader batch; needed for training regardless. Bound by catalog_hash to the 89,786,866-row Stage512b catalog, so the Stage512a sidecar (bound to 370b1679) cannot be reused. Expect ~64 GB: 512a was 50 GB for 70.4M rows. The builder publishes only after all five domains match their source and full-reread typed digests, and refuses a pre-existing output root."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+maxRetries: 0
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 384
+environments: {}
+command: |
+  set -euo pipefail
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  case "$NODE_RANK" in ''|*[!0-9]*) NODE_RANK=0 ;; esac
+  [ "$NODE_RANK" = 0 ] || { echo "FATAL: rank!=0"; exit 42; }
+  export CUDA_VISIBLE_DEVICES="" LC_ALL=C PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  REPO=/fsx/evan/mot_code_s512b_impl
+  test -x "$PY" && test -d "$REPO/.git" || { echo "FATAL: env"; exit 43; }
+  export PYTHONPATH="$REPO"
+  export PYTHONPYCACHEPREFIX="/local/evan/pycache/${JCC_JOB_ID:-job}/$HOST"; mkdir -p "$PYTHONPYCACHEPREFIX"
+  cd "$REPO"
+  echo "=== identity ==="; git rev-parse HEAD; git status --porcelain | head
+
+  CAT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512b_v1
+  OUT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_caption_sidecar_stage512b_v1
+  WORK=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_caption_sidecar_stage512b_work
+
+  test ! -e "$OUT" || { echo "FATAL: output root exists: $OUT"; exit 45; }
+
+  echo "=== free space (need ~64 GB; 512a was 50 GB for 70.4M rows, this is 89.8M) ==="
+  df -h /fsx/evan | tail -1
+  AVAIL_G=$(df -BG --output=avail /fsx/evan | tail -1 | tr -dc '0-9')
+  [ "$AVAIL_G" -gt 200 ] || { echo "FATAL: only ${AVAIL_G}G free, refusing to start a ~64G build"; exit 46; }
+
+  echo "=== suites ==="
+  "$PY" scripts/test_anchors_v1_geometry.py | tail -1
+  "$PY" scripts/test_phase5_anchors_v1.py   | tail -1
+
+  echo "=== build five-domain caption sidecar bound to the 512b catalog ==="
+  timeout --signal=TERM --kill-after=900s 43200s "$PY" scripts/offline_arb/build_caption_sidecar.py \
+    --catalog-root "$CAT" --output-root "$OUT" --work-root "$WORK" \
+    --domain-workers 8 --source-workers 32
+
+  echo "=== products ==="; ls -la "$OUT"; du -sh "$OUT"
+  "$PY" - "$OUT" "$CAT" <<'PYEOF'
+  import json, sys, pathlib
+  out, cat = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+  h = json.loads((out / "header.json").read_text())
+  cath = json.loads((cat / "header.json").read_text())
+  assert (out / "_SUCCESS").exists(), "no _SUCCESS"
+  assert h["catalog_hash"] == cath["catalog_hash"], (h["catalog_hash"], cath["catalog_hash"])
+  assert h["total_rows"] == cath["row_count"] == 89_786_866, (h["total_rows"], cath["row_count"])
+  assert h["diagnostic_run"] is False
+  present = sorted(p.name for p in out.iterdir() if p.is_dir())
+  assert present == ["anime", "gpic", "monet_real", "synthetic", "textatlas"], present
+  print("catalog_hash bound :", h["catalog_hash"])
+  print("total_rows         :", f'{h["total_rows"]:,}')
+  print("schema             :", h["schema_version"], "| row_order", h["row_order"])
+  print("CAPTION_SIDECAR_BUILD_POSTCHECK_PASS")
+  PYEOF
+  echo "=== DONE ==="

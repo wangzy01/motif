@@ -1,0 +1,50 @@
+name: evan-s512b-textatlas-gt-build-20260802-v1
+description: "TextAtlas authoritative rendered-text ground truth, keyed by global catalog row_id. Deliberately narrow: only CleanTextSynth (whose annotation IS the generation parameter, so the string is ground truth by construction) and TextScenesHQ (dedicated raw_text column). The Qwen i1 captions quote the text uniformly across all nine subsets and look like the better source, but scored against CleanTextSynth's authoritative annotation they match exactly on only 73.5% of rows -- for long strings Qwen quotes a fragment, sometimes an unrelated span -- so they stay a caption source, not ground truth. Written as a standalone sidecar so a Qwen rewrite cannot structurally overwrite a recorded GT."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+maxRetries: 0
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 128
+environments: {}
+command: |
+  set -euo pipefail
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  case "$NODE_RANK" in ''|*[!0-9]*) NODE_RANK=0 ;; esac
+  [ "$NODE_RANK" = 0 ] || { echo "FATAL: rank!=0"; exit 42; }
+  export CUDA_VISIBLE_DEVICES="" LC_ALL=C PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  REPO=/fsx/evan/mot_code_s512b_impl
+  test -x "$PY" && test -d "$REPO/.git" || { echo "FATAL: env"; exit 43; }
+  export PYTHONPATH="$REPO"
+  export PYTHONPYCACHEPREFIX="/local/evan/pycache/${JCC_JOB_ID:-job}/$HOST"; mkdir -p "$PYTHONPYCACHEPREFIX"
+  cd "$REPO"
+  echo "=== identity ==="; git rev-parse HEAD; git status --porcelain | head
+  B=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  OUT=$B/offline_arb_textatlas_gt_stage512b_v1
+  test ! -e "$OUT" || { echo "FATAL: output exists"; exit 45; }
+  echo "=== extract authoritative GT (CleanTextSynth annotation + TextScenesHQ raw_text) ==="
+  timeout --signal=TERM --kill-after=300s 21600s "$PY" scripts/offline_arb/build_textatlas_gt_sidecar_v1.py \
+    --catalog-root "$B/offline_arb_catalog_stage512b_v1" --output-root "$OUT"
+  echo "=== products ==="; ls -la "$OUT"; du -sh "$OUT"
+  "$PY" - "$OUT" <<'PYEOF'
+  import json, sys, pathlib, collections
+  import pyarrow.parquet as pq
+  out = pathlib.Path(sys.argv[1])
+  h = json.loads((out / "header.json").read_text())
+  t = pq.read_table(out / "textatlas_gt.parquet")
+  rid = t["row_id"].to_pylist(); src = t["gt_source"].to_pylist(); txt = t["gt_text"].to_pylist()
+  assert len(rid) == h["emitted_rows"] == h["output"]["rows"]
+  assert rid == sorted(rid), "row_id not sorted"
+  assert len(set(rid)) == len(rid), "duplicate row_id"
+  assert all(s for s in txt), "empty gt_text emitted"
+  print("rows            :", f"{len(rid):,}")
+  print("by source       :", dict(collections.Counter(src)))
+  print("gt length chars :", h["gt_length_chars"])
+  print("missing by subset:", h["missing_by_subset"])
+  print("samples:")
+  for i in (0, len(rid)//2, len(rid)-1):
+      print(f"   row_id {rid[i]:>10}  [{src[i]}]  {txt[i][:90]!r}")
+  print("TEXTATLAS_GT_POSTCHECK_PASS")
+  PYEOF
+  echo "=== DONE ==="

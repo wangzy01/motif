@@ -1,0 +1,30 @@
+name: evan-s512b-realized-exposure-audit-20260802-v1
+description: "Count what the built Stage512b plan actually exposes per sub-source, cluster and caption band, over all 245 blocks and 513,802,240 row references. Answers whether the planner's per-(bucket,band) normalisation amplifies the accepted domain-level drift from the explicit MONET sub-source table (L1 0.0767 at cluster_beta=0.2). Runs monet_real and gpic. Read-only: touches the plan and catalog only."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+maxRetries: 0
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 192
+environments: {}
+command: |
+  set -euo pipefail
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  case "$NODE_RANK" in ''|*[!0-9]*) NODE_RANK=0 ;; esac
+  [ "$NODE_RANK" = 0 ] || { echo "FATAL: rank!=0"; exit 42; }
+  export CUDA_VISIBLE_DEVICES="" LC_ALL=C PYTHONUNBUFFERED=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  REPO=/fsx/evan/mot_code_s512b_impl
+  export PYTHONPATH="$REPO"; cd "$REPO"
+  echo "=== identity ==="; git rev-parse HEAD; git status --porcelain | head
+  B=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  for DOM in monet_real gpic; do
+    echo "############ $DOM ############"
+    timeout --signal=TERM --kill-after=300s 21600s "$PY" scripts/offline_arb/audit_plan_realized_exposure_v1.py \
+      --plan-root $B/offline_arb_plan_stage512b_w64_512m_anchors_v1_20260802 \
+      --catalog-root $B/offline_arb_catalog_stage512b_v1 \
+      --sampling-config $REPO/data_analysis/configs/t5_sampling_stage512b_real_v1.json \
+      --domain $DOM \
+      --json-out $B/offline_arb_plan_stage512b_w64_512m_anchors_v1_20260802.realized_exposure_$DOM.json
+  done
+  echo "=== DONE ==="

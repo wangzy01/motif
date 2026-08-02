@@ -1,0 +1,103 @@
+name: evan-s512b-phase3a-anchors-diag-20260801-v2
+description: "Stage512b-real phase3a bucket stats in DIAGNOSTIC mode (--max-shards-per-domain 12) with bucket_mode=anchors_v1. Produces .diag artifacts only; never touches the formal three-piece set. Metadata only: reads manifest width/height/holdout, no image reads, no model, CPU only."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+maxRetries: 0
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 96
+environments: {}
+command: |
+  set -euo pipefail
+
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  case "$NODE_RANK" in ''|*[!0-9]*) NODE_RANK=0 ;; esac
+  [ "$NODE_RANK" = 0 ] || { echo "FATAL: rank!=0 on a 1-worker job"; exit 42; }
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  test -x "$PY" || { echo "FATAL: interpreter missing"; exit 43; }
+
+  REPO=/fsx/evan/mot_code_s512b_impl
+  test -d "$REPO/.git" || { echo "FATAL: repo missing"; exit 43; }
+
+  export PYTHONPATH="$REPO"
+  export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+  export HF_HOME=/local/evan/cache/huggingface TORCH_HOME=/local/evan/cache/torch
+  export PYTHONPYCACHEPREFIX="/local/evan/pycache/${JCC_JOB_ID:-job}/$HOST"
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+
+  cd "$REPO"
+  echo "=== identity ==="
+  git rev-parse HEAD
+  git status --porcelain | head -20
+  sha256sum training/dataline/anchors_v1.py \
+            scripts/offline_arb/phase3a_bucket_stats.py \
+            scripts/offline_arb/phase5_build_catalog.py \
+            configs/stage512b_real_anchors_v1.yaml \
+            data_analysis/configs/t5_sampling_stage512b_real_v1.json
+
+  echo "=== local test suites must pass before touching data ==="
+  "$PY" scripts/test_anchors_v1_geometry.py  | tail -1
+  "$PY" scripts/test_phase5_anchors_v1.py    | tail -1
+  "$PY" scripts/test_phase3a_anchors_v1.py   | tail -1
+  "$PY" data_analysis/scripts/s512b_joint_matrix_v1.py --self-test | tail -1
+
+  OUT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_bucketstats_stage512b_v1
+  echo "=== phase3a DIAGNOSTIC run (12 shards/domain) -> $OUT ==="
+  # Diagnostic products are suffixed .diag by the script itself and can never overwrite
+  # the formal N_matrix.parquet / bucket_decision_report.json / summary.md.
+  timeout --signal=TERM --kill-after=120s 5400s "$PY" scripts/offline_arb/phase3a_bucket_stats.py \
+      --config configs/stage512b_real_anchors_v1.yaml \
+      --stage 512b \
+      --output-dir "$OUT" \
+      --workers 32 \
+      --batch-size 65536 \
+      --max-shards-per-domain 12 \
+      --floors 0.0 \
+      --world-size 64 --per-rank-bs 32
+
+  echo "=== products ==="
+  ls -la "$OUT"
+  echo "=== N_matrix.diag.parquet: per-anchor counts ==="
+  "$PY" - <<'PYEOF'
+  import glob, json
+  import pyarrow.parquet as pq
+  import numpy as np
+  base = "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_bucketstats_stage512b_v1"
+  t = pq.read_table(f"{base}/N_matrix.diag.parquet")
+  print("columns:", t.column_names, " rows:", t.num_rows)
+  cols = {c: t[c].to_pylist() for c in t.column_names}
+  dom = [c for c in t.column_names if c.startswith("n_") and c != "n_total"]
+  print(f'{"idx":>4} {"WxH":>10} {"ar":>7} ' + " ".join(f"{d.replace('n_',''):>12}" for d in dom) + f' {"total":>12}')
+  for i in range(t.num_rows):
+      print(f'{cols["bucket_idx"][i]:>4} {cols["bucket_w"][i]}x{cols["bucket_h"][i]:<6}'
+            f' {cols["bucket_ar"][i]:>7.3f} '
+            + " ".join(f'{cols[d][i]:>12,}' for d in dom)
+            + f' {cols["n_total"][i]:>12,}')
+  print("SUM per domain:", {d.replace("n_",""): int(np.sum(cols[d])) for d in dom})
+  rep = json.load(open(f"{base}/bucket_decision_report.diag.json"))
+  print()
+  print("schema_version:", rep.get("schema_version"), " diagnostic_run:", rep.get("diagnostic_run"))
+  print("stage:", rep.get("stage"), " image_size:", rep.get("image_size"))
+  print("config.multi_ar_params:", json.dumps(rep["config"]["multi_ar_params"], sort_keys=True))
+  print("config.square_only_domains:", rep["config"]["square_only_domains"])
+  print("eligibility_audit:", json.dumps(rep.get("eligibility_audit"), ensure_ascii=False)[:400])
+  print()
+  print("coverage (note the new rows_unservable_dropped):")
+  for d, c in rep["coverage"].items():
+      ident = (c["rows_raw"] - c["rows_holdout_dropped"] - c["rows_elig_dropped"]
+               - c["rows_invalid_wh_dropped"] - c["rows_unservable_dropped"])
+      print(f'  {d:<12} raw {c["rows_raw"]:>10,} holdout {c["rows_holdout_dropped"]:>8,}'
+            f' elig {c["rows_elig_dropped"]:>9,} invalid {c["rows_invalid_wh_dropped"]:>7,}'
+            f' UNSERV {c["rows_unservable_dropped"]:>9,} kept {c["rows_kept"]:>10,}'
+            f'  identity_ok={ident == c["rows_kept"]}')
+  print()
+  fl = rep.get("floors")
+  if isinstance(fl, list) and fl:
+      f0 = fl[0]
+      print("floor=0 variant: kept", f0.get("kept_bucket_count"), "/ 13  AR range",
+            f0.get("effective_ar_range"), " folded_mass", f0.get("folded_mass_fraction"))
+  rn = rep.get("retained_native") or {}
+  print("crop retention percentiles (native):", json.dumps(rn.get("percentiles", rn))[:220])
+  PYEOF
+  echo "=== DONE ==="

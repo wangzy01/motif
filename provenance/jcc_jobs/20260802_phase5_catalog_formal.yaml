@@ -1,0 +1,109 @@
+name: evan-s512b-phase5-catalog-formal-20260802-v1
+description: "Stage512b-real phase5 FORMAL catalog build over the full pool. Writes the authoritative anime/monet_real/gpic/synthetic/textatlas parquets plus header.json under offline_arb_catalog_stage512b_v1, a root distinct from the frozen 512a catalog so a 13-anchor build can never os.replace() the 361-bucket parquets. Refuses to start if any formal parquet already exists. Preceded by a stratified diagnostic that passed every self-check: N-matrix agreement exact at tolerance 0, 0 tar-index misses of 8,895,479 joins, 0 duplicate uids over 26,957,139 rows, and 0 upsampling rows."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+maxRetries: 0
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 384
+environments: {}
+command: |
+  set -euo pipefail
+
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  case "$NODE_RANK" in ''|*[!0-9]*) NODE_RANK=0 ;; esac
+  [ "$NODE_RANK" = 0 ] || { echo "FATAL: rank!=0 on a 1-worker job"; exit 42; }
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  test -x "$PY" || { echo "FATAL: interpreter missing"; exit 43; }
+  REPO=/fsx/evan/mot_code_s512b_impl
+  test -d "$REPO/.git" || { echo "FATAL: repo missing"; exit 43; }
+
+  export PYTHONPATH="$REPO"
+  export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONUNBUFFERED=1
+  export HF_HOME=/local/evan/cache/huggingface TORCH_HOME=/local/evan/cache/torch
+  export PYTHONPYCACHEPREFIX="/local/evan/pycache/${JCC_JOB_ID:-job}/$HOST"
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+
+  cd "$REPO"
+  echo "=== identity ==="
+  git rev-parse HEAD
+  git status --porcelain | head -20
+
+  echo "=== the formal Phase-3a evidence this build binds to ==="
+  BS=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_bucketstats_stage512b_v1
+  sha256sum "$BS/N_matrix.parquet" "$BS/bucket_decision_report.json"
+  test -f "$BS/_superseded_run1_20260801/README.txt" || { echo "FATAL: run1 evidence missing"; exit 45; }
+
+  echo "=== suites ==="
+  "$PY" scripts/test_anchors_v1_geometry.py | tail -1
+  "$PY" scripts/test_phase5_anchors_v1.py   | tail -1
+  "$PY" scripts/test_phase3a_anchors_v1.py  | tail -1
+
+  OUT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512b_v1
+  echo "=== a diagnostic must never be able to occupy a formal name ==="
+  for f in anime monet_real gpic synthetic textatlas; do
+    test ! -e "$OUT/$f.parquet" || { echo "FATAL: formal catalog already exists: $OUT/$f.parquet"; exit 45; }
+  done
+
+  echo "=== phase5 FORMAL build (FULL pool) -> $OUT ==="
+  # No --max-shards-per-domain: this writes the authoritative catalog under the
+  # formal names, which the guard above proved were free.
+  timeout --signal=TERM --kill-after=600s 43200s "$PY" scripts/offline_arb/phase5_build_catalog.py \
+      --config configs/stage512b_real_anchors_v1.yaml \
+      --stage 512b \
+      --floor 0.0 \
+      --output-dir "$OUT" \
+      --workers 32
+
+  echo "=== products ==="
+  ls -la "$OUT"
+
+  echo "=== zero-upsampling audit over the diagnostic catalog ==="
+  "$PY" scripts/audit_catalog_no_upsample.py "$OUT" \
+      --json-out "$OUT/no_upsample_audit.json"
+
+  echo "=== header + coverage ==="
+  "$PY" - <<'PYEOF'
+  import json
+  from pathlib import Path
+  d = Path("/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512b_v1")
+  h = json.load(open(d / "header.json"))
+  print("stage", h.get("stage"), "diagnostic", h.get("diagnostic_run"), "floor", h.get("floor"))
+  print("row_count", f'{h.get("row_count", 0):,}', " duration", round(h.get("duration_seconds", 0), 1), "s")
+  print("assignment_hash", h.get("assignment_hash"))
+  print("bucket_table_hash", h.get("bucket_table_hash"))
+  inp = h.get("inputs", {})
+  for k in ("stats_cache", "stats_cache_sha256", "gpic_cluster_stats", "gpic_cluster_stats_sha256"):
+      print(f"  {k}: {inp.get(k)}")
+  print("multi_ar_params:", json.dumps(inp.get("multi_ar_params"), sort_keys=True))
+  print("\ncoverage:")
+  for dom, c in (h.get("coverage") or {}).items():
+      print(f"  {dom:<12} {json.dumps(c, sort_keys=True)[:220]}")
+  PYEOF
+
+  echo "=== sub-source and anchor COVERAGE of the stratified subset ==="
+  "$PY" - <<'PYEOF'
+  import collections
+  from pathlib import Path
+  import pyarrow.parquet as pq
+  d = Path("/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512b_v1")
+  for dom in ("anime", "monet_real", "gpic", "synthetic", "textatlas"):
+      p = d / f"{dom}.parquet"
+      if not p.exists():
+          print(f"  {dom}: MISSING"); continue
+      t = pq.ParquetFile(p)
+      names = set(t.schema_arrow.names)
+      cols = ["bucket_idx"] + (["sub_source"] if "sub_source" in names else [])
+      anchors, subs, n = collections.Counter(), collections.Counter(), 0
+      for b in t.iter_batches(batch_size=500_000, columns=cols):
+          n += b.num_rows
+          anchors.update(b["bucket_idx"].to_pylist())
+          if "sub_source" in names:
+              subs.update(b["sub_source"].to_pylist())
+      print(f"  {dom:<12} rows {n:>10,}  anchors covered {len(anchors):>2}/13  "
+            f"sub_sources {len(subs) if subs else '-'}")
+      if subs:
+          print(f"       {dict(subs.most_common())}")
+  PYEOF
+  echo "=== DONE ==="

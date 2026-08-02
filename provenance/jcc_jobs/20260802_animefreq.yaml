@@ -1,0 +1,41 @@
+name: evan-s512b-animefreq-build-20260802-v1
+description: "Stage512b anime tag-frequency sidecar. The loader binds this by catalog_hash, so the Stage512a one (bound to 370b1679) cannot be reused. Discovered as the next blocker by actually constructing OfflineExactDataset against the real Stage512b plan and catalog and reading the error it raised. Metadata only: reads the catalog's anime.parquet and the anime source shards' tag columns, no images."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+maxRetries: 0
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 128
+environments: {}
+command: |
+  set -euo pipefail
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  case "$NODE_RANK" in ''|*[!0-9]*) NODE_RANK=0 ;; esac
+  [ "$NODE_RANK" = 0 ] || { echo "FATAL: rank!=0"; exit 42; }
+  export CUDA_VISIBLE_DEVICES="" LC_ALL=C PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  REPO=/fsx/evan/mot_code_s512b_impl
+  test -x "$PY" && test -d "$REPO/.git" || { echo "FATAL: env"; exit 43; }
+  export PYTHONPATH="$REPO"
+  export PYTHONPYCACHEPREFIX="/local/evan/pycache/${JCC_JOB_ID:-job}/$HOST"; mkdir -p "$PYTHONPYCACHEPREFIX"
+  cd "$REPO"
+  echo "=== identity ==="; git rev-parse HEAD; git status --porcelain | head
+  CAT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512b_v1
+  OUT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_animefreq_stage512b_v1
+  test ! -e "$OUT" || { echo "FATAL: output exists: $OUT"; exit 45; }
+  echo "=== build anime tag frequencies bound to the 512b catalog ==="
+  timeout --signal=TERM --kill-after=300s 14400s "$PY" scripts/offline_arb/precompute_anime_freq.py \
+    --catalog "$CAT/anime.parquet" --output-dir "$OUT" --workers 32
+  echo "=== products ==="; ls -la "$OUT" | head -8; du -sh "$OUT"
+  "$PY" - "$OUT" "$CAT" <<'PYEOF'
+  import json, sys, pathlib
+  out, cat = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+  h = json.loads((out / "header.json").read_text())
+  want = json.loads((cat / "header.json").read_text())["catalog_hash"]
+  assert h["catalog_hash"] == want, (h["catalog_hash"], want)
+  assert (out / "_SUCCESS").exists(), "no _SUCCESS marker"
+  print("catalog_hash bound:", h["catalog_hash"])
+  print("shard files:", len(h.get("files", {})))
+  print("ANIMEFREQ_BUILD_POSTCHECK_PASS")
+  PYEOF
+  echo "=== DONE ==="
