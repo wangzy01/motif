@@ -25,6 +25,7 @@ command: |
   bash scripts/jcc_preflight.sh "$EXPECTED_COMMIT" "$REPO"
   echo "=== tests before touching data ==="
   "$PY" scripts/test_textatlas_gt_v1.py
+  "$PY" scripts/test_smoke_prompt_audit_v1.py
   echo "=== every bound artifact must be present ==="
   B=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
   for d in offline_arb_catalog_stage512b_v1 offline_arb_plan_stage512b_w64_512m_anchors_v1_20260802 \
