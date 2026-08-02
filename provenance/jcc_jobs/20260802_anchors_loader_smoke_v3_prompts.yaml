@@ -1,0 +1,58 @@
+name: evan-s512b-anchors-loader-smoke-20260802-v3
+description: "Re-run the 13-anchor smoke with the text side added. v2 proved geometry only -- every anchor reachable, tensors the right size, no upsampling, verify_binding holding. It said nothing about prompts, and a prompt pipeline can be entirely broken while every tensor is correctly shaped. v3 adds a second phase that walks consecutive steps from three points in the plan and checks prompts and cfg_keep are present and aligned with the item trace, the never-drop flag lands only on anime, tokenising through the real prompt template stays inside text_max_length, caption_band is 0..3 on real domains and -1 elsewhere, and every textatlas row with authoritative GT carries it verbatim -- read from an independently constructed sidecar, not the loader's own copy. First run with the TextAtlas GT v2 sidecar attached."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+maxRetries: 0
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 256
+environments:
+  EXPECTED_COMMIT: ""
+command: |
+  set -euo pipefail
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  case "$NODE_RANK" in ''|*[!0-9]*) NODE_RANK=0 ;; esac
+  [ "$NODE_RANK" = 0 ] || { echo "FATAL: rank!=0"; exit 42; }
+  export CUDA_VISIBLE_DEVICES="" LC_ALL=C PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  REPO=/fsx/evan/mot_code_s512b_impl
+  test -x "$PY" && test -d "$REPO/.git" || { echo "FATAL: env"; exit 43; }
+  export PYTHONPATH="$REPO"
+  export PYTHONPYCACHEPREFIX="/local/evan/pycache/${JCC_JOB_ID:-job}/$HOST"; mkdir -p "$PYTHONPYCACHEPREFIX"
+  mkdir -p /local/evan/anime_img_cache
+  cd "$REPO"
+  [ -n "${EXPECTED_COMMIT:-}" ] || { echo "FATAL: EXPECTED_COMMIT unset"; exit 43; }
+  bash scripts/jcc_preflight.sh "$EXPECTED_COMMIT" "$REPO"
+  echo "=== tests before touching data ==="
+  "$PY" scripts/test_textatlas_gt_v1.py
+  echo "=== every bound artifact must be present ==="
+  B=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  for d in offline_arb_catalog_stage512b_v1 offline_arb_plan_stage512b_w64_512m_anchors_v1_20260802 \
+           offline_arb_anime_priority_stage512b_weighted_v1_20260802 \
+           offline_arb_animefreq_stage512b_v1 offline_arb_caption_sidecar_stage512b_v1 \
+           offline_arb_textatlas_gt_stage512b_v2; do
+    test -d "$B/$d" || { echo "FATAL: missing $d"; exit 45; }
+    echo "  ok $d"
+  done
+  echo "=== 13 anchors + prompt audit ==="
+  timeout --signal=TERM --kill-after=600s 14400s "$PY" scripts/offline_arb/smoke_anchors_loader_v1.py \
+    --config configs/stage512b_real_anchors_v1.yaml \
+    --prompt-segments 3 --prompt-steps 16 \
+    --json-out /tmp/anchors_smoke_v3.json
+  echo "=== summary ==="
+  "$PY" -c "
+  import json;d=json.load(open('/tmp/anchors_smoke_v3.json'))
+  print('pass:',d['pass'],' anchors_passed:',d['anchors_passed'],'/',len(d['anchors_requested']))
+  for k in sorted(d['per_anchor'], key=int):
+      r=d['per_anchor'][k]
+      print(f\"  a{k:<2} {r['size']:>8} step {r['step']:>6} {r['status']:<5} tensor {r.get('batch_shape')} rows {r.get('planned_rows_checked',0):,}\")
+  p=d.get('prompt_audit') or {}
+  if p:
+      print('prompt audit rows', p['rows'], 'tokens', p['token_length'])
+      print('  cfg_keep', p['cfg_keep_true'], 'non-anime', p['cfg_keep_non_anime'])
+      print('  textatlas', p['textatlas'])
+      for dom,c in p['by_domain'].items(): print('   ',dom,c)
+  if d['failures']: print('FAILURES:', d['failures'][:8])
+  "
+  cp /tmp/anchors_smoke_v3.json "$B/offline_arb_plan_stage512b_w64_512m_anchors_v1_20260802.anchors_smoke_v3.json" || true
+  echo "=== DONE ==="
