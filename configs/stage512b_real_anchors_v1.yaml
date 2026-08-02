@@ -87,7 +87,19 @@ dataset:
   textatlas_local_root: /local/evan/textatlas5m
   anime_nrows: 20000
   anime_cache_dir: /local/evan/anime_img_cache
+  # MONET-only: source_counts + cluster_sizes over all 40,000,000 monet rows.
   stats_cache: /fsx/evan/mot_code/data_analysis/outputs/monet_global_stats_rich_v1.json
+  # GPIC's own within-domain cluster_sizes. Required for stage 512b. phase5 applies
+  # the cluster factor to every real domain, but stats_cache above is a MONET-only
+  # scan and GPIC shares MONET's cluster namespace (one joint k-means), so the
+  # lookup succeeds while inverting the intent: corr(log monet size, log gpic size)
+  # = -0.24, so GPIC's densest modes sit in MONET's sparsest clusters. Measured on
+  # the eligible pool, MONET's table drops GPIC's effective clusters from 16,226 to
+  # 13,559 and doubles top-1 share; GPIC's own table gives 17,229 / 0.087%.
+  #   built by data_analysis/scripts/s512b_gpic_cluster_stats_v1.py
+  #   sha256 af8e254ea2f80329e81eb7d384c97bbd26042bbc4020cb1c20a42783b2b8fd4c
+  #   20,000,000 rows, 19,943 of 20,000 clusters present, 0 unclustered, 0 holdout
+  gpic_cluster_stats: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/stage512b_gpic_cluster_stats_v1.json
   tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct
   use_latent_cache: false
 

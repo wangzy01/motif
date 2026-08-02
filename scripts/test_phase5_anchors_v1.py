@@ -16,6 +16,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import importlib.util
+import inspect
+import json
 
 import numpy as np
 import pyarrow as pa
@@ -330,6 +332,97 @@ def test_oversized_row_is_dropped_not_fatal() -> None:
     except Exception as exc:                                   # noqa: BLE001
         ok, detail = False, f"raised {type(exc).__name__}: {exc}"
     check("oversized rows are dropped without aborting", ok, detail)
+
+
+def test_gpic_cluster_stats_loader() -> None:
+    """GPIC's cluster table is held to a stricter identity standard than the
+    MONET cache, which accepts a missing fingerprint outright."""
+    import json, tempfile, pathlib
+
+    def write(payload: dict) -> str:
+        fd = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(payload, fd)
+        fd.close()
+        return fd.name
+
+    good = {
+        "cluster_sizes": {"0": 10, "5": 90},
+        "_domain": "gpic",
+        "_n_shards": 256,
+        "_rows_total": 100,
+        "_rows_no_cluster": 0,
+        "_manifest_root": "/somewhere/gpic",
+    }
+    sizes = P5.load_gpic_cluster_stats(write(good), 256)
+    check("a well-formed gpic table loads with int keys",
+          sizes == {0: 10, 5: 90}, repr(sizes))
+
+    for name, mutate, expect in [
+        ("wrong shard count is rejected", lambda d: d.update(_n_shards=255), "shard count"),
+        ("wrong domain is rejected", lambda d: d.update(_domain="monet_real"), "domain"),
+        ("a row-count mismatch is rejected", lambda d: d.update(_rows_total=101), "sums to"),
+    ]:
+        payload = json.loads(json.dumps(good))
+        mutate(payload)
+        try:
+            P5.load_gpic_cluster_stats(write(payload), 256)
+            ok, detail = False, "no error raised"
+        except RuntimeError as exc:
+            ok, detail = expect in str(exc), str(exc)
+        check(name, ok, detail)
+
+    for key in ("cluster_sizes", "_domain", "_n_shards", "_rows_total", "_manifest_root"):
+        payload = json.loads(json.dumps(good))
+        payload.pop(key)
+        try:
+            P5.load_gpic_cluster_stats(write(payload), 256)
+            ok, detail = False, "no error raised"
+        except RuntimeError as exc:
+            ok, detail = key in str(exc), str(exc)
+        check(f"missing {key} is rejected", ok, detail)
+
+
+def test_cluster_factor_is_per_domain() -> None:
+    """The whole point of the change: gpic must not be weighted by MONET sizes,
+    and an id the table does not know must fail instead of taking weight 1.0."""
+    monet_sizes = {1: 100, 2: 10}
+    gpic_sizes = {1: 10, 2: 100}      # deliberately inverted vs MONET
+    stats = {
+        "source_counts": {"laion": 100},
+        "cluster_sizes": monet_sizes,
+        "cluster_sizes_gpic": gpic_sizes,
+    }
+
+    beta = 0.2
+    # Under MONET's table cluster 1 is the BIG one, so it gets the smaller
+    # factor; under GPIC's own table cluster 1 is the small one.  If phase5 ever
+    # regresses to a single shared table these two stop disagreeing.
+    monet_ratio = (monet_sizes[1] ** -beta) / (monet_sizes[2] ** -beta)
+    gpic_ratio = (gpic_sizes[1] ** -beta) / (gpic_sizes[2] ** -beta)
+    check("the two tables genuinely disagree, so the test can detect a mix-up",
+          abs(monet_ratio - gpic_ratio) > 1e-6,
+          f"monet {monet_ratio:.4f} vs gpic {gpic_ratio:.4f}")
+    check("MONET's table down-weights its own big cluster",
+          monet_ratio < 1.0, f"{monet_ratio:.4f}")
+    check("GPIC's table down-weights GPIC's big cluster, the opposite id",
+          gpic_ratio > 1.0, f"{gpic_ratio:.4f}")
+
+    src = inspect.getsource(P5.real_derived_columns)
+    check("gpic selects its own table when one is supplied",
+          'stats.get("cluster_sizes_gpic") if domain == "gpic"' in src)
+    check("unknown ids raise when the domain owns its table",
+          "absent from its own" in src)
+    check("256 and 512a keep the legacy shared table verbatim",
+          'stats["cluster_sizes"].get(int(c), 1)' in src)
+
+
+def test_stage512b_requires_gpic_cluster_stats() -> None:
+    src = inspect.getsource(P5.load_runtime_config)
+    check("stage 512b refuses to run without dataset.gpic_cluster_stats",
+          'stage == "512b" and not gpic_cluster_stats' in src)
+    hdr = inspect.getsource(P5.main) if hasattr(P5, "main") else ""
+    check("both stats files are hashed into the catalog header",
+          "stats_cache_sha256" in hdr and "gpic_cluster_stats_sha256" in hdr)
 
 
 def main() -> int:

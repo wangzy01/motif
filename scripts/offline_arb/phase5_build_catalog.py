@@ -255,6 +255,20 @@ def load_runtime_config(config_path: str) -> dict[str, Any]:
         raise ValueError(f"unknown square_only_domains: {square_only}")
     sampling_path = str(cfg.dataset.sampling_config)
     stats_cache = str(cfg.dataset.stats_cache)
+    # cluster_sizes in stats_cache is a MONET-only scan, but the cluster factor
+    # is applied to every REAL_DOMAINS domain.  GPIC shares MONET's cluster
+    # namespace (one joint k-means), so weighting GPIC by MONET's sizes looks
+    # correct and is inverted in practice.  Stage512b supplies GPIC's own table
+    # instead; see data_analysis/scripts/s512b_gpic_cluster_stats_v1.py.
+    gpic_cluster_stats = OmegaConf.select(cfg, "dataset.gpic_cluster_stats")
+    gpic_cluster_stats = None if gpic_cluster_stats is None else str(gpic_cluster_stats)
+    if stage == "512b" and not gpic_cluster_stats:
+        raise ValueError(
+            "stage=512b requires dataset.gpic_cluster_stats: without it GPIC would be "
+            "weighted by MONET's cluster_sizes, which is inverted "
+            "(corr(log monet size, log gpic size) = -0.24) and silently hands the "
+            "clusters MONET never saw the maximum possible weight"
+        )
     sampling_cfg = load_sampling_config(sampling_path)
     if stage not in sampling_cfg.domain_mix:
         raise ValueError(f"sampling config has no domain_mix for stage={stage}")
@@ -318,6 +332,7 @@ def load_runtime_config(config_path: str) -> dict[str, Any]:
         "sampling_path": sampling_path,
         "sampling_cfg": sampling_cfg,
         "stats_cache": stats_cache,
+        "gpic_cluster_stats": gpic_cluster_stats,
         "domain_mix": domain_mix,
         "buckets": buckets,
         "square_idx": square_index(buckets),
@@ -338,6 +353,40 @@ def load_stats_cache_read_only(path: str, expected_monet_shards: int) -> dict[st
         "source_counts": raw["source_counts"],
         "cluster_sizes": {int(k): int(v) for k, v in raw["cluster_sizes"].items()},
     }
+
+
+def load_gpic_cluster_stats(path: str, expected_gpic_shards: int) -> dict[int, int]:
+    """Read GPIC's own within-domain cluster_sizes.
+
+    Held to a stricter identity standard than the MONET cache, which carries
+    only ``_n_shards`` and tolerates its absence.  This file is produced by
+    s512b_gpic_cluster_stats_v1.py, so it always has the provenance fields and
+    there is no legacy artifact to stay compatible with.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    for key in ("cluster_sizes", "_domain", "_n_shards", "_rows_total", "_manifest_root"):
+        if key not in raw:
+            raise RuntimeError(f"gpic cluster stats missing required key {key!r}: {path}")
+    if raw["_domain"] != "gpic":
+        raise RuntimeError(f"gpic cluster stats is for domain {raw['_domain']!r}: {path}")
+    if int(raw["_n_shards"]) != expected_gpic_shards:
+        raise RuntimeError(
+            f"gpic cluster stats shard count {raw['_n_shards']} != gpic manifest shards "
+            f"{expected_gpic_shards}: {path}"
+        )
+    sizes = {int(k): int(v) for k, v in raw["cluster_sizes"].items()}
+    # The table is counted over the full domain pool, so its mass must equal the
+    # pool it claims to describe.  This is the content check the MONET cache
+    # lacks: a drifted pool with an unchanged shard count would pass there.
+    total = sum(sizes.values())
+    expected = int(raw["_rows_total"]) - int(raw.get("_rows_no_cluster", 0))
+    if total != expected:
+        raise RuntimeError(
+            f"gpic cluster_sizes sums to {total} but the file claims {expected} "
+            f"clustered rows: {path}"
+        )
+    return sizes
 
 
 def extreme_aspect_sides(target_area: int, divisor: int, max_aspect: float) -> tuple[int, int]:
@@ -1020,15 +1069,47 @@ def real_derived_columns(
             [stats["source_counts"].get(str(s), 1) ** (-cfg.source_alpha) for s in sub],
             dtype=np.float64,
         )
-    cluster_factor = np.array(
-        [
-            1.0
-            if int(c) == -1
-            else stats["cluster_sizes"].get(int(c), 1) ** (-cfg.cluster_beta)
-            for c in cluster
-        ],
-        dtype=np.float64,
-    )
+    # Weight each domain by ITS OWN cluster sizes.  cluster_sizes in the stats
+    # cache is a MONET-only scan; GPIC shares MONET's cluster namespace, so
+    # using it for GPIC succeeds silently while inverting the intent (GPIC's
+    # densest modes are MONET's sparsest, corr(log,log) = -0.24).  synthetic is
+    # unaffected either way: its cluster_id is -1 for every row.
+    own_table = stats.get("cluster_sizes_gpic") if domain == "gpic" else None
+    if own_table is not None:
+        # Stage512b: this domain brought its own table, so an id it does not
+        # know means the table does not describe this pool.  Fail rather than
+        # let `.get(c, 1)` return 1 ** -beta = 1.0 -- the MAXIMUM factor, so an
+        # unknown cluster is silently OVER-exposed, never dropped.  That is
+        # exactly how the MONET-table-for-GPIC bug stayed invisible: 314 ids
+        # absent from MONET handed 1.31% of GPIC rows 4.08% of its mass.
+        missing = {int(c) for c in cluster if int(c) != -1} - own_table.keys()
+        if missing:
+            sample = sorted(missing)[:10]
+            raise RuntimeError(
+                f"domain={domain}: {len(missing)} cluster ids absent from its own "
+                f"cluster_sizes table (e.g. {sample}); an absent id would silently "
+                "take the maximum weight, so the table does not describe this pool"
+            )
+        cluster_factor = np.array(
+            [1.0 if int(c) == -1 else own_table[int(c)] ** (-cfg.cluster_beta)
+             for c in cluster],
+            dtype=np.float64,
+        )
+    else:
+        # Stages 256 and 512a, byte for byte as before.  Both are frozen and
+        # must stay reproducible, and 512a's gpic rows genuinely do hit ids that
+        # MONET's table lacks -- tightening this here would break the frozen
+        # catalogs rather than fix them.  load_runtime_config() is what forbids
+        # reaching this branch on 512b.
+        cluster_factor = np.array(
+            [
+                1.0
+                if int(c) == -1
+                else stats["cluster_sizes"].get(int(c), 1) ** (-cfg.cluster_beta)
+                for c in cluster
+            ],
+            dtype=np.float64,
+        )
     return {
         "sub_source": [str(x) for x in sub.tolist()],
         "cluster_id": [int(x) for x in cluster.tolist()],
@@ -2034,6 +2115,10 @@ def main() -> int:
         raise RuntimeError("one or more domains has no selected manifest shard")
 
     stats = load_stats_cache_read_only(runtime["stats_cache"], len(all_shards["monet_real"]))
+    if runtime.get("gpic_cluster_stats"):
+        stats["cluster_sizes_gpic"] = load_gpic_cluster_stats(
+            runtime["gpic_cluster_stats"], len(all_shards["gpic"])
+        )
     extreme_long, extreme_short = extreme_aspect_sides(
         runtime["mar_params"]["target_area"],
         runtime["mar_params"]["divisor"],
@@ -2422,6 +2507,22 @@ def main() -> int:
             "sampling_config_sha256": sha256_file(Path(runtime["sampling_path"])),
             "N_matrix": str(n_matrix_path),
             "N_matrix_sha256": n_matrix_sha256,
+            # The stats files decide every base_weight in the catalog, yet they
+            # were the one input this block did not record.  The MONET cache in
+            # particular is a mutable path outside this tree that
+            # manifest_index.compute_real_global_stats() will os.replace() in
+            # place, and its own only identity field is a shard COUNT -- a pool
+            # that drifted at constant shard count passes.  Hashing it here at
+            # least makes the catalog self-describing about which stats produced
+            # its weights.
+            "stats_cache": runtime["stats_cache"],
+            "stats_cache_sha256": sha256_file(Path(runtime["stats_cache"])),
+            "gpic_cluster_stats": runtime.get("gpic_cluster_stats"),
+            "gpic_cluster_stats_sha256": (
+                sha256_file(Path(runtime["gpic_cluster_stats"]))
+                if runtime.get("gpic_cluster_stats")
+                else None
+            ),
             "bucket_decision_report": bucket_report_binding,
             "tar_index": tar_index_summary,
             "multi_ar_params": runtime["mar_params"],
