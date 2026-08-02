@@ -226,6 +226,11 @@ def load_supply(variant: str) -> tuple[list[dict], dict[str, list[int]], dict]:
         sup[dom] = _rows_by_anchor(d1["results"][key]["B13"]["per_anchor"], anchors)
     prov = {"variant": variant, "part1": P1, "part1p5": P15,
             "fixed_pool_domains": ["anime", "synthetic", "textatlas"]}
+    def _sha(path: str) -> str:
+        import hashlib
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    prov["_sha"] = _sha
     if variant == "curated":
         sup["monet"] = _rows_by_anchor(d15["by_dataset"]["monet"]["per_anchor"], anchors)
         sup["gpic"] = _rows_by_anchor(d15["by_dataset"]["gpic"]["per_anchor"], anchors)
@@ -268,6 +273,12 @@ def load_supply(variant: str) -> tuple[list[dict], dict[str, list[int]], dict]:
         prov["note"] = "all five domains from the formal Phase-3a N_matrix"
     else:
         raise DesignError(f"unknown variant {variant!r}")
+    # Digest every input actually read on the taken branch: a provenance block that
+    # records only paths can describe two different answers.
+    sha = prov.pop("_sha")
+    read_paths = {k: v for k, v in prov.items()
+                  if isinstance(v, str) and v.startswith("/") and os.path.exists(v)}
+    prov["input_sha256"] = {v: sha(v) for v in sorted(set(read_paths.values()))}
     return anchors, sup, prov
 
 
@@ -357,13 +368,17 @@ def design(variant: str, mix: dict[str, float], budget: int,
             "cells": cells,
         })
 
-    worst = sorted(
+    ranked = sorted(
         ({"domain": d, "anchor": per_anchor[k]["anchor"],
           "unique_rows": sup[d][k], "exposures": C[k][j],
           "effective_epochs": C[k][j] / sup[d][k]}
          for k in range(na) for j, d in enumerate(doms)
          if sup[d][k] > 0 and C[k][j] > 0),
-        key=lambda x: -x["effective_epochs"])[:10]
+        key=lambda x: -x["effective_epochs"])
+    # `worst` is the display slice; the OVER-10 COUNT must be taken over every cell.
+    # Counting inside the slice caps the answer at 10 regardless of how many cells
+    # qualify -- at 3x budget it reported 10 when the true count was 50.
+    worst = ranked[:10]
 
     achieved_dom = {d: sum(C[k][j] for k in range(na)) for j, d in enumerate(doms)}
     result = {
@@ -396,7 +411,8 @@ def design(variant: str, mix: dict[str, float], budget: int,
                 {"domain": d, "anchor": per_anchor[k]["anchor"]}
                 for k in range(na) for j, d in enumerate(doms) if sup[d][k] == 0],
             "max_cell_epochs": worst[0]["effective_epochs"] if worst else None,
-            "cells_over_10_epochs": sum(1 for w in worst if w["effective_epochs"] > 10),
+            "nonzero_cells": len(ranked),
+            "cells_over_10_epochs": sum(1 for w in ranked if w["effective_epochs"] > 10),
         },
         "caveats": [
             "effective_epochs is a CELL AVERAGE. The live planner's R_max is an aggregate "
@@ -573,6 +589,24 @@ def self_test() -> int:
     if fails:
         print(f"FAILED {len(fails)}: {fails}")
         return 1
+
+    # cells_over_10_epochs used to be counted inside the 10-element display slice, so
+    # it was structurally capped at 10 no matter how many cells qualified.  At the
+    # shipped budget max<10 so it read 0 either way -- the bug only shows at a budget
+    # where cells actually cross the threshold.
+    big = design("formal_n_matrix", DEFAULT_MIX, DEFAULT_BUDGET * 3,
+                 GLOBAL_BATCH, FLOOR, CAP)
+    qa = big["qa"]
+    truth = sum(1 for a in big["per_anchor"] for c in a["cells"].values()
+                if (c.get("effective_epochs") or 0) > 10)
+    ck("cells_over_10_epochs counts every cell, not the top-10 slice",
+       qa["cells_over_10_epochs"] == truth and truth > 10,
+       f'reported {qa["cells_over_10_epochs"]} truth {truth}')
+    ck("nonzero_cells is reported so the count has a denominator",
+       qa["nonzero_cells"] == sum(
+           1 for a in big["per_anchor"] for c in a["cells"].values()
+           if c.get("effective_epochs") is not None),
+       str(qa.get("nonzero_cells")))
     print("S512B_JOINT_MATRIX_SELF_TEST_PASS")
     return 0
 
@@ -580,8 +614,12 @@ def self_test() -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    # Defaults to the authoritative table, not the 2026-07-31 design-time audit.
+    # They disagree exactly where it matters: textatlas is 4,036,998 rows in the
+    # audit (still square-pinned) against 4,118,484 formally, and its 704x352 cell
+    # is 7,774 against 13,891.
     ap.add_argument("--variant", choices=["curated", "survivor", "stage512a_today", "formal_n_matrix"],
-                    default="curated")
+                    default="formal_n_matrix")
     ap.add_argument("--budget", type=int, default=DEFAULT_BUDGET)
     ap.add_argument("--global-batch", type=int, default=GLOBAL_BATCH)
     ap.add_argument("--floor", type=float, default=FLOOR)
@@ -608,6 +646,12 @@ def main() -> int:
         path = os.path.abspath(args.out)
         if "/offline_arb_plan" in path or "/blocks/" in path:
             raise DesignError(f"refusing to write inside a plan root: {path}")
+        if os.path.exists(path):
+            # The sibling stats builder already refuses this; a design record that
+            # silently truncates is worse, because two runs with different --variant
+            # or --budget leave no trace of the one that lost.
+            raise DesignError(
+                f"refusing to overwrite an existing design record: {path}")
         with open(path, "w") as fh:
             json.dump(res, fh, indent=2, sort_keys=True)
             fh.write("\n")
