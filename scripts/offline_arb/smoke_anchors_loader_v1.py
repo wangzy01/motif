@@ -556,7 +556,15 @@ def main() -> int:
 
     prompt_summary = None
     if not args.skip_prompt_audit:
-        prompt_summary, prompt_failures = run_prompt_audit(args, cfg, plan_root)
+        # A misconfigured GT root or a missing tokenizer must be REPORTED, not thrown:
+        # this phase runs after the 13 anchors, and letting it propagate would discard
+        # thirteen passing anchor results and write no JSON at all. It still fails the
+        # run -- it just fails it with the evidence attached.
+        try:
+            prompt_summary, prompt_failures = run_prompt_audit(args, cfg, plan_root)
+        except Exception as exc:  # noqa: BLE001 - a smoke must report, not crash
+            prompt_failures = [f"prompt audit could not run: {type(exc).__name__}: {exc}"]
+            print(f"\nprompt audit FAILED TO START: {type(exc).__name__}: {exc}")
         all_failures.extend(prompt_failures)
 
     summary = {
