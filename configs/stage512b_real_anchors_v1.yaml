@@ -221,7 +221,15 @@ trainer:
   log_every: 10
   dataline_metrics_every: 50
   checkpoint_steps: 3000
-  checkpoint_keep_every: 60000
+  # 30000, not the inherited 60000 (Evan, 2026-08-02). This is an EVALUATION decision,
+  # not a storage one: keep_every is the only thing that decides which steps still exist
+  # when someone wants to score them. keep_max 4 at checkpoint_steps 3000 gives a rolling
+  # window of just 12,000 steps, so at 60000 the first permanently scoreable point is
+  # step 60,000 = 122.9M exposures and everything before it is gone. 30000 gives
+  # 30k/60k/.../240k -- one roughly every 61M exposures -- for about 52 GB more.
+  # It cannot be fixed later: raising it after launch does not bring back a checkpoint
+  # that has already rolled off.
+  checkpoint_keep_every: 30000
   checkpoint_keep_max: 4
   checkpoint_keep_format: weights_ema
   # PLACEHOLDER name, but the DIRECTORY IDENTITY RULE is not a placeholder: this must be
