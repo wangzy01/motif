@@ -36,6 +36,8 @@ environments:
   # Fresh every attempt. The directory is claimed with mkdir, so reusing a name after a
   # failure trips exit 45 -- which is the point, not an inconvenience.
   CKPT_DIR: ""
+  # Seconds the arrived nodes hold while the rest queue. Default 1800.
+  ARRIVAL_WAIT_S: ""
 command: |
   set -euo pipefail
   REPO=/fsx/evan/mot_code_s512b_impl
@@ -121,9 +123,14 @@ command: |
   # Counting markers first turns a capacity shortfall into a cheap, legible failure,
   # and guarantees the rendezvous itself never has to wait once it starts.
   # Rank 0 marks itself only AFTER hashing init_from, so nobody enters torchrun early.
+  # ARRIVAL_WAIT_S is how long the arrived nodes will hold while the rest queue. The
+  # cluster is contended (63 of 90 nodes at 8/8), so this is deliberately a submission
+  # parameter, not a constant: waiting holds GPUs idle, which is a real cost to other
+  # users, and the right value depends on how badly the run is wanted right now.
+  WAIT_S=${ARRIVAL_WAIT_S:-1800}
   : > "$CKPT/ready.n$NODE_RANK"
   ARRIVED=0
-  for _ in $(seq 1 360); do                                  # 30 minutes of scheduling slack
+  for _ in $(seq 1 $((WAIT_S / 5))); do
     ARRIVED=$(ls "$CKPT"/ready.n* 2>/dev/null | wc -l)
     [ "$ARRIVED" -ge "$NNODES" ] && break
     sleep 5
