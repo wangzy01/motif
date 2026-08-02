@@ -12,8 +12,10 @@
 # Launch remains forbidden.
 #   BUILT   offline_catalog_root  -- phase5 formal, 2026-08-02, 89,786,866 rows,
 #           catalog_hash b91e4906df9a1f8b039effa69df83a0555310d964bf22d6e1da7c13e9c781b91
-#   PENDING offline_plan_root / offline_plan_hash / offline_weighted_contract_sha256
-#           (planner has not run) and every trainer: key below.
+#   BUILT   offline_plan_root     -- weighted plan, 2026-08-02, 245 blocks / 250,000
+#           steps, plan_hash 50b5ae2bb2a952b18355d5d5876ceac8c4d8086ae72f872b306a8167f84fd685
+#   PENDING offline_anime_freq_root, offline_caption_sidecar_root, and every
+#           trainer: key below.
 
 model_cls: networks.model_mot.MoTT2IModel
 target_device: cuda
@@ -63,9 +65,14 @@ dataset:
   sampling_config: /fsx/evan/mot_code_s512b_impl/data_analysis/configs/t5_sampling_stage512b_real_v1.json
   stage: "512b"
   image_size: 512
-  offline_plan_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_plan_stage512b_PLACEHOLDER
-  offline_plan_hash: PLACEHOLDER_no_plan_built_yet
-  offline_weighted_contract_sha256: PLACEHOLDER_no_contract_yet
+  # BUILT 2026-08-02. 245 blocks x 1024 steps = 250,000 steps / 512M exposures, 4.4 GB.
+  # plan_id stage512b_offline_exact_v2_w64_512m_anchors_v1 (planner_v1.py:363 derives the
+  # required prefix from the stage; a non-conforming id is refused).
+  offline_plan_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_plan_stage512b_w64_512m_anchors_v1_20260802
+  offline_plan_hash: 50b5ae2bb2a952b18355d5d5876ceac8c4d8086ae72f872b306a8167f84fd685
+  # data_analysis/configs/weighted_contract_stage512b_v1.json -- in-repo and reviewable,
+  # unlike the Stage512a contract which lived only in a control dir outside git.
+  offline_weighted_contract_sha256: 352dd3aa75fd03c2f58dc9ed7a9e83f80f42f716b38dc467f6cfbe2452040035
   # BUILT 2026-08-02 by the phase5 formal run at this exact path
   # (== CANONICAL_OUTPUT_DIRS['512b'], a root distinct from the frozen 512a catalog so a
   # 13-anchor build can never os.replace() the 361-bucket parquets).

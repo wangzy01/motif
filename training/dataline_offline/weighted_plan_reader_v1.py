@@ -13,6 +13,10 @@ from typing import Any, Mapping
 import numpy as np
 
 from training.dataline_offline import planner_v1 as base
+# Single source for the per-stage horizon.  Duplicating the numbers here is how the
+# builder and the reader would drift apart -- the builder would happily produce a plan
+# the reader then refuses.
+from training.dataline_offline.weighted_plan_v1 import FORMAL_HORIZONS
 from training.dataline_offline.weighted_plan_v1 import (
     BLOCK_DATASETS,
     PLAN_FORMAT,
@@ -160,9 +164,12 @@ class WeightedOfflinePlan:
             cfg = base._normalize_input(planner_input)
         except Exception as exc:
             raise WeightedPlanReadError(f"embedded planner input is invalid: {exc}") from exc
-        if cfg.stage != "512a" or cfg.image_size != 512:
-            raise WeightedPlanReadError("weighted plan stage drift")
-        formal = cfg.M == 256_000_000 and cfg.total_steps == 125_000 and cfg.G == 2048
+        if cfg.stage not in FORMAL_HORIZONS or cfg.image_size != 512:
+            raise WeightedPlanReadError(
+                f"weighted plan stage drift: stage={cfg.stage!r} not in "
+                f"{sorted(FORMAL_HORIZONS)}, image_size={cfg.image_size}"
+            )
+        formal = (cfg.M, cfg.total_steps, cfg.G) == FORMAL_HORIZONS[cfg.stage]
         canary = (
             allow_canary
             and "canary" in cfg.plan_id
