@@ -156,6 +156,37 @@ GPIC 的重复分布是**双峰**的(×3/×4 一大堆,再加 323,630 行正好 
 不是 pilot,不用于判断模型质量。20 step 的 loss 噪声太大,看不出几何/归一化错配;
 200 step 能对照 Stage512a `metrics.jsonl` 末段拿到 loss 连续性。Evan,2026-08-02。
 
+**执行形态改为 100 + 续训到 200**(总步数不变):单次 200 步只证明"能存",
+不证明"能续",而 `resume: true` 是这条 250,000 步跑线**全部**的重试恢复机制。
+phase B 必须重载 model/optimizer/scheduler/EMA 并把 loader seek 到正确 plan step,
+作业按 `train.py` 实际打印的那行断言 —— 否则"phase B 悄悄从 512a 重新初始化"
+在任何下游指标上都与成功续训一模一样。
+
+## S512B-18 TextAtlas 的 CFG dropout 维持 10%,不接通 `text_rich`
+
+**先说事实**:`MoTT2IModel.forward` 读 `batch.get("text_rich")` 来应用
+`text_rich_cfg_dropout_prob`,但**没有任何数据路径发这个键** —— offline loader 产出
+`{prompts, pixels, cfg_keep}`,streaming loader 也一样。所以这个键**自写下之日起就是死的**,
+512a 也一样,每一行 TextAtlas 一直走的都是普通 `cfg_dropout_prob`。
+
+**决定不改行为**(Evan,2026-08-02)。理由:
+- dropout 把**整条 prompt 换成空串**,所以被丢掉的那 10% 里 prompt 原本写了什么完全
+  不影响结果 —— **加 GT 不改变这 10%**。GT 只加强剩下 90% 的条件监督,反而让
+  cond/uncond 的差**变大**,CFG 外推更可靠而不是更差。
+  (我最初以"加了 GT 所以更要紧"提出这个问题,那个因果是错的,已更正。)
+- CFG 的无条件分支**按设计**就该学完整图像分布,其中包含带字的图。
+  把整个 TextAtlas 从无条件分布里排除是另一个未经验证的改动。
+  参考:CFG 原论文 arXiv:2207.12598 · Unconditional Priors Matter arXiv:2503.20240。
+- 量级:TextAtlas 占 5%,10% dropout = 全局 0.5%;其中带 GT 的约 0.24%。
+  收益不足以在文字通路上同时引入第二个变量(第一个是 GT 进 prompt),归因会变脏。
+
+**但配置不能继续撒谎**:`text_rich_cfg_dropout_prob` 由 `0.0` 改为 **`0.1`**。
+运行时逐位相同(`text_rich` 恒为 None,该值从不被读),改的只是"配置描述的是意图还是行为"。
+`0.0` 会让下一个读者以为文字样本受保护 —— 它们不受保护。
+
+**若 OCR exact-string 确实差**,实验是只对**有权威 GT 的那约 47% 行**比较 10%/5%/0%,
+不是一上来保护整个域。
+
 ---
 
 ## 流程约定(不是数据决策,但同样具约束力)
