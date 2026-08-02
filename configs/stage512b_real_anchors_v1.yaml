@@ -62,6 +62,19 @@ vae:
 
 dataset:
   store_cls: training.dataline_offline.offline_dataset.OfflineExactDataset
+  # DO NOT EDIT the sampling config after a catalog is built against it, not even a
+  # comment field. The catalog records inputs.sampling_config_sha256 and
+  # OfflineExactDataset refuses to load when the runtime file's digest differs, so an
+  # annotation unbinds the catalog. (Learned the hard way on 2026-08-02: writing up the
+  # realized-exposure measurement into that file broke the binding and had to be
+  # reverted. Findings about a frozen input belong beside the artifact -- see
+  # offline_arb_plan_..._20260802.REALIZED_EXPOSURE.md.) Bound digest: a3ecd965...
+  #
+  # THIS yaml is different: the catalog records inputs.pipeline_config_sha256 but
+  # nothing enforces it, and drift here is structural rather than accidental -- the
+  # plan root and plan_hash below cannot exist until after the plan is built, which is
+  # after the catalog. So this file's digest necessarily stops matching what the
+  # catalog recorded, and that is expected, not a defect.
   sampling_config: /fsx/evan/mot_code_s512b_impl/data_analysis/configs/t5_sampling_stage512b_real_v1.json
   stage: "512b"
   image_size: 512
