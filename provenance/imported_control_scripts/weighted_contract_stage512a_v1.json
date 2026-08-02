@@ -1,0 +1,27 @@
+{
+  "anime_extra_frac": 0.25,
+  "anime_max_repeat": 4,
+  "anime_priority_header_sha256": "93e23f11ae58acdef4830f6c24d1824e52ec686f52db0a7a8361127e68e4c536",
+  "anime_priority_parquet_sha256": "0a86f7195a8c87975a37414010c1ead52e6c626d05b115adeeac862f93f5ed56",
+  "anime_priority_root": "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_anime_priority_stage512a_weighted_v1_20260722",
+  "band_weights": [
+    "0.18",
+    "0.27",
+    "0.15",
+    "0.40"
+  ],
+  "catalog_hash": "370b1679e8c5670338a03ba4c6972cdbf69fa5068fc35108bf646b2d64642331",
+  "catalog_header_sha256": "51a5f0904987a751b54842633d2968ea7f6485307850858d9472319c15748d1d",
+  "catalog_root": "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512a_v1",
+  "image_size": 512,
+  "sampling_config_sha256": "07a0b46fa9ebb840ecf7f97cc7fccc0ec68e44c47368ae13c450bcfe81a4fd48",
+  "schema": "stage512a_weighted_plan_contract_v1",
+  "stage": "512a",
+  "stream_kinds": {
+    "anime": "anime_repeat_v1",
+    "gpic": "positive_base_weight_band_bound_v1",
+    "monet_real": "positive_base_weight_band_bound_v1",
+    "synthetic": "positive_base_weight_full_pool_v1",
+    "textatlas": "uniform_cycle_v1"
+  }
+}

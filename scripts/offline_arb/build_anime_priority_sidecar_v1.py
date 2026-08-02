@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Build a catalog-bound Stage512a Anime priority sidecar.
+"""Build a catalog-bound Stage512a/Stage512b Anime priority sidecar.
 
-The existing Stage512a catalog intentionally stores image/caption locators but
+The offline-arb catalog intentionally stores image/caption locators but
 omits the streaming sampler's Anime priority.  This writer reconstructs the
 priority from the exact source rows addressed by the catalog, verifies the key
 join for every row, and publishes a read-only sidecar.  It never reads images.
+
+The target stage is declared explicitly with --stage and cross-checked against
+the catalog header (fail-closed on any mismatch); the emitted schema string is
+derived from it so a 512b artifact never claims to be a 512a one.
 """
 
 from __future__ import annotations
@@ -26,7 +30,10 @@ import pyarrow.parquet as pq
 
 
 MIB = 1 << 20
-SCHEMA = "stage512a_anime_priority_sidecar_v1"
+SUPPORTED_STAGES = ("512a", "512b")
+# Stage-derived schema id.  Rendering with stage="512a" reproduces the frozen
+# Stage512a constant "stage512a_anime_priority_sidecar_v1" verbatim.
+SCHEMA_TEMPLATE = "stage{stage}_anime_priority_sidecar_v1"
 PARQUET_NAME = "anime_priority.parquet"
 HEADER_NAME = "header.json"
 SUCCESS_NAME = "_SUCCESS"
@@ -268,8 +275,13 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         raise BuildError(
             f"catalog hash drift: {catalog_header.get('catalog_hash')} != {args.catalog_hash}"
         )
-    if catalog_header.get("stage") != "512a" or int(catalog_header.get("image_size", -1)) != 512:
-        raise BuildError("catalog is not the Stage512a/512 authority")
+    catalog_stage = catalog_header.get("stage")
+    if catalog_stage != args.stage or int(catalog_header.get("image_size", -1)) != 512:
+        raise BuildError(
+            f"catalog is not the Stage{args.stage}/512 authority "
+            f"(header stage={catalog_stage!r}, image_size={catalog_header.get('image_size')!r})"
+        )
+    schema = SCHEMA_TEMPLATE.format(stage=args.stage)
 
     catalog = pq.ParquetFile(catalog_root / "anime.parquet")
     source_paths = source_paths_from_catalog(catalog)
@@ -370,7 +382,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     manifest_index_path = repo / "training/dataline/manifest_index.py"
     config_module_path = repo / "training/dataline/config.py"
     header: dict[str, Any] = {
-        "schema": SCHEMA,
+        "schema": schema,
         "status": "PASS",
         "generated_at": utc_now(),
         "catalog": {
@@ -406,7 +418,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     header["identity_sha256"] = hashlib.sha256(canonical_bytes(header)).hexdigest()
     write_json_exclusive(output / HEADER_NAME, header)
     success = {
-        "schema": SCHEMA,
+        "schema": schema,
         "status": "PASS",
         "header_sha256": sha256_file(output / HEADER_NAME),
         "parquet_sha256": header["output"]["sha256"],
@@ -424,6 +436,10 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--stage", required=True, choices=SUPPORTED_STAGES,
+        help="explicit stage guard; cross-checked against the catalog header",
+    )
     parser.add_argument("--repo-root", required=True)
     parser.add_argument("--catalog-root", required=True)
     parser.add_argument("--sampling-config", required=True)
