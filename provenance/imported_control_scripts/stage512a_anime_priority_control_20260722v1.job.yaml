@@ -1,0 +1,56 @@
+name: evan-s512a-anime-priority-build-20260722v1
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 128
+maxRetries: 0
+command: |
+  set -euo pipefail
+  export CUDA_VISIBLE_DEVICES=""
+  export LC_ALL=C
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  CONTROL=/fsx/evan/mot_code/stage512a_anime_priority_control_20260722v1
+  SCRIPT=$CONTROL/build_anime_priority_sidecar_v1.py
+  REPO=/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop
+  CATALOG=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512a_v1
+  SAMPLING=/fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json
+  OUT=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_anime_priority_stage512a_weighted_v1_20260722
+
+  test "$(stat -c %a "$CONTROL")" = 555
+  test "$(stat -c %a "$SCRIPT")" = 444
+  test "$(stat -c %h "$SCRIPT")" = 1
+  test "$(sha256sum "$SCRIPT" | cut -d' ' -f1)" = fcfd9744d02a5b50c3d7803d3c54889c6244635d675ff91304da878cb036fc15
+  test "$(sha256sum "$REPO/training/dataline/manifest_index.py" | cut -d' ' -f1)" = 63a1a4c7bbb2baff4e6132d6c291d585e84428fd4f137be1c621bcb55858bb99
+  test "$(sha256sum "$REPO/training/dataline/config.py" | cut -d' ' -f1)" = 7541f803002d15566175b4958bae6ed09e437c9e030fed46aad9394a626fe5cb
+  test "$(sha256sum "$SAMPLING" | cut -d' ' -f1)" = 07a0b46fa9ebb840ecf7f97cc7fccc0ec68e44c47368ae13c450bcfe81a4fd48
+  test "$(sha256sum "$CATALOG/header.json" | cut -d' ' -f1)" = 51a5f0904987a751b54842633d2968ea7f6485307850858d9472319c15748d1d
+  test ! -e "$OUT" && test ! -L "$OUT"
+
+  "$PY" "$SCRIPT" \
+    --repo-root "$REPO" \
+    --catalog-root "$CATALOG" \
+    --sampling-config "$SAMPLING" \
+    --catalog-hash 370b1679e8c5670338a03ba4c6972cdbf69fa5068fc35108bf646b2d64642331 \
+    --output-root "$OUT"
+
+  test "$(stat -c %a "$OUT")" = 555
+  test "$(find "$OUT" -mindepth 1 -maxdepth 1 -type f -printf x | wc -c | tr -d '[:space:]')" = 3
+  test "$(find "$OUT" -mindepth 1 -maxdepth 1 -type d -printf x | wc -c | tr -d '[:space:]')" = 0
+  for MEMBER in anime_priority.parquet header.json _SUCCESS; do
+    test "$(stat -c %a "$OUT/$MEMBER")" = 444
+    test "$(stat -c %h "$OUT/$MEMBER")" = 1
+  done
+  "$PY" - "$OUT" <<'PY'
+  import json, pathlib, sys
+  import pyarrow.parquet as pq
+  root = pathlib.Path(sys.argv[1])
+  header = json.loads((root / "header.json").read_text())
+  success = json.loads((root / "_SUCCESS").read_text())
+  assert header["schema"] == "stage512a_anime_priority_sidecar_v1"
+  assert header["status"] == "PASS"
+  assert header["output"]["rows"] == 16294879
+  assert pq.ParquetFile(root / "anime_priority.parquet").metadata.num_rows == 16294879
+  assert success["status"] == "PASS"
+  print("ANIME_PRIORITY_BUILD_POSTCHECK_PASS", header["output"]["rows"])
+  PY
