@@ -43,10 +43,21 @@ two_object / single_object)。总分会把"多实体计数变好、单体变差"
 资产:`evaluation/reference/stage512a_final_20260728/scripts/geneval_generate_shard.py`
 + `merge_geneval_shards.py`。
 
-### 2.3 OCR exact-string —— **当前没有 scorer,需要新建**
-`evaluation/benchmarks/scorers/` 只有 `clip_score.py` 和 `tagger_score.py`。
-本阶段第一次把权威 GT 送进 prompt(S512B-13),没有 exact-string 指标就等于
-**改了文字通路却没有能证明它有效的度量**。
+### 2.3 OCR exact-string —— comparator 已有,**reader 还没有**
+`evaluation/benchmarks/scorers/ocr_exact_string.py` 已建,但要说清楚它是什么:
+它**只做比对**(GT 字符串 vs 别人给的 `rendered_text`),**不会从生成图里读字**。
+完整链路还缺 image → text 那一段:
+
+- 需要固定的 **OCR reader**。本地无 paddleocr/easyocr/tesseract,但 `/fsx/models/` 有
+  `Qwen3-VL-8B-Instruct` / `Qwen3-VL-30B-A3B-Instruct`,可以当 reader 用。
+- reader 一旦选定就是**协议的一部分**:模型路径 + 版本 + 固定 prompt + greedy 解码
+  都要钉死并进 receipt,换 reader 与换 prompt 集一样会让历史 snapshot 不可比。
+- 用 Qwen3-VL 当 reader、而被测模型的文本编码器也是 Qwen3-VL-2B —— 角色不同、规模不同,
+  不构成循环,但要在报告里写明。
+
+`evaluation/benchmarks/scorers/` 此前只有 `clip_score.py` 和 `tagger_score.py`,
+两者都分不清 "GRAND OPENING" 和 "GRAMD OPENlNG"。本阶段第一次把权威 GT 送进
+prompt(S512B-13),没有 exact-string 指标就等于**改了文字通路却没有能证明它有效的度量**。
 
 协议要求:
 - prompt 取自 **TextAtlas GT sidecar v2 的 `gt_text_raw`**,不是 normalized ——
@@ -81,18 +92,40 @@ Stage512a 的评测协议**只跑 512×512**,所以这条轴按定义**没有现
 
 | 何时 | 跑什么 | 阻塞启动? |
 |---|---|---|
-| 启动前 | 本文件 + 固定人评图集入 git + OCR scorer 写好 | **是**(只有这三项) |
+| 启动前 | 本文件 + **固定人评图集冻结入 git** | **是**(只有这两项) |
+| 第一个 snapshot(step 30,000)之前 | OCR reader 选定并跑通一次真图 | 否 |
 | 与训练并行 | Stage512a 全五轴基线(权重已冻结,随时可跑) | 否 |
 | 训练中 | 512b snapshot 五轴 | 否 |
 
-### snapshot 取点(**待确认**)
-trainer 配置是 `checkpoint_steps: 3000`、`checkpoint_keep_max: 4`、
-`checkpoint_keep_every: 60000`,所以**永久保留**的只有 60,000 / 120,000 / 180,000 /
-240,000,加最终 `last.pt`(250,000)。滚动 checkpoint 只留最近 4 个 = 12,000 步窗口。
+**我先前把 OCR scorer 也列成"阻塞启动"是把自己的标准定过头了。** 阻塞启动的只有
+"定义可比性"的东西 —— 协议和 prompt 集,因为它们必须先于**第一次打分**存在,而
+第一次打分是 step 30,000(约 61.4M 曝光)而不是 step 0。reader 有整整 30,000 步的余量,
+不该为了勾掉一个格子而赶一个没在真图上跑过的实现。
 
-建议取点:**60k / 120k / 180k / 240k / 250k**(= 122.9M / 245.8M / 368.6M / 491.5M /
-512M 曝光),外加一次早期健全性评测,用 step 6,000 左右的滚动 checkpoint —— 但那个必须
-在它滚掉之前(约 step 18,000 前)跑掉,否则就没有早期观测点了。
+### snapshot 取点(已定,Evan 2026-08-02)
+`checkpoint_keep_every: 30000` + **`checkpoint_keep_max: 8`**,所以永久保留:
 
-若希望早期观测点更从容,唯一改动是把 `checkpoint_keep_every` 调小(例如 30,000),
-这要在启动前决定,启动后再改不会追溯保留已经滚掉的 checkpoint。
+| step | 曝光 |
+|---:|---:|
+| 30,000 | 61.4M |
+| 60,000 | 122.9M |
+| 90,000 | 184.3M |
+| 120,000 | 245.8M |
+| 150,000 | 307.2M |
+| 180,000 | 368.6M |
+| 210,000 | 430.1M |
+| 240,000 | 491.5M |
+| 250,000 (`last.pt`) | 512M |
+
+⚠️ **`keep_max` 必须跟着 `keep_every` 一起改。** `training/checkpoint.py:193` 是
+`snaps[:-keep_max]`,对**所有** `step_*.pt` 一起剪,`keep_max` 是periodic 快照的**总数上限**,
+不是"另一个滚动窗口"。继承下来的 60000/4 是**碰巧**自洽的(250,000 步下 60000 正好produce
+4 个);把 keep_every 减半到 30000 会produce 8 个,若 keep_max 还留 4,最早的四个会被删掉,
+**最早幸存的快照变成 step 150,000,比原来的 60,000 还晚** —— 正好反了。
+2026-08-02 我第一版就是这么写的,由外部审查抓回。
+
+快照是 `checkpoint_keep_format: weights_ema`,约 13 GB 一个、**不可续训**(无 optimizer),
+只供 eval / 回滚;可续训的副本始终是 `last.pt`。8 × 13 GB = 104 GB。
+
+早期(step < 30,000)只有滚动 checkpoint,`checkpoint_steps: 3000` × `keep_max` ⇒ 窗口有限;
+想要早期健全性评测就必须在它滚掉之前跑。

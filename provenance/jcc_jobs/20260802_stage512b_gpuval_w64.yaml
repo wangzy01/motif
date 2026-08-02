@@ -68,19 +68,22 @@ command: |
   [ -n "${EXPECTED_COMMIT:-}" ] || { echo "FATAL: EXPECTED_COMMIT unset"; exit 43; }
   bash scripts/jcc_preflight.sh "$EXPECTED_COMMIT" "$REPO"
 
-  # The source checkpoint is a MUTABLE path -- the Stage512a job would overwrite it if
-  # relaunched -- so the digest is verified here, on every node, not trusted from a
-  # comment. Reading 26 GB eight times is a few minutes against a 250,000-step run.
   test -f "$INIT" || { echo "FATAL: init_from missing"; exit 43; }
-  GOT=$(sha256sum "$INIT" | awk '{print $1}')
-  [ "$GOT" = "$INIT_SHA" ] || { echo "FATAL: init_from sha drift: $GOT != $INIT_SHA"; exit 44; }
-  echo "init_from sha verified on node $NODE_RANK"
 
-  # Create-once, expressed as "no prior training state", which is the property that
-  # matters and the only form of the check that works from eight nodes at once:
-  # resume=true SILENTLY resumes a stale last.pt instead of initialising from 512a.
-  test ! -e "$CKPT/last.pt" || { echo "FATAL: $CKPT/last.pt exists; pick a fresh dir"; exit 45; }
-  mkdir -p "$CKPT"
+  # Create-once as an ATOMIC CLAIM, not an existence test. `test ! -e last.pt` would
+  # happily reuse the half-written directory a previous failed attempt left behind, and
+  # then resume=true would silently continue from whatever was in it instead of
+  # initialising from Stage512a. `mkdir` without -p fails if the directory exists, which
+  # is the claim: exactly one node creates it, a retry must use a new name.
+  if [ "$NODE_RANK" = 0 ]; then
+    mkdir "$CKPT" 2>/dev/null || { echo "FATAL: $CKPT already exists; use a fresh name"; exit 45; }
+    # The source checkpoint is a MUTABLE path -- the Stage512a job would overwrite it if
+    # relaunched -- so the digest is verified rather than trusted from a comment. Node 0
+    # only: all eight read the same file, so hashing 26 GB eight times buys nothing.
+    GOT=$(sha256sum "$INIT" | awk '{print $1}')
+    [ "$GOT" = "$INIT_SHA" ] || { echo "FATAL: init_from sha drift: $GOT != $INIT_SHA"; exit 44; }
+    echo "init_from sha verified: $GOT"
+  fi
   RES=$CKPT
 
   RDZV=$RES/rdzv.$JOBTAG.addr
@@ -116,24 +119,46 @@ command: |
      sleep 60
    done) > "$RES/nodemon.n$NODE_RANK.$STAMP.log" 2>&1 &
 
-  set +e
-  "$PY" -m torch.distributed.run \
-    --nnodes "$NNODES" --nproc-per-node 8 --node-rank "$NODE_RANK" \
-    --master-addr "$MASTER_ADDR" --master-port "$PORT" \
-    train.py --config "$CFG" \
-    trainer.max_steps=$STEPS \
-    trainer.checkpoint_dir="$CKPT" \
-    trainer.checkpoint_steps=100 \
-    trainer.checkpoint_keep_max=2 \
-    trainer.checkpoint_keep_every=100 \
-    2>&1 | tee "$RES/train.n$NODE_RANK.$STAMP.log"
-  PIPE_RC=("${PIPESTATUS[@]}")
-  set -e
-  test "${PIPE_RC[1]}" -eq 0 || exit "${PIPE_RC[1]}"
-  RC=${PIPE_RC[0]}
-  test "$RC" -eq 0 || { echo "FATAL: training exited $RC"; exit "$RC"; }
+  # TWO PHASES, same total step count. A single 200-step run proves the trainer can
+  # SAVE; it never proves it can RESUME -- and resume is what every JCC retry of a
+  # 250,000-step run depends on, since trainer.resume=true is the whole recovery story.
+  # Phase A initialises from Stage512a and stops at 100; phase B is relaunched with no
+  # other change and must pick up at 100, reloading model, optimizer, scheduler and EMA
+  # and seeking the loader to the right plan step. Free: the GPU time is identical.
+  run_phase () {
+    local phase=$1 upto=$2
+    echo "===== phase $phase -> step $upto ====="
+    set +e
+    "$PY" -m torch.distributed.run \
+      --nnodes "$NNODES" --nproc-per-node 8 --node-rank "$NODE_RANK" \
+      --master-addr "$MASTER_ADDR" --master-port "$PORT" \
+      train.py --config "$CFG" \
+      trainer.max_steps=$upto \
+      trainer.checkpoint_dir="$CKPT" \
+      trainer.checkpoint_steps=50 \
+      trainer.checkpoint_keep_max=2 \
+      trainer.checkpoint_keep_every=100 \
+      2>&1 | tee "$RES/train.$phase.n$NODE_RANK.$STAMP.log"
+    local pipe=("${PIPESTATUS[@]}")
+    set -e
+    test "${pipe[1]}" -eq 0 || exit "${pipe[1]}"
+    test "${pipe[0]}" -eq 0 || { echo "FATAL: phase $phase exited ${pipe[0]}"; exit "${pipe[0]}"; }
+  }
+
+  run_phase A $((STEPS / 2))
+  test -f "$CKPT/last.pt" || { echo "FATAL: phase A wrote no last.pt"; exit 46; }
+  run_phase B "$STEPS"
 
   [ "$NODE_RANK" = 0 ] || { echo "node $NODE_RANK done"; exit 0; }
+
+  # The resume assertion, made against the log line train.py actually prints. Without
+  # it, phase B silently re-initialising from Stage512a would look identical to a
+  # successful resume in every downstream metric.
+  RESUMED=$(grep -c "resumed from .* at step $((STEPS / 2))" "$RES"/train.B.n0.*.log || true)
+  [ "${RESUMED:-0}" -ge 1 ] || {
+    echo "FATAL: phase B did not resume at step $((STEPS / 2)); it re-initialised instead"
+    grep -E "resumed from|init_from" "$RES"/train.B.n0.*.log | head; exit 46; }
+  echo "resume verified: phase B continued from step $((STEPS / 2))"
 
   echo "=== postcheck (rank 0) ==="
   "$PY" - "$RES" "$A512_METRICS" "$STEPS" <<'PYEOF'

@@ -28,7 +28,28 @@ model:
   timestep_multiplier: 1.0
   text_max_length: 512
   cfg_dropout_prob: 0.1
-  text_rich_cfg_dropout_prob: 0.0
+  # 0.1, NOT the inherited 0.0 -- and this changes nothing at runtime. It is a
+  # correction of a config that was describing an intention rather than a behaviour.
+  #
+  # MoTT2IModel.forward reads batch.get("text_rich") and would apply this rate to
+  # text-bearing rows. No data path emits text_rich: the offline loader yields
+  # {prompts, pixels, cfg_keep} and so does the streaming one. The key has therefore
+  # been inert since it was written, here and in Stage512a, and every TextAtlas row has
+  # always taken the ordinary cfg_dropout_prob. Writing 0.0 told the next reader that
+  # text samples are protected. They are not.
+  #
+  # Decided 2026-08-02 (S512B-18) to leave the BEHAVIOUR alone rather than wire
+  # text_rich up. Adding GT to the prompt does not argue for protecting these rows:
+  # dropout replaces the whole prompt with "", so what the prompt contained is
+  # irrelevant to the dropped 10%, and GT only strengthens the conditional branch in
+  # the other 90%. Excluding all of TextAtlas from the unconditional distribution would
+  # also be its own unvalidated change -- CFG trains the unconditional branch on the
+  # full image distribution by design. Scale: TextAtlas is 5% of 512M, so the dropped
+  # exposures are 0.5% of the run and the dropped GT-bearing ones about 0.24%.
+  #
+  # If OCR exact-string comes back poor, the experiment is 10%/5%/0% on the ~47% of
+  # TextAtlas rows that HAVE authoritative GT -- not blanket protection for the domain.
+  text_rich_cfg_dropout_prob: 0.1
   prompt_template:
     enabled: true
   gradient_checkpointing: true
@@ -222,15 +243,24 @@ trainer:
   dataline_metrics_every: 50
   checkpoint_steps: 3000
   # 30000, not the inherited 60000 (Evan, 2026-08-02). This is an EVALUATION decision,
-  # not a storage one: keep_every is the only thing that decides which steps still exist
-  # when someone wants to score them. keep_max 4 at checkpoint_steps 3000 gives a rolling
-  # window of just 12,000 steps, so at 60000 the first permanently scoreable point is
-  # step 60,000 = 122.9M exposures and everything before it is gone. 30000 gives
-  # 30k/60k/.../240k -- one roughly every 61M exposures -- for about 52 GB more.
-  # It cannot be fixed later: raising it after launch does not bring back a checkpoint
-  # that has already rolled off.
+  # not a storage one: keep_every decides which steps still exist when someone wants to
+  # score them, and it cannot be fixed after the fact -- raising it later does not bring
+  # back a checkpoint that has already rolled off.
+  #
+  # keep_max MUST be raised with it. checkpoint.py:193 prunes with snaps[:-keep_max]
+  # over ALL step_*.pt, so keep_max is a cap on the total number of periodic snapshots,
+  # not a separate rolling window. The inherited pair was self-consistent by accident:
+  # 60000 over 250,000 steps produces exactly 4 snapshots, so keep_max 4 pruned nothing.
+  # Halving keep_every to 30000 produces 8, and leaving keep_max at 4 would have deleted
+  # the first four -- the earliest surviving snapshot would become step 150,000, LATER
+  # than the 60,000 it was meant to improve on. Exactly backwards.
+  #
+  # 8 = the count of multiples of 30,000 below 250,000 (30k..240k, one per ~61M
+  # exposures). Snapshots are checkpoint_keep_format weights_ema, about 13 GB each and
+  # NOT resumable -- they are for eval and rollback; last.pt is the resumable copy.
+  # 8 x 13 GB = 104 GB, up from 52 GB.
   checkpoint_keep_every: 30000
-  checkpoint_keep_max: 4
+  checkpoint_keep_max: 8
   checkpoint_keep_format: weights_ema
   # PLACEHOLDER name, but the DIRECTORY IDENTITY RULE is not a placeholder: this must be
   # a fresh, create-once directory that no prior run has ever written. This block was
