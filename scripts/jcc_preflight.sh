@@ -53,15 +53,11 @@ if [ -n "$dirty" ]; then
 fi
 echo "tree            : clean"
 
-# Uses local remote-tracking refs only -- no network, which matters because compute
-# nodes have no git credentials.  Advisory: an unpushed commit still runs, it just
-# means the artifact's provenance points at something only this pod can resolve.
-if [ -z "$(git branch -r --contains HEAD 2>/dev/null)" ]; then
-  echo "tree            : WARNING -- HEAD is not contained in any remote-tracking"
-  echo "                  branch.  The artifact will reference a commit that is not"
-  echo "                  pushed; push before treating its provenance as reviewable."
-else
-  echo "pushed          : yes ($(git branch -r --contains HEAD | tr -d ' ' | paste -sd, -))"
-fi
+# Whether HEAD is pushed is NOT checkable here and the gate does not pretend otherwise.
+# Compute nodes have no git credentials, so `git ls-remote` cannot run; and this clone
+# is --single-branch, so `git branch -r --contains HEAD` is empty for every branch but
+# the cloned one and would fire a warning on every single job. Report the branch and
+# leave the push check to the submitting side.
+echo "branch          : $(git rev-parse --abbrev-ref HEAD) (push state not checkable from a compute node)"
 
 echo "=== preflight: OK ==="
