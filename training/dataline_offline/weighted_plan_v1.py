@@ -37,6 +37,22 @@ from training.dataline_offline.weighted_streams_v1 import (
 PLAN_FORMAT = "offline_arb_weighted_band_plan_v1"
 PLANNER_ALGORITHM_VERSION = "offline_arb_weighted_band_planner_v1_20260722"
 CONTRACT_SCHEMA = "stage512a_weighted_plan_contract_v1"
+# One schema string per stage.  Not a single string with a stage field beside it:
+# the schema names the artifact, so a 512b contract that still called itself
+# stage512a_... would be indistinguishable from a 512a one in any receipt that
+# records only the schema.  CONTRACT_SCHEMA is kept as the 512a name because it
+# is exported and is part of the frozen Stage512a ABI.
+CONTRACT_SCHEMAS = {
+    "512a": CONTRACT_SCHEMA,
+    "512b": "stage512b_weighted_plan_contract_v1",
+}
+# (max_exposure_images, total_steps, global_batch) that each stage is allowed to
+# plan.  Refusing anything else is what stops a mis-parameterised planner_input
+# from quietly producing a plan for the wrong horizon.
+FORMAL_HORIZONS = {
+    "512a": (256_000_000, 125_000, 2048),
+    "512b": (512_000_000, 250_000, 2048),
+}
 BLOCK_DATASETS = (
     "bucket_of_step",
     "item_row",
@@ -113,6 +129,7 @@ class WeightedContract:
     raw: dict[str, Any]
     source_path: Path
     source_sha256: str
+    stage: str
     catalog_root: Path
     catalog_hash: str
     catalog_header_sha256: str
@@ -150,8 +167,17 @@ def load_weighted_contract(path: str | os.PathLike[str]) -> WeightedContract:
             f"weighted contract key-set drift: missing={sorted(required-set(raw))}, "
             f"extra={sorted(set(raw)-required)}"
         )
-    if raw["schema"] != CONTRACT_SCHEMA or raw["stage"] != "512a" or raw["image_size"] != 512:
-        raise WeightedPlanError("weighted contract stage/schema mismatch")
+    stage = str(raw["stage"])
+    if (
+        stage not in CONTRACT_SCHEMAS
+        or raw["schema"] != CONTRACT_SCHEMAS[stage]
+        or raw["image_size"] != 512
+    ):
+        raise WeightedPlanError(
+            f"weighted contract stage/schema mismatch: stage={stage!r}, "
+            f"schema={raw['schema']!r}, expected schema="
+            f"{CONTRACT_SCHEMAS.get(stage, '<unsupported stage>')!r}"
+        )
     catalog_root = Path(str(raw["catalog_root"])).resolve(strict=True)
     anime_root = Path(str(raw["anime_priority_root"])).resolve(strict=True)
     if not catalog_root.is_dir() or catalog_root.is_symlink():
@@ -187,6 +213,7 @@ def load_weighted_contract(path: str | os.PathLike[str]) -> WeightedContract:
         raw=raw,
         source_path=source,
         source_sha256=_sha256_file(source),
+        stage=stage,
         catalog_root=catalog_root,
         catalog_hash=_lower_sha(raw["catalog_hash"], "catalog_hash"),
         catalog_header_sha256=_lower_sha(
@@ -218,8 +245,14 @@ def _validate_bound_inputs(contract: WeightedContract) -> None:
     catalog_header = _read_json(catalog_header_path)
     if catalog_header.get("catalog_hash") != contract.catalog_hash:
         raise WeightedPlanError("catalog hash drift")
-    if catalog_header.get("stage") != "512a" or catalog_header.get("image_size") != 512:
-        raise WeightedPlanError("catalog stage identity drift")
+    if (
+        catalog_header.get("stage") != contract.stage
+        or catalog_header.get("image_size") != 512
+    ):
+        raise WeightedPlanError(
+            f"catalog stage identity drift: contract={contract.stage!r}, "
+            f"catalog={catalog_header.get('stage')!r}"
+        )
     files = catalog_header.get("files")
     if not isinstance(files, dict) or set(files) != set(EXPECTED_DOMAINS):
         raise WeightedPlanError("catalog file authority key-set drift")
@@ -779,9 +812,20 @@ def build_weighted_plan(
 ) -> dict[str, Any]:
     cfg = base.load_planner_input(planner_input)
     contract = load_weighted_contract(weighted_contract)
-    if cfg.stage != "512a" or cfg.image_size != 512 or cfg.format_version != 2:
-        raise WeightedPlanError("weighted planner requires Stage512a format-v2 input")
-    formal = cfg.M == 256_000_000 and cfg.total_steps == 125_000 and cfg.G == 2048
+    if cfg.stage not in FORMAL_HORIZONS or cfg.image_size != 512 or cfg.format_version != 2:
+        raise WeightedPlanError(
+            "weighted planner requires a format-v2 input for one of "
+            f"{sorted(FORMAL_HORIZONS)}; got stage={cfg.stage!r}, "
+            f"image_size={cfg.image_size}, format_version={cfg.format_version}"
+        )
+    # The contract and the planner input must agree on the stage, or the plan would
+    # bind a 512b catalog under a 512a horizon (or vice versa) with every individual
+    # check still passing.
+    if contract.stage != cfg.stage:
+        raise WeightedPlanError(
+            f"stage drift: contract={contract.stage!r}, planner_input={cfg.stage!r}"
+        )
+    formal = (cfg.M, cfg.total_steps, cfg.G) == FORMAL_HORIZONS[cfg.stage]
     canary = (
         allow_canary
         and "canary" in cfg.plan_id

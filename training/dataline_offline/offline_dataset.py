@@ -53,6 +53,7 @@ from training.dataline.complete_dataset import (
     _ANIME_CAP_KEYS,
     _MONET_SRC_COL,
 )
+from training.dataline import anchors_v1
 from training.dataline.config import BANDS, load_sampling_config
 from training.dataline.image_fetch import (
     decode_rgb,
@@ -237,6 +238,19 @@ _OFFLINE_STAGE_IDENTITIES = {
         requires_nl=False,
         anime_nl_filter_applied=False,
     ),
+    # Stage512b-real: same resolution and eligibility strings as 512a, but
+    # bucket_mode=anchors_v1 -- 13 fixed anchors instead of 361 adaptive buckets.
+    # The geometry difference is carried by bucket_table_hash and by the extra
+    # anchors keys in the assignment payload, not by these fields.
+    "512b": _OfflineStageIdentity(
+        stage="512b",
+        image_size=512,
+        eligibility="elig_512",
+        assignment_eligibility="elig_512",
+        legacy_artifacts_allowed=False,
+        requires_nl=False,
+        anime_nl_filter_applied=False,
+    ),
 }
 
 
@@ -405,7 +419,15 @@ def _assignment_identity_payload(
         "fold_map": list(header.get("fold_map", [])),
         "square_only_domains": list(header.get("square_only_domains", [])),
         "square_bucket_idx": header.get("square_bucket_idx"),
-        "assignment": "phase3a_vectorized_with_production_scalar_fallback_v1",
+        # Mirrors phase5_build_catalog.assignment_hash_payload.  The two must agree
+        # byte for byte after canonical JSON, so any change here needs the same
+        # change there -- that equality is the only thing binding a loaded catalog
+        # to the geometry that produced it.
+        "assignment": (
+            "anchors_v1_feasible_argmax_retention_v1"
+            if _header_bucket_mode(header) == anchors_v1.BUCKET_MODE
+            else "phase3a_vectorized_with_production_scalar_fallback_v1"
+        ),
     }
     if identity.stage == "256":
         payload["eligibility"] = identity.assignment_eligibility
@@ -418,7 +440,43 @@ def _assignment_identity_payload(
                 "requires_nl": requires_nl,
             }
         )
+    if _header_bucket_mode(header) == anchors_v1.BUCKET_MODE:
+        # Every value here is derived from the HEADER, never from the running config.
+        # That distinction is the whole point: recomputing the geometry from whatever
+        # config this process was launched with would make a mismatched config
+        # silently self-consistent, which is exactly what this hash exists to catch.
+        #
+        # phase5 does not store anchor_identity at the header top level -- it only
+        # feeds it into the hash -- so it is rebuilt here from the multi_ar_params the
+        # header does record.  anchors_v1.identity() is therefore part of the ABI: a
+        # change to its text invalidates every catalog, which is correct, because its
+        # text is a description of the assignment semantics.
+        mar = header.get("inputs", {}).get("multi_ar_params", {})
+        gate = mar.get("area_gate")
+        payload["bucket_mode"] = anchors_v1.BUCKET_MODE
+        payload["anchor_identity"] = anchors_v1.identity(
+            crop_loss_max=mar["crop_loss_max"], area_gate=gate
+        )
+        payload["source_area_gate"] = None if gate is None else int(gate)
+        payload["crop_loss_max"] = float(mar["crop_loss_max"])
+        payload["crop_loss_max_by_domain"] = mar.get("crop_loss_max_by_domain")
     return payload
+
+
+def _header_bucket_mode(header: Mapping[str, Any]) -> str | None:
+    """The bucket mode a catalog was built with.
+
+    phase5 records it under ``eligibility_audit`` rather than at the top level,
+    because in anchors mode the eligibility rule *is* the geometry (source area gate
+    plus a feasible-anchor test, no elig_* column at all).  Reading it through one
+    helper keeps that quirk in a single place.
+    """
+    audit = header.get("eligibility_audit")
+    if isinstance(audit, Mapping):
+        mode = audit.get("bucket_mode")
+        if isinstance(mode, str):
+            return mode
+    return None
 
 
 def _validated_gpic_source_consistency_mode(value: Any) -> str:
@@ -1676,6 +1734,34 @@ class OfflineExactDataset:
         inputs = header.get("inputs")
         if not isinstance(inputs, Mapping):
             raise OfflineLoaderError("catalog header inputs must be an object")
+
+        # anchors_v1 geometry, captured from the CATALOG so runtime verification uses
+        # the thresholds the rows were admitted under -- not whatever this process was
+        # configured with.  The assignment_hash check above already proved the header
+        # describes the geometry it claims, so these values are trustworthy by the
+        # time we read them.
+        self._anchors_mode = _header_bucket_mode(header) == anchors_v1.BUCKET_MODE
+        self._anchors_crop_loss: dict[str, float] = {}
+        if self._anchors_mode:
+            mar = inputs.get("multi_ar_params")
+            if not isinstance(mar, Mapping) or "crop_loss_max" not in mar:
+                raise OfflineLoaderError(
+                    "anchors_v1 catalog header is missing inputs.multi_ar_params.crop_loss_max"
+                )
+            by_domain = mar.get("crop_loss_max_by_domain") or {}
+            for domain in self.domains:
+                self._anchors_crop_loss[domain] = float(
+                    by_domain.get(domain, mar["crop_loss_max"])
+                )
+            if tuple(self.buckets) != tuple(
+                (h, w) for w, h in anchors_v1.ANCHORS_V1_WH
+            ):
+                raise OfflineLoaderError(
+                    "anchors_v1 catalog bucket table does not match ANCHORS_V1_WH; "
+                    "verify_binding indexes ANCHORS_V1_WH by bucket_idx, so a "
+                    "reordered table would verify every row against the wrong anchor"
+                )
+
         sampling_sha = inputs.get("sampling_config_sha256")
         if not isinstance(sampling_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sampling_sha):
             raise OfflineLoaderError("catalog inputs.sampling_config_sha256 is missing/invalid")
@@ -3891,25 +3977,43 @@ class OfflineExactDataset:
                 # resize_u8_to_bucket's scale = max(W/w0, H/h0) enlarges without
                 # ever refusing, so nothing downstream would catch it.
                 #
-                # The non-redundant cases are handled above: a decoded size that
-                # disagrees with the catalog (EXIF orientation being the
-                # realistic cause) takes the `if` branch, where non-anime
-                # domains already hard-fail and anime is bound by
-                # _validate_anime_source_bound_native_mismatch.
-                #
-                # Under anchors_v1 the feasible set is exactly w >= W_k and
-                # h >= H_k, so this pair of checks is the runtime half of the
-                # geometry contract -- the half anchors_v1.verify_binding()
-                # documents itself as providing ("零上采样保证只能落在这个校验上")
-                # while having no production caller.  Verified safe against the
-                # frozen Stage512a catalog: 0 of 70,367,899 rows would trip
-                # either check, max required scale exactly 1.0000.
+                # Verified safe against the frozen Stage512a catalog: 0 of
+                # 70,367,899 rows would trip it, max required scale 1.0000.
                 raise OfflineLoaderError(
                     f"catalog geometry would upsample step={planned.step},"
                     f"rank={self.rank},slot={planned.slot},"
                     f"row_id={planned.row_id}: "
                     f"native={actual_w}x{actual_h}, target={target_w}x{target_h}"
                 )
+            if self._anchors_mode:
+                # THE runtime geometry gate under anchors_v1, and the one
+                # anchors_v1.verify_binding() documents itself as providing
+                # ("零上采样保证只能落在这个校验上") while having had no production
+                # caller at all.  Deliberately placed AFTER the branch above so it
+                # sees the DECODED size in every case, including the anime
+                # tolerated-mismatch path -- that path is exactly where a stale
+                # manifest or an EXIF rotation shows up, and it is the case the
+                # cheap catalog-side check structurally cannot see.
+                #
+                # Stronger than the size comparison above in two ways: it also
+                # re-derives crop_loss against the per-domain threshold the catalog
+                # was built with, and it uses the identical integer test as
+                # assign_anchor (den*lo >= num*hi), so a row can never be accepted
+                # here that offline assignment would have rejected.
+                try:
+                    anchors_v1.verify_binding(
+                        actual_w,
+                        actual_h,
+                        int(planned.bucket_idx),
+                        crop_loss_max=self._anchors_crop_loss[planned.domain],
+                        context=(
+                            f"step={planned.step},rank={self.rank},"
+                            f"slot={planned.slot},row_id={planned.row_id},"
+                            f"domain={planned.domain}"
+                        ),
+                    )
+                except anchors_v1.AnchorGeometryError as exc:
+                    raise OfflineLoaderError(f"anchors_v1 binding rejected: {exc}") from exc
             # This remains the loader's only resize/crop operation.  Prepare-
             # ahead merely overlaps the same serialized image math with GPU
             # compute; it never permits concurrent native work within a rank.

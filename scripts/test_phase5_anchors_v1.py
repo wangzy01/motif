@@ -493,6 +493,96 @@ def test_stride_shard_selection() -> None:
     check("an unknown mode is refused", ok, detail)
 
 
+def test_loader_reproduces_assignment_hash() -> None:
+    """The catalog-to-loader binding, checked against real frozen artifacts.
+
+    This is the check that makes a 512b catalog loadable at all, and the one that
+    must NOT regress for 256/512a: their hashes are frozen and any drift in the
+    payload shape silently unloads them.
+    """
+    import training.dataline_offline.offline_dataset as OD
+
+    base = "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop"
+    cases = [
+        ("512b", f"{base}/offline_arb_catalog_stage512b_v1/header.json"),
+        ("512a", f"{base}/offline_arb_catalog_stage512a_v1/header.json"),
+        ("256", f"{base}/offline_arb_catalog_v1/header.json"),
+    ]
+    for stage, path in cases:
+        if not os.path.exists(path):
+            check(f"{stage} catalog present to test against", False, path)
+            continue
+        header = json.load(open(path))
+        payload = OD._assignment_identity_payload(
+            header,
+            identity=OD._OFFLINE_STAGE_IDENTITIES[stage],
+            requires_nl=bool(header.get("requires_nl", stage == "256")),
+        )
+        got = OD._canonical_sha256(payload)
+        check(f"{stage}: loader reproduces the catalog assignment_hash",
+              got == header["assignment_hash"],
+              f"got {got[:16]} want {header['assignment_hash'][:16]}")
+
+    # And it must be the ANCHORS payload for 512b, not the legacy one -- a payload
+    # that happened to hash correctly by taking the legacy branch would be a
+    # coincidence worth catching.
+    h512b = json.load(open(f"{base}/offline_arb_catalog_stage512b_v1/header.json"))
+    p512b = OD._assignment_identity_payload(
+        h512b, identity=OD._OFFLINE_STAGE_IDENTITIES["512b"], requires_nl=False)
+    check("512b takes the anchors branch",
+          p512b["assignment"] == "anchors_v1_feasible_argmax_retention_v1",
+          p512b["assignment"])
+    check("512b payload carries the per-domain tightening",
+          p512b.get("crop_loss_max_by_domain") == {"textatlas": 0.12},
+          repr(p512b.get("crop_loss_max_by_domain")))
+    h512a = json.load(open(f"{base}/offline_arb_catalog_stage512a_v1/header.json"))
+    p512a = OD._assignment_identity_payload(
+        h512a, identity=OD._OFFLINE_STAGE_IDENTITIES["512a"], requires_nl=False)
+    check("512a still takes the legacy branch and gains no anchors keys",
+          p512a["assignment"] == "phase3a_vectorized_with_production_scalar_fallback_v1"
+          and "bucket_mode" not in p512a, sorted(p512a))
+
+
+def test_weighted_planner_stage_widening() -> None:
+    from training.dataline_offline import weighted_plan_v1 as W
+
+    check("both stages have a distinct contract schema",
+          W.CONTRACT_SCHEMAS["512a"] != W.CONTRACT_SCHEMAS["512b"]
+          and W.CONTRACT_SCHEMAS["512a"] == W.CONTRACT_SCHEMA,
+          repr(W.CONTRACT_SCHEMAS))
+    check("512b horizon is 512M / 250k steps @ 2048",
+          W.FORMAL_HORIZONS["512b"] == (512_000_000, 250_000, 2048))
+    check("512a horizon is untouched",
+          W.FORMAL_HORIZONS["512a"] == (256_000_000, 125_000, 2048))
+
+    frozen = ("/fsx/evan/mot_code/stage512a_weighted_formal_control_20260722v1"
+              "/weighted_contract_stage512a_v1.json")
+    if os.path.exists(frozen):
+        c = W.load_weighted_contract(frozen)
+        check("the frozen 512a contract still loads, with an unchanged digest",
+              c.stage == "512a"
+              and c.source_sha256 == "c228f8b8400c4f96033431816b650d6e7093b3bf8e164018d22e694c60b96c38",
+              c.source_sha256[:16])
+        check("its band weights are the locked band_mix_real",
+              [str(x) for x in c.band_weights] == ["0.18", "0.27", "0.15", "0.40"])
+
+    # A contract whose schema does not match its stage must be refused: the schema
+    # is what a receipt records, so a 512b contract calling itself 512a would be
+    # indistinguishable from the real thing.
+    import tempfile
+    good = json.load(open(frozen)) if os.path.exists(frozen) else None
+    if good:
+        bad = dict(good); bad["stage"] = "512b"          # schema still says 512a
+        fd = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(bad, fd); fd.close()
+        try:
+            W.load_weighted_contract(fd.name)
+            ok, detail = False, "accepted a stage/schema mismatch"
+        except W.WeightedPlanError as exc:
+            ok, detail = "stage/schema mismatch" in str(exc), str(exc)[:70]
+        check("a stage/schema mismatch is refused", ok, detail)
+
+
 def main() -> int:
     for fn in [v for k, v in sorted(globals().items()) if k.startswith("test_")]:
         print(f"\n{fn.__name__}")
