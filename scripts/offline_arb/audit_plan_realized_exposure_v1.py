@@ -17,6 +17,18 @@ so at cluster_beta=0.2 the DOMAIN-level realized mass was measured at L1 0.0767
 from target (laion -7.9%, megalith10m +18.6%); at beta=0 it reproduces the table
 exactly.  Evan accepted that drift on 2026-08-02.  What this answers is whether
 per-cell normalisation makes it materially worse.
+
+ANSWER, measured over the built plan: it does, and it also REVERSES the direction for
+four of five sources -- laion -7.9% -> +3.6%, megalith10m +18.6% -> -26.2%,
+commoncatalog +12.3% -> -29.5%, coyo -3.5% -> +8.3%.  L1 goes 0.0767 -> 0.1240.  The
+driver is band eligibility, not the cluster factor: band_mix_real puts 18% of real mass
+in T1, but megalith10m is 81.15% T4 / 0.00% T1 and commoncatalog is 52.10% T2 / 1.00%
+T1, so neither can fill T1 and the per-cell normalisation redistributes to the sources
+that can.
+
+Write findings NEXT TO THE PLAN, never into the sampling config.  The catalog binds
+inputs.sampling_config_sha256 and the loader refuses a runtime config whose digest
+differs, so annotating that file -- even a comment field -- unbinds the catalog.
 """
 
 from __future__ import annotations
