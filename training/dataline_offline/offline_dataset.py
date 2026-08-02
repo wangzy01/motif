@@ -2261,6 +2261,21 @@ class OfflineExactDataset:
                     f"invalid catalog native size row_id={item.row_id}: "
                     f"{row['width']}x{row['height']}"
                 )
+            # Zero upsampling, checked against the catalog before any payload is
+            # fetched.  Every existing check here is identity/self-consistency
+            # (bucket_idx matches the plan, domain matches, sizes are positive);
+            # none of them compares the native size against the bucket it was
+            # assigned to.  A catalog that is hash-self-consistent but
+            # geometrically wrong therefore reaches resize_u8_to_bucket, whose
+            # scale = max(W/w0, H/h0) enlarges without ever refusing.
+            bucket_h, bucket_w = self.buckets[item.bucket_idx]
+            if int(row["width"]) < int(bucket_w) or int(row["height"]) < int(bucket_h):
+                raise OfflineLoaderError(
+                    f"catalog geometry would upsample row_id={item.row_id}, "
+                    f"domain={domain}, bucket={item.bucket_idx}: "
+                    f"catalog={row['width']}x{row['height']}, "
+                    f"bucket={bucket_w}x{bucket_h}"
+                )
             if domain in self.square_only_domains and item.bucket_idx != self.square_bucket_idx:
                 raise OfflineLoaderError(
                     f"square-only violation row_id={item.row_id}, domain={domain}, "
@@ -3865,6 +3880,35 @@ class OfflineExactDataset:
                     f"catalog={expected_w}x{expected_h}, "
                     f"target={target_w}x{target_h}",
                     flush=True,
+                )
+            elif actual_w < target_w or actual_h < target_h:
+                # Defence in depth, and deliberately redundant: decoded ==
+                # catalog here, and _prepare_window already refused any row
+                # whose catalog size is below its bucket, so this cannot fire
+                # unless that check was bypassed or self.buckets was rebound
+                # between the two points.  It is cheap and it makes the
+                # invariant local to the one place that actually resizes --
+                # resize_u8_to_bucket's scale = max(W/w0, H/h0) enlarges without
+                # ever refusing, so nothing downstream would catch it.
+                #
+                # The non-redundant cases are handled above: a decoded size that
+                # disagrees with the catalog (EXIF orientation being the
+                # realistic cause) takes the `if` branch, where non-anime
+                # domains already hard-fail and anime is bound by
+                # _validate_anime_source_bound_native_mismatch.
+                #
+                # Under anchors_v1 the feasible set is exactly w >= W_k and
+                # h >= H_k, so this pair of checks is the runtime half of the
+                # geometry contract -- the half anchors_v1.verify_binding()
+                # documents itself as providing ("零上采样保证只能落在这个校验上")
+                # while having no production caller.  Verified safe against the
+                # frozen Stage512a catalog: 0 of 70,367,899 rows would trip
+                # either check, max required scale exactly 1.0000.
+                raise OfflineLoaderError(
+                    f"catalog geometry would upsample step={planned.step},"
+                    f"rank={self.rank},slot={planned.slot},"
+                    f"row_id={planned.row_id}: "
+                    f"native={actual_w}x{actual_h}, target={target_w}x{target_h}"
                 )
             # This remains the loader's only resize/crop operation.  Prepare-
             # ahead merely overlaps the same serialized image math with GPU
