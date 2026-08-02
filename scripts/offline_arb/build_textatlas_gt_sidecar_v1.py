@@ -175,11 +175,23 @@ def build(catalog_root: Path, output_root: Path, batch_rows: int) -> dict:
         "missing_by_subset": dict(missing),
         "rows_by_source": dict(by_source),
         "subset_spread": dict(seen_subsets),
+        # min/p50/p99/max alone hides the shape of the tail: the first build read
+        # p99 477 next to max 72,019, which is unreadable without knowing whether the
+        # tail is one row or a hundred thousand.  It is a handful -- some
+        # CleanTextSynth images render arXiv-style table dumps -- but the header has
+        # to say so.  Over-threshold COUNTS are the field that actually answers
+        # "will this truncate at tokenization".
         "gt_length_chars": {
             "min": int(lengths.min()) if lengths.size else None,
             "p50": int(np.percentile(lengths, 50)) if lengths.size else None,
+            "p90": int(np.percentile(lengths, 90)) if lengths.size else None,
             "p99": int(np.percentile(lengths, 99)) if lengths.size else None,
+            "p99_9": int(np.percentile(lengths, 99.9)) if lengths.size else None,
+            "p99_99": int(np.percentile(lengths, 99.99)) if lengths.size else None,
             "max": int(lengths.max()) if lengths.size else None,
+            "over": {
+                str(t): int((lengths > t).sum()) for t in (512, 1000, 2000, 8000)
+            },
         },
         "output": {"file": parquet_path.name, "sha256": digest, "rows": len(out_rows)},
         "excluded_subsets_reason": {
