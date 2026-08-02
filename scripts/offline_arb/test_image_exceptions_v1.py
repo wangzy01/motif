@@ -30,12 +30,14 @@ from training.dataline_offline.image_exceptions_v1 import (
     apply_textatlas_jpeg_eoi_repair,
     bind_image_exceptions,
 )
+from training.dataline import anchors_v1
 from training.dataline_offline.offline_dataset import (
     OfflineExactDataset,
     OfflineLoaderError,
     _PlannedItem,
     _PreparedItem,
     _VirtualRowDecoder,
+    _header_bucket_mode,
 )
 
 
@@ -262,6 +264,14 @@ def main() -> int:
     dataset._anime_native_upsample_exceptions = {}
     dataset._crop_v_anchor = {}
     dataset.rank = 0
+    # object.__new__ skips __init__, so every attribute _bucket_u8_for_item reads has to
+    # be set here by hand.  _anchors_mode arrived with the 13-anchor work and this line
+    # did not, so the suite has been dying on an AttributeError since 879180d.  Derive
+    # it from the catalog under test rather than pinning False: this file reads the
+    # frozen 361-bucket Stage512a catalog today, but a hard-coded False would quietly
+    # skip the anchors branch if it were ever pointed at a 512b catalog.
+    dataset._anchors_mode = _header_bucket_mode(catalog_header) == anchors_v1.BUCKET_MODE
+    dataset._anchors_crop_loss = {}
 
     positives = 0
     for row_id, repair in bound.items():

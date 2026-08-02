@@ -1,0 +1,75 @@
+name: evan-s512b-textatlas-gt-v2-20260802
+description: "TextAtlas GT sidecar v2. v1 emitted one gt_text that had already been through NFKC and whitespace folding, and reported lengths in characters -- both wrong for an artifact whose only job is 'the exact string'. NFKC turns full-width into half-width and folds circled and mathematical characters, which for a renderer are different glyphs, and whitespace folding destroys line layout; characters do not answer 'will this truncate' because the model tokenises with Qwen3-VL-2B. v2 carries gt_text_raw beside gt_text_normalized and measures with that tokenizer against the real 471-token caption budget. Unlike v1 this one is actually wired into training, as a runtime row_id join that leaves the 56 GB caption sidecar untouched."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+maxRetries: 0
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 128
+# EXPECTED_COMMIT is filled in at submission time and cannot be baked into the file:
+# it names the commit that CONTAINS this file, so a spec recording its own sha is not
+# expressible. The archived copy of this spec carries the value that was actually
+# submitted; an empty value is refused below rather than silently skipping the gate.
+environments:
+  EXPECTED_COMMIT: ""
+command: |
+  set -euo pipefail
+  HOST=$(hostname); NODE_RANK=${HOST##*-}
+  case "$NODE_RANK" in ''|*[!0-9]*) NODE_RANK=0 ;; esac
+  [ "$NODE_RANK" = 0 ] || { echo "FATAL: rank!=0"; exit 42; }
+  export CUDA_VISIBLE_DEVICES="" LC_ALL=C PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  REPO=/fsx/evan/mot_code_s512b_impl
+  TOK=/fsx/models/Qwen3-VL-2B-Instruct
+  test -x "$PY" && test -d "$REPO/.git" && test -d "$TOK" || { echo "FATAL: env"; exit 43; }
+  export PYTHONPATH="$REPO"
+  export PYTHONPYCACHEPREFIX="/local/evan/pycache/${JCC_JOB_ID:-job}/$HOST"; mkdir -p "$PYTHONPYCACHEPREFIX"
+  cd "$REPO"
+  # Gate, not a log line: this job reads the live tree.
+  [ -n "${EXPECTED_COMMIT:-}" ] || { echo "FATAL: EXPECTED_COMMIT unset"; exit 43; }
+  bash scripts/jcc_preflight.sh "$EXPECTED_COMMIT" "$REPO"
+  echo "=== tests before touching data ==="
+  "$PY" scripts/test_textatlas_gt_v1.py
+  B=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  OUT=$B/offline_arb_textatlas_gt_stage512b_v2
+  test ! -e "$OUT" || { echo "FATAL: output exists"; exit 45; }
+  echo "=== build v2 (raw + normalized + real Qwen token counts) ==="
+  # 471 = mtml_for("512b") 512 - template_reserve 41, the budget the dataline applies.
+  timeout --signal=TERM --kill-after=300s 21600s "$PY" scripts/offline_arb/build_textatlas_gt_sidecar_v1.py \
+    --catalog-root "$B/offline_arb_catalog_stage512b_v1" --output-root "$OUT" \
+    --tokenizer-path "$TOK" --caption-budget 471
+  echo "=== products ==="; ls -la "$OUT"; du -sh "$OUT"
+  "$PY" - "$OUT" "$B/offline_arb_textatlas_gt_stage512b_v1" <<'PYEOF'
+  import json, sys, pathlib, collections, unicodedata
+  import pyarrow.parquet as pq
+  out, v1root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+  h = json.loads((out / "header.json").read_text())
+  t = pq.read_table(out / "textatlas_gt.parquet")
+  rid = t["row_id"].to_pylist()
+  raw = t["gt_text_raw"].to_pylist(); norm = t["gt_text_normalized"].to_pylist()
+  src = t["gt_source"].to_pylist()
+  assert len(rid) == h["emitted_rows"] == h["output"]["rows"]
+  assert rid == sorted(rid), "row_id not sorted"
+  assert len(set(rid)) == len(rid), "duplicate row_id"
+  assert all(r for r in raw), "empty gt_text_raw emitted"
+  assert all(n for n in norm), "empty gt_text_normalized emitted"
+  # normalized must really be the NFKC fold of raw, or the two columns are unrelated
+  import re
+  fold = lambda s: re.sub(r"\s+", " ", unicodedata.normalize("NFKC", s)).strip()
+  bad = [i for i in range(0, len(raw), max(1, len(raw)//20000)) if fold(raw[i]) != norm[i]]
+  assert not bad, f"normalized column is not the fold of raw at {bad[:5]}"
+  # v2 must cover exactly the same rows as v1: the extraction rules did not change,
+  # only what is recorded.  A different row set means something else moved.
+  v1 = pq.read_table(v1root / "textatlas_gt.parquet", columns=["row_id"])["row_id"].to_pylist()
+  assert v1 == rid, f"row set changed vs v1: v1={len(v1):,} v2={len(rid):,}"
+  print("rows              :", f"{len(rid):,}")
+  print("by source         :", dict(collections.Counter(src)))
+  print("raw != normalized :", f'{h["rows_where_raw_differs_from_normalized"]:,}')
+  print("token stats       :", json.dumps(h["gt_length_tokens"], indent=1)[:1200])
+  print("char stats        :", h["gt_length_chars"])
+  print("samples:")
+  for i in (0, len(rid)//2, len(rid)-1):
+      print(f"   row_id {rid[i]:>10}  [{src[i]}]  {raw[i][:80]!r}")
+  print("TEXTATLAS_GT_V2_POSTCHECK_PASS")
+  PYEOF
+  echo "=== DONE ==="

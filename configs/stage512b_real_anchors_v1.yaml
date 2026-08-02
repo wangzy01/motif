@@ -96,8 +96,20 @@ dataset:
   #   0 misses; 0 upsampling rows. The 1,751-row shortfall against phase3a is entirely
   #   tar_index_miss and is itemised in bad_rows.parquet.
   offline_catalog_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512b_v1
-  offline_anime_freq_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_animefreq_stage512b_v1   # PLACEHOLDER: never built
-  offline_caption_sidecar_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_caption_sidecar_stage512b_v1   # PLACEHOLDER: never built
+  offline_anime_freq_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_animefreq_stage512b_v1   # BUILT 2026-08-02, bound by catalog_hash
+  offline_caption_sidecar_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_caption_sidecar_stage512b_v1   # BUILT 2026-08-02, 56 GB, five domains, 89,786,866 rows
+  # TextAtlas authoritative rendered-text GT, joined by row_id at load time. Optional:
+  # omit the key and textatlas prompts are the plain i1 caption, exactly as before.
+  # Covers 1,941,791 of ~4.12M textatlas rows (~47%) -- only CleanTextSynth and
+  # TextScenesHQ record an exact string rather than describe one; the other seven
+  # subsets yield nothing extractable, measured, not assumed. Uncovered rows fall back
+  # to the plain caption, and so does any row whose GT clause alone exceeds the caption
+  # budget: a truncated exact string is a WRONG label, not a weaker one.
+  # v2 (not v1) is required at runtime. v1 emitted a single NFKC- and whitespace-folded
+  # column, which for a text renderer is a rewritten target: NFKC turns full-width into
+  # half-width and folds circled and mathematical characters. The loader refuses v1 by
+  # schema name rather than failing later on a missing column.
+  offline_textatlas_gt_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_textatlas_gt_stage512b_v2   # PENDING: v2 not built yet
   caption_sidecar_workers: 16
   caption_workers_anime: 8
   caption_workers_monet_real: 8

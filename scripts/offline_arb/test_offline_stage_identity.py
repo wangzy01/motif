@@ -80,11 +80,39 @@ def _test_runtime_contracts() -> None:
     ):
         raise AssertionError("stage512a eligibility contract drift")
 
+    # 512b used to be the "unknown stage" case here and this asserted that resolving it
+    # raised "no frozen artifact contract".  It became a real stage in 9c573bf and the
+    # assertion has been failing ever since, unnoticed because no job runs this file --
+    # in a suite whose entire subject is the mechanism that keeps a 13-anchor build away
+    # from the frozen 361-bucket Stage512a artifacts.  Assert the contract instead.
+    stage512b = _resolve_offline_stage_identity(
+        "512b", 512, {"target_area": 512 * 512, "bucket_mode": "anchors_v1"}
+    )
+    if (
+        stage512b.eligibility != "elig_512"
+        or stage512b.assignment_eligibility != "elig_512"
+    ):
+        raise AssertionError("stage512b eligibility contract drift")
+    if stage512b.legacy_artifacts_allowed:
+        raise AssertionError("stage512b must never be allowed to touch legacy artifacts")
+    if stage512b.requires_nl or stage512b.anime_nl_filter_applied:
+        raise AssertionError("stage512b must not inherit the 256 anime-NL filter")
+    if stage512b == stage512a:
+        raise AssertionError("stage512b and stage512a identities must be distinguishable")
+    # The size guards are what stop a 512b run from being pointed at a 256 catalog.
+    _expect_error(
+        "requires explicit dataset.image_size=512",
+        lambda: _resolve_offline_stage_identity("512b", None, {"target_area": 512 * 512}),
+    )
+    _expect_error(
+        "requires dataset.image_size=512",
+        lambda: _resolve_offline_stage_identity("512b", 256, {"target_area": 512 * 512}),
+    )
+    # A genuinely unknown stage must still be refused, which is what the old 512b
+    # assertion was really testing.
     _expect_error(
         "no frozen artifact contract",
-        lambda: _resolve_offline_stage_identity(
-            "512b", 512, {"target_area": 512 * 512}
-        ),
+        lambda: _resolve_offline_stage_identity("1024", 1024, {"target_area": 1024 * 1024}),
     )
     _expect_error(
         "requires explicit dataset.image_size=512",

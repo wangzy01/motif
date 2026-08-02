@@ -118,6 +118,7 @@ SCHEMA = {
         "offline_catalog_root": str,
         "offline_anime_freq_root": str,
         "offline_caption_sidecar_root": str,
+        "offline_textatlas_gt_root": str,
         "offline_gpic_blob_root": str,
         "caption_sidecar_workers": int,
         "anime_caption_root": str,

@@ -60,7 +60,12 @@ def main() -> int:
     assert "parse_production_json" in module_source
     assert "validate_canonical_manifest" in module_source
     assert "validate_verifier_summary" in module_source
-    assert "project_release(canonical, self.control_root)" in module_source
+    # Was "project_release(canonical, self.control_root)".  The reuse_mode work made the
+    # projection root a local, so this source-text assertion has been failing on a pure
+    # rename.  Keep the intent -- outside reuse_mode the projection is still rooted at
+    # the control root -- rather than the old literal.
+    assert "project_release(canonical, projection_root)" in module_source
+    assert "else self.control_root" in module_source
     assert "local and S3 production canonical manifest raw bytes differ" in module_source
     assert '"canonical_manifest.json"' in module_source
     assert '"verifier_summary.json"' in module_source

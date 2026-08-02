@@ -105,6 +105,56 @@ def build_textatlas_caption(captions, rng) -> str:
     return cands[rng.randrange(len(cands))]
 
 
+# textatlas 权威 GT 前置从句。多个变体、按曝光 rng 选，理由和 caption1..5 随机选一是同一条：
+# 同一张图会被曝光多次，固定一句话会让模型把「出字」绑死在那一个措辞上，推理时用户换个说法
+# 就不出字。三个变体都把 exact text 放在最前面，这才是防截断的那一半。
+TEXTATLAS_GT_TEMPLATES = (
+    'The image renders the exact text: "{gt}".',
+    'Exact text in the image: "{gt}".',
+    'The picture shows the exact wording: "{gt}".',
+)
+
+
+def compose_textatlas_gt_prompt(gt_text, caption, tokenizer, budget, rng) -> str:
+    """把权威 GT 前置到 i1 caption 之前，GT 本身**永不被截断**。
+
+    为什么 GT 在前：``encode_text`` 用 ``truncation=True`` 硬截到 text_max_length，
+    截的是尾巴。GT 放尾巴上，长 caption 会把它整段吃掉，而这恰恰是唯一必须进模型的部分。
+
+    为什么不是「拼起来再统一截」：那样 GT 能不能活下来取决于 caption 有多长，
+    是个随数据变的隐式行为。这里先给 GT 记账，剩下的额度才给 caption，
+    所以 GT 要么完整进 prompt，要么整条回退到纯 caption —— 绝不喂半截 GT，
+    因为半截 GT 会教模型画出图里没有的词，比不给 GT 更糟。
+
+    回退不是边缘情况：1,941,791 / ~4.12M 的 textatlas 行有 GT（约 47%），没有 GT 的
+    行走的就是原来的纯 caption 路径，必须被 smoke 覆盖。
+
+    注意 GT 与 caption 可能**互相矛盾**：i1 caption 也会引用图中文字，而它对权威 GT
+    只有 73.5% 精确。同一条 prompt 里出现两份不一致的引文是这个方案的已知代价；
+    缓解手段是 GT 在前且被显式标注为 exact，i1 那份只当描述。
+    """
+    gt = (gt_text or "").strip()
+    caption = (caption or "").strip()
+    if not gt:
+        return truncate_to_token_budget(caption, tokenizer, budget) if tokenizer else caption
+
+    clause = TEXTATLAS_GT_TEMPLATES[rng.randrange(len(TEXTATLAS_GT_TEMPLATES))].format(gt=gt)
+    if tokenizer is None:                                  # 无 tokenizer：不做预算，交给模型端硬截
+        return f"{clause} {caption}".strip() if caption else clause
+
+    n_clause = len(tokenizer(clause, add_special_tokens=False)["input_ids"])
+    if n_clause > budget:
+        # 光 GT 从句就超预算 → 回退纯 caption。这类行在 512b 里是少数（Paper2Text 那种
+        # 整页文本已在 builder 层排除），但必须显式处理：截断的 GT 是错的训练目标。
+        return truncate_to_token_budget(caption, tokenizer, budget)
+    # 留 2 token 余量：拼接处的 BPE 合并会让 tokenize(a+b) 略多于 tokenize(a)+tokenize(b)。
+    remaining = budget - n_clause - 2
+    if remaining <= 0 or not caption:
+        return clause
+    tail = truncate_to_token_budget(caption, tokenizer, remaining)
+    return f"{clause} {tail}".strip() if tail else clause
+
+
 def finalize_real_caption(raw_text: str | None, captioner: str, truncate=(224, 256)) -> str:
     """real/synth 选中 captioner 原始文本 → 最终 caption。captioner ∈ MONET 简名 /
     florence_first_sentence / i1 / original。"""

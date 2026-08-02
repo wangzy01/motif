@@ -54,6 +54,10 @@ from training.dataline.complete_dataset import (
     _MONET_SRC_COL,
 )
 from training.dataline import anchors_v1
+from training.dataline.caption_build import (
+    build_textatlas_caption,
+    compose_textatlas_gt_prompt,
+)
 from training.dataline.config import BANDS, load_sampling_config
 from training.dataline.image_fetch import (
     decode_rgb,
@@ -89,6 +93,10 @@ from training.dataline_offline.anime_native_upsample_exceptions_weighted_v1 impo
     AnimeNativeUpsampleMismatchError,
     apply_anime_native_upsample_exception,
     bind_anime_native_upsample_exceptions,
+)
+from training.dataline_offline.textatlas_gt_v1 import (
+    TextAtlasGroundTruth,
+    TextAtlasGroundTruthError,
 )
 from training.dataline_offline.weighted_plan_reader_v1 import WeightedOfflinePlan
 
@@ -826,6 +834,7 @@ class OfflineExactDataset:
         offline_catalog_root=None,
         offline_anime_freq_root=None,
         offline_caption_sidecar_root=None,
+        offline_textatlas_gt_root=None,
         caption_sidecar_workers=16,
         anime_caption_root=None,
         caption_workers_anime=1,
@@ -910,6 +919,11 @@ class OfflineExactDataset:
         self._anime_freq_root = (
             Path(str(offline_anime_freq_root)).expanduser()
             if offline_anime_freq_root
+            else None
+        )
+        self._textatlas_gt_root = (
+            Path(str(offline_textatlas_gt_root)).expanduser()
+            if offline_textatlas_gt_root
             else None
         )
         if offline_caption_sidecar_root is not None and not str(
@@ -1098,6 +1112,21 @@ class OfflineExactDataset:
                     f"freq={freq_catalog_hash!r} vs catalog="
                     f"{self.catalog_header.get('catalog_hash')!r}; rerun precompute_anime_freq"
                 )
+        # TextAtlas authoritative GT, joined at runtime by row_id.  Bound to this
+        # catalog for the same reason the anime frequency table is: a rebuilt catalog
+        # renumbers row_id, and a stale GT sidecar would then attach the wrong string
+        # to the wrong picture -- which is worse than no GT at all, because it reads
+        # as a confident label.  Refused at startup, not hours in.
+        self._textatlas_gt = None
+        if self._textatlas_gt_root is not None:
+            try:
+                self._textatlas_gt = TextAtlasGroundTruth(
+                    self._textatlas_gt_root,
+                    catalog_hash=str(self.catalog_header["catalog_hash"]),
+                    catalog_header_sha256=_sha256_file(self.catalog_root / "header.json"),
+                )
+            except TextAtlasGroundTruthError as exc:
+                raise OfflineLoaderError(f"textatlas GT sidecar unusable: {exc}") from exc
         self._verify_catalog_file_hashes()
         self._catalog_readers = self._open_catalog_readers()
         self.square_only_domains = frozenset(
@@ -2049,6 +2078,16 @@ class OfflineExactDataset:
         return CompleteV1Dataset._build_caption(self, domain, rec, band, rng)
 
     def _finalize_caption(self, domain, rec, band, rng):
+        if domain == "textatlas" and self._textatlas_gt is not None:
+            caption = build_textatlas_caption(rec["captions"], rng)
+            gt = self._textatlas_gt.get(int(rec["row_id"]))
+            # Rows without GT (about 53% of textatlas) take the same single rng draw
+            # as before, because compose_* returns before touching rng when gt is
+            # empty.  That keeps the no-GT prompt stream byte-identical to a run with
+            # the sidecar switched off, so enabling it changes only the covered rows.
+            return compose_textatlas_gt_prompt(
+                gt, caption, self.tokenizer, self.caption_budget, rng
+            )
         return CompleteV1Dataset._finalize_caption(self, domain, rec, band, rng)
 
     @staticmethod
