@@ -222,12 +222,16 @@ def main() -> int:
         w, h = anchors_v1.ANCHORS_V1_WH[anchor]
         report: dict = {"anchor": anchor, "size": f"{w}x{h}", "step": step}
         started = time.perf_counter()
+        dataset = None   # so the finally below cannot NameError on a construction failure
         try:
             dataset = build_dataset(
                 args.config, args.rank, args.world_size, args.per_rank_bs
             )
             dataset.set_start_step(step)
-            batch = next(iter(dataset))
+            # The public surface is loader(batch_size), not __iter__ -- an earlier
+            # draft used next(iter(dataset)) and every anchor failed with
+            # "object is not iterable" AFTER constructing and seeking fine.
+            batch = next(dataset.loader(args.per_rank_bs))
             failures = check_batch(dataset, batch, anchor, report)
             row_failures, doms = check_planned_rows(
                 dataset, plan_root, step, anchor, args.world_size, args.per_rank_bs
@@ -247,6 +251,15 @@ def main() -> int:
             report["status"] = "ERROR"
             report["failures"] = [f"{type(exc).__name__}: {exc}"]
             all_failures.extend(report["failures"])
+        finally:
+            # Each anchor builds its own dataset because set_start_step must precede
+            # the first next(); 13 live loaders each with fetch workers and a 4096-row
+            # buffer would be a needless resource pile.
+            try:
+                if dataset is not None:
+                    dataset.close()
+            except Exception:
+                pass
         report["wall_s"] = round(time.perf_counter() - started, 2)
         results[str(anchor)] = report
         print(
