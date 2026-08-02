@@ -1,0 +1,196 @@
+# Stage512b GPUVAL -- integration validation, NOT a pilot and NOT a quality judgement.
+#
+# What it is for: catching an integration error at step 5 instead of at step 1 of a
+# 250,000-step run. Everything before this point has been validated on CPU, one rank at
+# a time, without a model attached. Untested until this job runs: forward/backward
+# through the real Stage512a weights, optimizer and EMA state carried across the stage
+# boundary, memory headroom at 512px with 13 anchors, per-rank agreement, and -- the
+# one with real risk attached -- GPIC throughput.
+#
+# GPIC I/O is the reason to look at the numbers rather than just the exit code.
+# Stage512a served GPIC through a packed blob (mmap + pread) and drew 33.28M GPIC
+# exposures. Stage512b has no blob configured: gpic_payload_in_memory=true reads one
+# JPEG per row from /s3-mewtant-raw-datasets over S3 FUSE, and the mix change took GPIC
+# to 102.4M exposures -- 3.08x the reads, on a per-file path instead of a packed one.
+# If that does not keep up, the answer is a Stage512b GPIC blob build before launch, and
+# it is much cheaper to learn that here.
+#
+# Steps and the LR ramp. scheduler is num_warmup_steps=500, decay=constant, so 200 steps
+# ends INSIDE the warmup at about 40% of peak LR. That is fine for what this job checks
+# and it must not be read as a loss trend: the meaningful comparison is the LEVEL of the
+# first steps' loss against the tail of Stage512a's metrics.jsonl. A few percent of
+# movement is the data change (13 anchors, real 58% -> 60%, GT in textatlas prompts); a
+# factor of two is a normalisation or geometry fault. Full-LR behaviour is NOT covered.
+#
+# NOT SUBMITTED AUTOMATICALLY. 64 GPUs, and the checkpoint directory is create-once.
+name: evan-s512b-gpuval-w64-20260802
+description: "Stage512b W64 GPUVAL, 200 steps into a throwaway checkpoint directory from the real Stage512a last.pt and the real 512M plan. Validates forward/backward, optimizer and EMA across the stage boundary, memory peak, per-rank consistency, and GPIC throughput on the per-file S3 FUSE path that replaces Stage512a's packed blob at 3.08x the read volume. Not a pilot; not a quality judgement."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 8
+gpuPerWorker: 8
+cpuPerWorker: 80
+memGBPerWorker: 900
+maxRetries: 0
+environments:
+  EXPECTED_COMMIT: ""
+command: |
+  set -euo pipefail
+  REPO=/fsx/evan/mot_code_s512b_impl
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  test -x "$PY" && test -d "$REPO/.git" || { echo "FATAL: env"; exit 43; }
+  cd "$REPO"
+  export PYTHONPATH="$REPO"
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN FI_EFA_USE_DEVICE_RDMA=1
+  export OFFLINE_ARB_PREFETCH_STEPS=4
+  unset OFFLINE_ARB_STEP_TIMEOUT_S OFFLINE_ARB_PROFILE_WINDOWS OFFLINE_ARB_SMOKE_DATASET_CONFIG
+  unset OFFLINE_ARB_IO_TELEMETRY_DIR OFFLINE_ARB_GPIC_THREADS_PER_NODE
+  unset MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_ ARROW_DEFAULT_MEMORY_POOL LD_PRELOAD
+  unset PYTHONOPTIMIZE
+  [ "$("$PY" -c 'import sys; print(sys.flags.optimize)')" = 0 ] \
+    || { echo "FATAL: optimized Python is forbidden"; exit 64; }
+  mkdir -p /local/evan/anime_img_cache /local/evan/cache
+
+  NNODES=8; PORT=29814; STEPS=200
+  CFG=configs/stage512b_real_anchors_v1.yaml
+  CKPT=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512b_20260802_gpuval_w64_v1
+  INIT=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_20260724_weighted_w64_recovery_v2/last.pt
+  INIT_SHA=957bfcf12b89c4042a32056566012a2451e72aa0b2706b0ca51808ab79155c31
+  A512_METRICS=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_20260724_weighted_w64_recovery_v2/metrics.jsonl
+
+  HOST=$(hostname); NODE_RANK=${HOST##*-}; JOBTAG=${HOST%-*}
+  STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+  case "$NODE_RANK" in (*[!0-9]*|'') echo "FATAL: malformed node rank: $NODE_RANK"; exit 21;; esac
+  test "$NODE_RANK" -lt "$NNODES" || { echo "FATAL: node rank out of range"; exit 21; }
+
+  [ -n "${EXPECTED_COMMIT:-}" ] || { echo "FATAL: EXPECTED_COMMIT unset"; exit 43; }
+  bash scripts/jcc_preflight.sh "$EXPECTED_COMMIT" "$REPO"
+
+  # The source checkpoint is a MUTABLE path -- the Stage512a job would overwrite it if
+  # relaunched -- so the digest is verified here, on every node, not trusted from a
+  # comment. Reading 26 GB eight times is a few minutes against a 250,000-step run.
+  test -f "$INIT" || { echo "FATAL: init_from missing"; exit 43; }
+  GOT=$(sha256sum "$INIT" | awk '{print $1}')
+  [ "$GOT" = "$INIT_SHA" ] || { echo "FATAL: init_from sha drift: $GOT != $INIT_SHA"; exit 44; }
+  echo "init_from sha verified on node $NODE_RANK"
+
+  # Create-once, expressed as "no prior training state", which is the property that
+  # matters and the only form of the check that works from eight nodes at once:
+  # resume=true SILENTLY resumes a stale last.pt instead of initialising from 512a.
+  test ! -e "$CKPT/last.pt" || { echo "FATAL: $CKPT/last.pt exists; pick a fresh dir"; exit 45; }
+  mkdir -p "$CKPT"
+  RES=$CKPT
+
+  RDZV=$RES/rdzv.$JOBTAG.addr
+  if [ "$NODE_RANK" = 0 ]; then
+    MYIP=$(hostname -i | awk '{print $1}')
+    printf '%s %s %s\n' "$MYIP" "$(date +%s)" "$JOBTAG" > "$RDZV.tmp"
+    mv "$RDZV.tmp" "$RDZV"; MASTER_ADDR=$MYIP
+  else
+    MASTER_ADDR=""
+    for _ in $(seq 1 360); do
+      if test -s "$RDZV" && test ! -L "$RDZV"; then
+        read -r ADDR TS TOKEN < "$RDZV" || true
+        case "$TS" in (*[!0-9]*|'') TS="";; esac
+        NOW=$(date +%s)
+        if [ -n "$TS" ] && [ "$TOKEN" = "$JOBTAG" ] && [ $((NOW - TS)) -lt 7200 ]; then
+          MASTER_ADDR=$ADDR; break
+        fi
+      fi
+      sleep 5
+    done
+    test -n "$MASTER_ADDR" || { echo "FATAL: rendezvous missing"; exit 20; }
+  fi
+
+  echo "===== STAGE512B GPUVAL node=$NODE_RANK master=$MASTER_ADDR world=64 global=2048 steps=$STEPS ====="
+  { hostname; nvidia-smi -L; df -h /local | tail -1;
+    sha256sum "$CFG"; } 2>&1 | tee "$RES/probe.n$NODE_RANK.$STAMP.log"
+
+  (while true; do
+     date -u
+     [ -r /sys/fs/cgroup/memory.current ] && echo "mem.current: $(cat /sys/fs/cgroup/memory.current)"
+     nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader
+     df --output=avail /local | tail -1
+     sleep 60
+   done) > "$RES/nodemon.n$NODE_RANK.$STAMP.log" 2>&1 &
+
+  set +e
+  "$PY" -m torch.distributed.run \
+    --nnodes "$NNODES" --nproc-per-node 8 --node-rank "$NODE_RANK" \
+    --master-addr "$MASTER_ADDR" --master-port "$PORT" \
+    train.py --config "$CFG" \
+    trainer.max_steps=$STEPS \
+    trainer.checkpoint_dir="$CKPT" \
+    trainer.checkpoint_steps=100 \
+    trainer.checkpoint_keep_max=2 \
+    trainer.checkpoint_keep_every=100 \
+    2>&1 | tee "$RES/train.n$NODE_RANK.$STAMP.log"
+  PIPE_RC=("${PIPESTATUS[@]}")
+  set -e
+  test "${PIPE_RC[1]}" -eq 0 || exit "${PIPE_RC[1]}"
+  RC=${PIPE_RC[0]}
+  test "$RC" -eq 0 || { echo "FATAL: training exited $RC"; exit "$RC"; }
+
+  [ "$NODE_RANK" = 0 ] || { echo "node $NODE_RANK done"; exit 0; }
+
+  echo "=== postcheck (rank 0) ==="
+  "$PY" - "$RES" "$A512_METRICS" "$STEPS" <<'PYEOF'
+  import json, sys, pathlib, statistics
+  res, a512, steps = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), int(sys.argv[3])
+  rows = [json.loads(l) for l in (res / "metrics.jsonl").read_text().splitlines() if l.strip()]
+  assert rows, "no metrics written"
+  assert "loss" in rows[-1], f"metrics schema changed; keys={sorted(rows[-1])}"
+  last_step = max(int(r["step"]) for r in rows)
+  assert last_step >= steps - 10, f"only reached step {last_step} of {steps}"
+  bad = [r["step"] for r in rows if not (float(r["loss"]) == float(r["loss"]))
+         or abs(float(r["loss"])) == float("inf")]
+  assert not bad, f"non-finite loss at steps {bad[:5]}"
+
+  def col(name, src=rows):
+      return [float(r[name]) for r in src if name in r]
+
+  # Stage512a's own tail is the only honest reference.  Skip the first step of each --
+  # 512a's step 1 took 27.3s cold and would poison a mean of five.
+  tail = []
+  with a512.open() as fh:
+      for line in fh:
+          try: r = json.loads(line)
+          except ValueError: continue
+          if "loss" in r: tail.append(r)
+  first5 = col("loss")[:5]
+  tail200 = [float(r["loss"]) for r in tail[-200:]]
+  print("512b gpuval first 5 losses :", [round(v, 4) for v in first5])
+  print("512a final 200-step mean   :", round(statistics.fmean(tail200), 4) if tail200 else "n/a")
+  if tail200:
+      ratio = statistics.fmean(first5) / statistics.fmean(tail200)
+      print(f"ratio first5(512b)/tail200(512a) = {ratio:.3f}")
+      assert ratio < 2.0, f"loss level jumped {ratio:.2f}x against Stage512a's tail"
+
+  warm = [r for r in rows if int(r["step"]) > 20]      # past cold start and cache fill
+  for name in ("iter_s", "data_wait_s", "data_wait_frac", "peak_mem_gb"):
+      vals = col(name, warm)
+      if vals:
+          print(f"{name:<15} p50 {statistics.median(vals):8.3f}  max {max(vals):8.3f}")
+  # The GPIC question, answered by a number rather than a guess.  Stage512a ran around
+  # data_wait_frac 0.2 WITH the packed blob; Stage512b reads 3.08x the GPIC volume from
+  # per-file S3 FUSE.  A high steady-state wait fraction here means the formal run would
+  # be I/O bound and a Stage512b GPIC blob build is needed before launch.
+  waits = col("data_wait_frac", warm)
+  if waits:
+      p50 = statistics.median(waits)
+      print(f"\nDATA WAIT FRACTION p50 = {p50:.3f}"
+            + ("   <- I/O bound; build a Stage512b GPIC blob before the formal run"
+               if p50 > 0.35 else "   <- acceptable"))
+  mix = {k: statistics.fmean(col(k, warm)) for k in rows[-1] if k.startswith("mix_")}
+  if mix:
+      print("realized mix over the run:",
+            {k: round(v, 4) for k, v in sorted(mix.items())})
+
+  ck = sorted(p.name for p in res.glob("*.pt"))
+  assert ck, "no checkpoint written"
+  print("checkpoints:", ck)
+  print("GPUVAL_POSTCHECK_PASS")
+  PYEOF
+  echo "=== DONE ==="
