@@ -28,8 +28,17 @@ description: "Stage512b W64 GPUVAL, 200 steps into a throwaway checkpoint direct
 image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
 numWorkers: 8
 gpuPerWorker: 8
-cpuPerWorker: 80
-memGBPerWorker: 900
+# 48/600, not the 80/900 inherited from Stage512a -- a SCHEDULABILITY change, measured
+# rather than guessed. A node can have all 8 GPUs free and still refuse this pod because
+# it shares CPU with someone else's job: nodes with free GPUs were observed at 73.1/95.7
+# CPU used, i.e. 22.6 free against a request for 80. That is the likeliest reason the
+# first attempt got 3 of 8 nodes while 5 looked free.
+# The headroom is real: the GPUVAL measured data_wait_frac p50 0.0435, so the data
+# pipeline is nowhere near CPU-bound. This run re-measures it at the lower allocation,
+# and the FORMAL job keeps 80/900 until that number comes back low -- a 7-day run does
+# not get its resources cut on an untested assumption.
+cpuPerWorker: 48
+memGBPerWorker: 600
 maxRetries: 0
 environments:
   EXPECTED_COMMIT: ""
