@@ -271,6 +271,52 @@ seed 唯一。Evan 2026-08-03 批准。
 **sha256 `6005219a077cdf63ca2ef047f98ef2e8b6af0be8dc752d63b9a3f41c8175b39a`。**
 此后不得增删改 —— 第一次 snapshot 之后动它就毁了它存在的意义(可比性)。
 
+## S512B-23 GPT 独立审计(2026-08-04)的逐条处置
+
+审计对象 `3f17d46..9a105ed`,结论 NO-GO。**逐条实测后:7 条是真 bug 已修,3 条是我
+陈述过头已纠正,2 条判定为过度设计不做。**
+
+### 成立并已修(commit `f9b9f5f`)
+| 编号 | 实测证据 | 修法 |
+|---|---|---|
+| **F-01** | torchrun 只有 `--config`,无 `trainer.checkpoint_dir` | 补上。**本轮最严重** —— 门禁守 `CKPT_DIR`、训练写 `PLACEHOLDER_…`,且它是 F-08 的根因:placeholder 目录永远没有 `last.pt`,所以**任何** continue 都会静默 init_from |
+| **F-04** | 512a 目录既无 `.jobtag` 也无 `FORMAL_RUN.json` | continue 必须有本阶段 schema 的 `FORMAL_RUN.json` |
+| **F-10** | `jcc_preflight.sh 9 .` → **rc=0** | 要求 40 位小写 hex + 全等 |
+| **F-16** | reader 的 `_header` 行噎死 scorer;`--self-test` 被 required 参数挡 | OCR 两半此前**从未真正对接跑过**;已修并加 engine 交叉校验 |
+| **F-15a** | `gt in prompt` 会碰巧通过(纯 caption 自带 raw GT 的期望命中 69.5%) | 改成必须匹配三个规范从句前缀 |
+| **F-15b** | 反例(日文 caption + 142-token GT)复现 474/473/474 > 471 | 对成品重新 tokenize、只缩 caption 尾巴 → 467/466/467,2484 组合零越界 |
+| **F-03 / F-09** | `test ! -e` + `mkdir -p` 是 TOCTOU;`AUTO_RESUME_RECONCILE` 未开 | 裸 `mkdir` 原子 claim;打开该环境变量 |
+
+### 我自己陈述过头,已纠正
+- 显存"17.76 of 80"是 **torch allocated**;`nvidia-smi` 峰值 **42,317 MiB**。
+- "首 batch 前验证全部 artifact digest" —— 实际只验存在性、强制的 sampling config 摘要、
+  plan/catalog 绑定。已改写成实际所做的事。
+- 评测协议里"`checkpoint_steps × keep_max` 滚动窗口" **是错的**:`checkpoint_steps`
+  只覆盖同一个 `last.pt`,step 30,000 前**没有任何**可回溯 full checkpoint。
+
+### 判定为过度设计,不做(Evan 2026-08-03 同意)
+- **F-02 attempt nonce + lease + 旧 writer fencing**:陈旧 RDZV 的后果是新 peer 连到
+  已死的 master ⇒ **作业失败,不是错误训练**,`maxRetries: 3` 能吸收。为一个"失败而非
+  错误"的模式加三层协调机制不值。
+- **F-05 每次启动前重算 56 GB caption SHA**:hardlink 已双向锁只读(S512B-21);
+  plan 245/245、catalog 5/5、animefreq 17/17、GT 六列现物均已实测通过;
+  loader 边读边校验逐文件摘要。每次 continue 重跑数小时哈希不划算。
+- 同理不做:独立只读运行快照 + 镜像 digest + 包 manifest(F-10/F-11 的扩展部分)。
+  对内部跑记录即可。
+
+### 审计确认正确、不必重验的(直接引用,省下一轮)
+plan 245 blocks 逐块 SHA 全通过 · catalog 5 parquet SHA 全通过 · animefreq 17/17 ·
+GT 正确六列 1,941,791 行且 header/payload/`_SUCCESS` 闭合 · 10,880 个 tar locator 全存在 ·
+world=64 / per-rank 32 / global 2048 / 250,000 steps / 512M 曝光一致 ·
+plan 发牌与 reader 反变换闭合、resume seek 无 off-by-one · 真用 FSDP2(28 units)·
+512a init checkpoint 的 trainable/optimizer/EMA 各 483 key 完整 · 8 个快照确实全保留 ·
+FSx 空间充分(约 5.4 TiB 可用,稳态需约 132 GiB)。
+
+### 仍未闭合(只受容量限制)
+**F-07 容量**:8 个全空 8-GPU 节点当前为 0。
+**F-13 真两阶段 resume GPUVAL**:代码已修好并有 19 项穷举测试,但没在 8 节点上真跑过。
+其余启动阻塞项已全部关闭。
+
 ---
 
 ## 流程约定(不是数据决策,但同样具约束力)
