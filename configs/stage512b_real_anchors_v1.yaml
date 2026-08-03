@@ -217,6 +217,17 @@ sigma_sampling:
   dist: logit_normal
   logit_mean: 0.0
   logit_std: 1.0
+  # 1.0, and this is a DEVIATION FROM THE DOCUMENTED DESIGN that is carried forward on
+  # purpose (Evan, 2026-08-03, S512B-20). networks/model_mot.py:10-11,272-278 records the
+  # v3 decision as per-resolution fixed noise-shift 256->1.0, 512->2.0, 1024->4.0, and
+  # the 256 (1.0) and 1024 (4.0) configs match it. The 512 rung does not: Stage512a ran
+  # its entire 125,000 steps at 1.0, and the GPUVAL log confirms 512b inherits "shift
+  # 1.00". So the comment is not stale -- the 512 config has diverged from the design
+  # since Stage512a.
+  # Kept at 1.0 because this stage changes data, geometry and schedule only, and moving
+  # shift would add a second hard-to-attribute variable and void the loss comparison
+  # against Stage512a's tail that the GPUVAL relies on. Whether 512 should be 2.0 is a
+  # real open question for a LATER stage, with its own GPUVAL; it is recorded, not fixed.
   shift: 1.0
 
 optimizer:

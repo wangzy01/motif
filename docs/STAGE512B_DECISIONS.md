@@ -231,6 +231,46 @@ optimizer/EMA 跨阶段、`init_from` 重置 step=0 + 全新 warmup、每 50 步
 **断言 train.py 打出的 resume 那行**,所以"重试时静默从 512a 重新初始化"会当场失败,
 而不是白跑几天。这也是为什么"专门验 resume 的 GPUVAL"**不是启动阻塞项**。
 
+## S512B-20 noise shift 保持 1.0 —— 这是**有意延续 512a 的既有偏离**,不是"注释写错了"
+
+`networks/model_mot.py:10-11,272-278` 把 v3 决策记为逐分辨率固定
+noise-shift:**256→1.0、512→2.0、1024→4.0**。实测三档 config:
+
+| 阶段 | config `sigma_sampling.shift` | 与设计一致? |
+|---|---:|---|
+| 256 | 1.0 | ✓ |
+| **512a** | **1.0** | **✗(设计要 2.0)** |
+| 512b | 1.0 | ✗ |
+| 1024 | 4.0 | ✓ |
+
+256 与 1024 都对上了,**只有 512 这一档从 Stage512a 起就是 1.0**,而且已经这样跑完了
+整个 125,000 步(GPUVAL 日志确认 512b 继承 `shift 1.00`)。所以注释**不是陈旧的** ——
+是 512 的 config 从 512a 开始就偏离了设计。
+
+**决定保持 1.0**(Evan,2026-08-03)。理由:本阶段只改数据/几何/日程,动 shift 会
+引入第二个难归因变量,并让 GPUVAL 赖以判断的"与 512a 末段 loss 对比"失去意义。
+"512 该不该是 2.0"是**留给后续阶段的真问题**,要配自己的 GPUVAL —— 现在只记录,不修。
+
+## S512B-21 caption sidecar 的 production 与 work 是 hardlink,已双向锁只读
+
+外部审计实测:1,372 个 caption parquet 全部 `nlink=2`,production 与
+`offline_arb_caption_sidecar_stage512b_work` **共享 inode** —— 原地改写 work 那份会
+同时污染训练数据。这**是发布协议的设计**(`build_caption_sidecar.py:1511` 用 `os.link`
+发布),不是意外。
+
+处理(Evan,2026-08-03):文件 `0444`、production 目录 `0555`。
+**关键:文件 mode 在 inode 上,所以两份一起变只读;目录 mode 不共享,只锁 production。**
+这正好是想要的 —— 两份都不该被原地改写,而目录门只拦 production 的增删。
+实测改后 loader 仍能正常读(65,536 行)。
+一如既往:**我们是 root,chmod 只拦误写不拦故意写**,真正的保护是代码里的 create-once。
+
+## S512B-22 固定人评图集已批准冻结
+
+`evaluation/benchmarks/prompts/stage512b_human_eval_v1.jsonl`,42 条,覆盖全部 13 锚,
+seed 唯一。Evan 2026-08-03 批准。
+**sha256 `6005219a077cdf63ca2ef047f98ef2e8b6af0be8dc752d63b9a3f41c8175b39a`。**
+此后不得增删改 —— 第一次 snapshot 之后动它就毁了它存在的意义(可比性)。
+
 ---
 
 ## 流程约定(不是数据决策,但同样具约束力)
