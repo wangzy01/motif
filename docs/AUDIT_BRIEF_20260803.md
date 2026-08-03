@@ -49,7 +49,7 @@
 ### 关键路径
 | 东西 | 路径 |
 |---|---|
-| 代码(被审对象) | `/fsx/evan/mot_code_s512b_impl`,分支 `codex/stage512b-real-v04-20260801`,HEAD **`d848062`** |
+| 代码(被审对象) | `/fsx/evan/mot_code_s512b_impl`,分支 `codex/stage512b-real-v04-20260801`,HEAD **`f3d2482`** |
 | 产物根目录(只读) | `/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/` |
 | Stage512a 旧代码树(参考) | `/fsx/evan/mot_code/mot_pilot_v1_cleanup_crop_stage512a_weighted_20260724v7` |
 | Python | `/fsx/evan/mot_code/venv-gpu/bin/python`(**用这个**,系统 python3 没有 pyarrow/torch) |
@@ -57,20 +57,27 @@
 
 ---
 
-## 2. 本轮审查范围 = 这 20 个 commit
+## 2. 本轮审查范围 = 这 22 个 commit
 
 ```
-git -C /fsx/evan/mot_code_s512b_impl log --oneline 3f17d46..d848062
+git -C /fsx/evan/mot_code_s512b_impl log --oneline 3f17d46..f3d2482
 ```
-约 28 个文件、+3000 行。**`3f17d46` 之前的东西已经被前几轮审查覆盖过,不在本次范围内**
+约 29 个文件、+3200 行。**`3f17d46` 之前的东西已经被前几轮审查覆盖过,不在本次范围内**
 (除非你发现前面的结论是错的)。
 
-> ⚠️ **最后一个 commit `d848062`(OCR reader)不是本文件作者写的**,是在本文件起草期间
-> 由另一个会话提交并 push 的。它没有经过写这份任务书的那个 AI 的复核,
-> 也**没有在 GPU 上真正跑过**(它自己的文档说"模型加载那段还没在 GPU 上真跑过")。
-> **请对它单独加倍审查**,不要因为它和其余 commit 在同一分支上就假定它同源同质。
-> 它修改了 `docs/STAGE512B_EVAL_PROTOCOL.md` 第 2.3 节,把 OCR 那一项从
-> "只有 comparator" 改成 "两段都已建成" —— 请核实这个改写是否**言过其实**。
+> ⚠️ **其中两个 commit 不是本任务书作者写的**,是在本文件起草期间由**另一个并发会话**
+> 提交并 push 的。请对它们单独加倍审查,**不要因为它们和其余 commit 在同一分支上就假定
+> 同源同质**:
+>
+> - **`d848062`「Close the OCR loop」** —— 新增 `evaluation/runners/ocr_read_images.py`
+>   (image→text reader,用 `/fsx/models/Qwen3-VL-8B-Instruct`)。
+>   **从未在 GPU 上真跑过**(它自己承认"模型加载那段还没在 GPU 上真跑过")。
+>   它同时把 `docs/STAGE512B_EVAL_PROTOCOL.md` 第 2.3 节从"只有 comparator"
+>   改写成"两段都已建成" —— **请核实这个改写是否言过其实**。
+> - **`f3d2482`「Fix two races in the unsubmitted formal job」** —— 修了正式作业里两个
+>   并发缺陷(见第 4 节第 4、5 条)。**这两个修复本身也没有被任何人复核过**,
+>   而且它们改的正是这次审查里风险最高的那个文件。**请把它当成新代码来审,
+>   而不是当成"已经修好了"。**
 
 改动可以分成六块:
 
@@ -145,7 +152,10 @@ GPUVAL 真跑过一次(64 GPU、真 512a 权重、真 plan,跑到 step 420 被�
 
 ## 4. 被审 AI 自己承认的错误(**请专门去找同类的第四第五个**)
 
-这一轮它犯了三个 bug,**根因完全相同:只考虑了第一次调用,忘了还有第二次**。
+这一轮已经发现**五个** bug,**根因完全相同:只想到了一个参与者/一次调用,
+忘了还有第二次、还有另外七个**。前三个是它自己发现并修的,**后两个是并发会话
+在它起草这份任务书的时候发现的 —— 也就是说这个模式它到现在也没能自己穷尽**。
+请假定**还有第六个**,并按这个模式去搜。
 
 1. **`trainer.max_steps=` 覆盖是装饰性的**。`training/checkpoint.py::derive_max_steps`
    在存在 `max_exposure_images` 时按"曝光量 / global_batch"派生 horizon,
@@ -155,6 +165,14 @@ GPUVAL 真跑过一次(64 GPU、真 512a 权重、真 plan,跑到 step 420 被�
    实际发生了。更糟的是同样的逻辑本来要进正式作业,会**摧毁 `resume: true` 的恢复机制**。
 3. **`RUN_MODE=fresh` 被应用到了 JCC 重试上** ⇒ 重试撞上自己建的目录 exit 45,
    `maxRetries: 3` 形同虚设,7 天的跑第一次被抢占就永久死。
+4. **(并发会话在 `f3d2482` 里发现)每个 rank 都独立跑 fresh/continue 判定**,
+   而 rank 0 建目录和写 `.jobtag` 是**两步**。非 0 rank 在这个窗口里读到"目录存在但没有
+   `.jobtag`",走进 `owned by <none>` 分支 **exit 45** —— 在一次配置完全正确的首launch 上。
+   8 个节点同时起、共享文件系统,正是最容易撞上这个窗口的场景。
+5. **(同上)到达屏障的标记文件按 `JOBTAG` 命名,而 `JOBTAG` 在同一次提交的重试之间是不变的**
+   ⇒ 重试时会看到上一次留下的 8 个陈旧标记,**屏障瞬间满足**,然后在只有 2 个节点真正
+   起来的情况下进入 torchrun —— 屏障本身变成了它本要防止的那种静默失败。
+   这条尤其值得注意:**一个"安全措施"被写成了新的失败源**。
 
 它还有两类可复现的毛病,请按这两个模式去搜:
 - **"不会失败的检查"**:写了断言但条件永远不成立 / 读了不存在的键 / 只 echo 不 exit。
@@ -173,10 +191,20 @@ GPUVAL 真跑过一次(64 GPU、真 512a 权重、真 plan,跑到 step 420 被�
 
 ### A. 正式训练作业(`provenance/jcc_jobs/20260803_stage512b_FORMAL_w64.yaml`)—— 最高优先级
 这是要跑 7.4 天、烧 64 张 H100 的东西,且**还没提交**,现在是唯一能拦住错误的时刻。
-- `RUN_MODE` / `EFFECTIVE_MODE` / `$CKPT/.jobtag` 的三态逻辑,在**所有**组合下都正确吗?
-  特别是:多个 rank 同时读写 `.jobtag` 有没有竞态?rank 0 还没写 `.jobtag` 时
-  非 0 rank 已经读了会怎样?第一次尝试写了 `.jobtag` 但没写 `last.pt` 就死了呢?
-- 到达屏障(`arrival.$JOBTAG/ready.n*`)有没有竞态或死锁?某个 node 写完标记就崩了会怎样?
+- `RUN_MODE` / `EFFECTIVE_MODE` / `$CKPT/.jobtag` / `.runmode.$JOBTAG` 的逻辑,
+  在**所有**组合下都正确吗?第 4 节第 4 条那个 race 已经在 `f3d2482` 里改成
+  "rank 0 独自判定、发布到 `.runmode.$JOBTAG`、其他 rank 经 `$RDZV` 排序后再读" ——
+  **请验证这个修复本身对不对**:发布与 `$RDZV` 的先后真的被强制了吗?
+  非 0 rank 读不到 `.runmode` 会怎样?rank 0 在发布后、写 `$RDZV` 前死掉呢?
+- 到达屏障(`arrival.$JOBTAG/ready.n*`):`f3d2482` 让 rank 0 在写 `$RDZV` 之前
+  `rm -rf` 该目录来清掉上次残留。**这个 `rm -rf` 在共享文件系统上安全吗?**
+  时机真的保证"此时不可能有 peer 已经写过标记"吗?
+  第一次尝试的 pod 还没死透、正在写标记,而重试的 rank 0 同时在删,会怎样?
+- 顺带:该作业第 149 行有一处 `rm -rf "$CKPT/arrival.$JOBTAG"`,路径由环境变量拼出。
+  **本任务书作者已核对过**:`CKPT_DIR` 的非空检查在第 79 行、占位符检查在第 80 行,
+  都早于第 149 行,且 `set -u` 生效,`JOBTAG` 由 hostname 派生不会为空 ——
+  最坏情况也只落在 `$CKPT/` 内部。**这条列在这里是让你复核这个判断,不是说它坏了。**
+  但请顺便扫一遍整个分支还有没有**没被这样防护过**的 `rm -rf` / 通配删除。
 - `maxRetries: 3` 与 resume 的配合真的成立吗?
 - 那段内嵌的绑定校验(sampling config sha / plan_hash / world_size / keep_max)漏了什么?
 - **有没有任何路径会让它静默地从错误的权重开始训练?**
