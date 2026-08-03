@@ -95,34 +95,44 @@ command: |
   # submission still gets exit 45. If the first attempt died before writing any
   # checkpoint, .jobtag matches but last.pt is absent, and the run correctly stays fresh
   # -- train.py's init_from branch fires on "no local last.pt".
-  EFFECTIVE_MODE=$RUN_MODE
-  if [ -e "$CKPT" ]; then
-    OWNER=$(cat "$CKPT/.jobtag" 2>/dev/null || echo "<none>")
-    if [ "$OWNER" = "$JOBTAG" ]; then
-      if [ -f "$CKPT/last.pt" ]; then
-        EFFECTIVE_MODE=continue
-        [ "$RUN_MODE" = continue ] || echo "retry of our own attempt: fresh -> continue"
-      else
-        EFFECTIVE_MODE=fresh
-        echo "retry of our own attempt, no checkpoint yet: staying fresh"
-      fi
-    elif [ "$RUN_MODE" = fresh ]; then
-      echo "FATAL: RUN_MODE=fresh but $CKPT exists and is owned by '$OWNER'."
-      echo "       Use RUN_MODE=continue to resume it, or a new CKPT_DIR."; exit 45
-    fi
-  elif [ "$RUN_MODE" = continue ]; then
-    echo "FATAL: RUN_MODE=continue but $CKPT does not exist."; exit 45
-  fi
-  if [ "$EFFECTIVE_MODE" = continue ]; then
-    test -f "$CKPT/last.pt" || {
-      echo "FATAL: continue mode but $CKPT/last.pt is missing."; exit 45; }
-  fi
-  echo "run mode: declared=$RUN_MODE effective=$EFFECTIVE_MODE"
-
+  # RANK 0 DECIDES ALONE. Having every rank run this resolution is racy, and not
+  # theoretically: rank 0 creates $CKPT and then writes .jobtag as two operations, so a
+  # non-zero rank that reads the directory in between sees it exist with no .jobtag,
+  # falls into the "owned by <none>" branch, and exits 45 -- on a first launch, with a
+  # perfectly good configuration. Eight nodes starting together on a shared filesystem
+  # is exactly where that window gets hit.
+  #
+  # So rank 0 resolves, publishes the answer, and the other ranks read it. No extra
+  # synchronisation is needed: non-zero ranks already block on $RDZV, and rank 0 writes
+  # $RDZV only after publishing, so the ordering is already enforced by the rendezvous.
+  RES=$CKPT
+  MODEFILE=$CKPT/.runmode.$JOBTAG
   if [ "$NODE_RANK" = 0 ]; then
+    EFFECTIVE_MODE=$RUN_MODE
+    if [ -e "$CKPT" ]; then
+      OWNER=$(cat "$CKPT/.jobtag" 2>/dev/null || echo "<none>")
+      if [ "$OWNER" = "$JOBTAG" ]; then
+        if [ -f "$CKPT/last.pt" ]; then
+          EFFECTIVE_MODE=continue
+          [ "$RUN_MODE" = continue ] || echo "retry of our own attempt: fresh -> continue"
+        else
+          EFFECTIVE_MODE=fresh
+          echo "retry of our own attempt, no checkpoint yet: staying fresh"
+        fi
+      elif [ "$RUN_MODE" = fresh ]; then
+        echo "FATAL: RUN_MODE=fresh but $CKPT exists and is owned by '$OWNER'."
+        echo "       Use RUN_MODE=continue to resume it, or a new CKPT_DIR."; exit 45
+      fi
+    elif [ "$RUN_MODE" = continue ]; then
+      echo "FATAL: RUN_MODE=continue but $CKPT does not exist."; exit 45
+    fi
+    if [ "$EFFECTIVE_MODE" = continue ]; then
+      test -f "$CKPT/last.pt" || {
+        echo "FATAL: continue mode but $CKPT/last.pt is missing."; exit 45; }
+    fi
     mkdir -p "$CKPT"
-    # Written before anything else so a retry can recognise the directory as its own.
     test -f "$CKPT/.jobtag" || printf '%s\n' "$JOBTAG" > "$CKPT/.jobtag"
+
     if [ "$EFFECTIVE_MODE" = fresh ]; then
       # Only meaningful on a fresh launch: init_from is a mutable path that the frozen
       # Stage512a job would overwrite if it were ever relaunched. On a continue the
@@ -131,8 +141,16 @@ command: |
       [ "$GOT" = "$INIT_SHA" ] || { echo "FATAL: init_from sha drift: $GOT != $INIT_SHA"; exit 44; }
       echo "init_from sha verified: $GOT"
     fi
+
+    # Arrival markers from a PREVIOUS attempt of this same submission would otherwise
+    # satisfy the barrier instantly on a retry -- eight stale files, count reaches eight,
+    # everyone proceeds while only two nodes are actually up. Cleared here, before $RDZV
+    # exists, so no peer can have written a marker yet.
+    rm -rf "$CKPT/arrival.$JOBTAG"
+    mkdir -p "$CKPT/arrival.$JOBTAG"
+    printf '%s\n' "$EFFECTIVE_MODE" > "$MODEFILE.tmp"
+    mv "$MODEFILE.tmp" "$MODEFILE"
   fi
-  RES=$CKPT
 
   echo "=== every bound artifact must be present before the first batch ==="
   for d in offline_arb_catalog_stage512b_v1 \
@@ -190,11 +208,22 @@ command: |
       sleep 5
     done
     test -n "$MASTER_ADDR" || { echo "FATAL: rendezvous missing after ${WAIT_S}s"; exit 20; }
+    # $RDZV exists, therefore rank 0 has finished resolving and published both the mode
+    # and a cleared arrival directory. Reading either is safe from here and only here.
+    EFFECTIVE_MODE=$(cat "$MODEFILE" 2>/dev/null || echo "")
+    case "$EFFECTIVE_MODE" in
+      fresh|continue) ;;
+      *) echo "FATAL: rank 0 published no run mode at $MODEFILE"; exit 43;;
+    esac
   fi
+  echo "run mode: declared=$RUN_MODE effective=$EFFECTIVE_MODE"
 
-  # Arrival barrier, per attempt -- markers are namespaced by JOBTAG so a retry counts
-  # its own nodes rather than the previous attempt's leftovers.
-  MDIR=$RES/arrival.$JOBTAG; mkdir -p "$MDIR"
+  # Arrival barrier. Counts nodes that STARTED, which is what a scheduling shortfall
+  # looks like; it is not a liveness check and does not pretend to be one -- a node that
+  # writes its marker and then dies still counts here, and torch's own rendezvous is what
+  # catches that. The directory was cleared by rank 0 before $RDZV appeared, so every
+  # marker present belongs to this attempt.
+  MDIR=$RES/arrival.$JOBTAG
   : > "$MDIR/ready.n$NODE_RANK"
   ARRIVED=0
   for _ in $(seq 1 $((WAIT_S / 5))); do
