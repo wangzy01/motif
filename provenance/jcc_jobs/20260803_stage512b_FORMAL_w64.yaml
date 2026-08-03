@@ -116,6 +116,17 @@ command: |
           EFFECTIVE_MODE=continue
           [ "$RUN_MODE" = continue ] || echo "retry of our own attempt: fresh -> continue"
         else
+          # Promoting to fresh here is only legitimate when the operator DECLARED fresh.
+          # If they declared continue, a missing last.pt is an error, not something to
+          # work around: silently starting from Stage512a at step 0 because the
+          # checkpoint we were told to continue from is absent is exactly the
+          # "trains from the wrong weights without saying so" failure this whole
+          # mechanism exists to prevent. Found by scripts/test_formal_run_mode_v1.py,
+          # which enumerates the combinations instead of trusting this reasoning.
+          [ "$RUN_MODE" = continue ] && {
+            echo "FATAL: RUN_MODE=continue but $CKPT/last.pt is missing."
+            echo "       Refusing to silently restart from Stage512a at step 0."
+            echo "       Use RUN_MODE=fresh if that is genuinely what you want."; exit 45; }
           EFFECTIVE_MODE=fresh
           echo "retry of our own attempt, no checkpoint yet: staying fresh"
         fi
