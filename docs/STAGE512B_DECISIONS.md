@@ -187,6 +187,50 @@ phase B 必须重载 model/optimizer/scheduler/EMA 并把 loader seek 到正确 
 **若 OCR exact-string 确实差**,实验是只对**有权威 GT 的那约 47% 行**比较 10%/5%/0%,
 不是一上来保护整个域。
 
+## S512B-19 GPUVAL 实测:GPIC 不需要建 blob;吞吐 2.57 s/step ⇒ 全程约 7.4 天
+
+作业 `evan-s512b-gpuval-w64-20260802-v2-fzm7`,64 GPU、真 512a 权重、真 512M plan,
+跑到 **step 420**(本该 100 就停,见下面的 bug)。
+
+| 指标 | Stage512a 末 200 步 | Stage512b GPUVAL |
+|---|---:|---:|
+| loss | 0.8611 | 前 5 步 **0.8715**、稳态 **0.8701** |
+| iter_s p50 | 2.618 | **2.570** |
+| **data_wait_frac p50** | **0.048** | **0.0435** |
+| peak_mem_gb | 17.76 | **17.76**(共 80) |
+
+**最大的未知已闭合,而且是否定的**:我判定"GPIC 从打包 blob 改成逐文件 S3 FUSE、
+读量 ×3.08,是正式跑变成 I/O bound 的最可能原因"。实测 data wait **4.35%**,
+比 512a 带 blob 的 4.8% 还略好(日志确认 `gpic_payload_backend=source_files_v1`)。
+**不需要建 512b GPIC blob。**
+
+loss 比 512a 末段高 **1.2%** —— 与数据改动(13 锚、real 58%→60%、GT 进 prompt)相称,
+远不到"2 倍 = 几何/归一化错配"的判据。forward/backward、FSDP2 64 rank、
+optimizer/EMA 跨阶段、`init_from` 重置 step=0 + 全新 warmup、每 50 步存 checkpoint,
+全部实测正常。
+
+**唯一还没验的是 resume** ——因为下面这个 bug 导致两阶段计划没执行。
+
+### 这次跑出来的两个 bug(都是我的)
+1. **`trainer.max_steps` 是装饰性的**。`checkpoint.derive_max_steps` 在有
+   `max_exposure_images` 时按"曝光量 / global_batch"派生 horizon,`trainer.max_steps`
+   只作参考;**只有命令行 `--max-steps` 能盖过它**。train.py 自己打了
+   `max_steps=250000 ... config.max_steps=100 仅作参考`。
+   ⚠️ **正式跑要改 horizon 就得改 `max_exposure_images`**,单改 `max_steps` 看起来
+   生效实际不生效。FORMAL 作业里已加断言:两者必须自洽。
+2. **create-once 的 claim 作用域错了**(进程级而非作业级)。`mkdir || exit 45` 意味着
+   **rank 0 的 pod 一重启就必死** —— 第二次尝试就是这么死的,撞上它自己 75 分钟前
+   claim 的目录。更要紧的是:同样的逻辑放进正式作业会**摧毁它本要保护的恢复机制**
+   —— `resume: true` 存在的意义就是 pod 重启后从 last.pt 续上。已改为记录 JOBTAG,
+   同作业可重入,别的作业仍然 exit 45。
+
+### 正式作业用 `RUN_MODE` 取代 claim
+`fresh`(目录必须不存在)/ `continue`(目录必须已有 last.pt)。
+由**操作者声明意图**,而不是让代码从磁盘现状去猜 —— 后者正是
+"`resume: true` 撞上陈旧 last.pt 就静默续接"这个坑。且 `continue` 模式下作业会
+**断言 train.py 打出的 resume 那行**,所以"重试时静默从 512a 重新初始化"会当场失败,
+而不是白跑几天。这也是为什么"专门验 resume 的 GPUVAL"**不是启动阻塞项**。
+
 ---
 
 ## 流程约定(不是数据决策,但同样具约束力)
