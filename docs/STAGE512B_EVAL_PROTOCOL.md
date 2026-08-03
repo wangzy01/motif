@@ -43,17 +43,25 @@ two_object / single_object)。总分会把"多实体计数变好、单体变差"
 资产:`evaluation/reference/stage512a_final_20260728/scripts/geneval_generate_shard.py`
 + `merge_geneval_shards.py`。
 
-### 2.3 OCR exact-string —— comparator 已有,**reader 还没有**
-`evaluation/benchmarks/scorers/ocr_exact_string.py` 已建,但要说清楚它是什么:
-它**只做比对**(GT 字符串 vs 别人给的 `rendered_text`),**不会从生成图里读字**。
-完整链路还缺 image → text 那一段:
+### 2.3 OCR exact-string —— 两段都已建成
+| 文件 | 作用 | 状态 |
+|---|---|---|
+| `evaluation/runners/ocr_read_images.py` | image → text(reader) | 抽取逻辑 14 例自测通过;**模型加载那段还没在 GPU 上真跑过** |
+| `evaluation/benchmarks/scorers/ocr_exact_string.py` | text vs GT(comparator) | 6 例合成集跑过 |
 
-- 需要固定的 **OCR reader**。本地无 paddleocr/easyocr/tesseract,但 `/fsx/models/` 有
-  `Qwen3-VL-8B-Instruct` / `Qwen3-VL-30B-A3B-Instruct`,可以当 reader 用。
-- reader 一旦选定就是**协议的一部分**:模型路径 + 版本 + 固定 prompt + greedy 解码
-  都要钉死并进 receipt,换 reader 与换 prompt 集一样会让历史 snapshot 不可比。
-- 用 Qwen3-VL 当 reader、而被测模型的文本编码器也是 Qwen3-VL-2B —— 角色不同、规模不同,
-  不构成循环,但要在报告里写明。
+**reader 选定即成为协议的一部分。** 本地无 paddleocr/easyocr/tesseract(集群离线),
+选 `/fsx/models/Qwen3-VL-8B-Instruct`。模型路径、**冻结的 prompt** 及其 sha256、
+greedy 解码设置、config 摘要全部写进输出 header,comparator 也强制要求传 engine 标识。
+**一旦某个 snapshot 用它打过分,换 reader 与换 prompt 集一样会让该 snapshot 不可比。**
+
+被测模型的文本编码器是 Qwen3-VL-2B、reader 是 Qwen3-VL-8B —— 角色不同、规模不同,
+reader **只看图、从不看 prompt**,不构成循环,但要在报告里写明。
+
+解码是 **greedy**:采样式 reader 会让指标抖动,看起来像模型在动。
+抽取只做两件事 —— 去掉首尾空白、去掉**成对**的首尾引号(牌子上真的会有引号,
+贪心剥引号会正好破坏这个指标要测的那些行)。**不做任何归一化**,那是 comparator
+的事,而且它把归一化前后分开报。每条记录同时保留 `reader_raw_output` 与
+`rendered_text`,所以抽取本身是可审计的,而不是只能相信 reader。
 
 `evaluation/benchmarks/scorers/` 此前只有 `clip_score.py` 和 `tagger_score.py`,
 两者都分不清 "GRAND OPENING" 和 "GRAMD OPENlNG"。本阶段第一次把权威 GT 送进
