@@ -84,22 +84,46 @@ command: |
     *) echo "FATAL: RUN_MODE must be 'fresh' or 'continue', got '${RUN_MODE:-}'"; exit 43;;
   esac
 
-  # Directory identity, decided by the operator's declared intent rather than inferred
-  # from what happens to be on disk. Every rank checks, because a rank that disagrees
-  # about which run this is would train into the wrong directory.
-  if [ "$RUN_MODE" = fresh ]; then
-    test ! -e "$CKPT" || {
-      echo "FATAL: RUN_MODE=fresh but $CKPT already exists."
-      echo "       Use RUN_MODE=continue to resume it, or a new CKPT_DIR."; exit 45; }
-  else
-    test -f "$CKPT/last.pt" || {
-      echo "FATAL: RUN_MODE=continue but $CKPT/last.pt is missing."
-      echo "       Use RUN_MODE=fresh for a first launch."; exit 45; }
+  # RUN_MODE is the OPERATOR's intent for a new submission. A JCC RETRY of that same
+  # submission is a different question, and answering it wrong makes maxRetries
+  # decorative: the retry re-runs this script with RUN_MODE still "fresh", finds the
+  # directory the first attempt created, and exits 45 -- so a seven-day run would die
+  # permanently on its first eviction, which is the exact scenario maxRetries exists for.
+  #
+  # So intent is combined with identity. $CKPT/.jobtag records which submission owns the
+  # directory; a retry sees its own tag and promotes fresh -> continue. Another
+  # submission still gets exit 45. If the first attempt died before writing any
+  # checkpoint, .jobtag matches but last.pt is absent, and the run correctly stays fresh
+  # -- train.py's init_from branch fires on "no local last.pt".
+  EFFECTIVE_MODE=$RUN_MODE
+  if [ -e "$CKPT" ]; then
+    OWNER=$(cat "$CKPT/.jobtag" 2>/dev/null || echo "<none>")
+    if [ "$OWNER" = "$JOBTAG" ]; then
+      if [ -f "$CKPT/last.pt" ]; then
+        EFFECTIVE_MODE=continue
+        [ "$RUN_MODE" = continue ] || echo "retry of our own attempt: fresh -> continue"
+      else
+        EFFECTIVE_MODE=fresh
+        echo "retry of our own attempt, no checkpoint yet: staying fresh"
+      fi
+    elif [ "$RUN_MODE" = fresh ]; then
+      echo "FATAL: RUN_MODE=fresh but $CKPT exists and is owned by '$OWNER'."
+      echo "       Use RUN_MODE=continue to resume it, or a new CKPT_DIR."; exit 45
+    fi
+  elif [ "$RUN_MODE" = continue ]; then
+    echo "FATAL: RUN_MODE=continue but $CKPT does not exist."; exit 45
   fi
+  if [ "$EFFECTIVE_MODE" = continue ]; then
+    test -f "$CKPT/last.pt" || {
+      echo "FATAL: continue mode but $CKPT/last.pt is missing."; exit 45; }
+  fi
+  echo "run mode: declared=$RUN_MODE effective=$EFFECTIVE_MODE"
 
   if [ "$NODE_RANK" = 0 ]; then
     mkdir -p "$CKPT"
-    if [ "$RUN_MODE" = fresh ]; then
+    # Written before anything else so a retry can recognise the directory as its own.
+    test -f "$CKPT/.jobtag" || printf '%s\n' "$JOBTAG" > "$CKPT/.jobtag"
+    if [ "$EFFECTIVE_MODE" = fresh ]; then
       # Only meaningful on a fresh launch: init_from is a mutable path that the frozen
       # Stage512a job would overwrite if it were ever relaunched. On a continue the
       # weights come from our own last.pt and init_from is not read at all.
@@ -183,7 +207,7 @@ command: |
   echo "all $NNODES nodes arrived"
 
   if [ "$NODE_RANK" = 0 ]; then
-    "$PY" - "$CKPT" "$CFG" "$JOBTAG" "$EXPECTED_COMMIT" "$RUN_MODE" "$INIT_SHA" <<'PYEOF'
+    "$PY" - "$CKPT" "$CFG" "$JOBTAG" "$EXPECTED_COMMIT" "$EFFECTIVE_MODE" "$INIT_SHA" <<'PYEOF'
   import hashlib, json, pathlib, sys
   ckpt, cfg, jobtag, commit, mode, init_sha = sys.argv[1:7]
   out = pathlib.Path(ckpt) / "FORMAL_RUN.json"
@@ -239,9 +263,9 @@ command: |
   # THE assertion that makes maxRetries safe. In continue mode the run must have picked
   # up from last.pt; a silent re-init from Stage512a would discard days of progress and
   # every downstream metric would look healthy. Checked on the line train.py prints.
-  if [ "$RUN_MODE" = continue ] && [ "$NODE_RANK" = 0 ]; then
+  if [ "$EFFECTIVE_MODE" = continue ] && [ "$NODE_RANK" = 0 ]; then
     grep -q "resumed from .* at step [1-9]" "$LOG" || {
-      echo "FATAL: RUN_MODE=continue but the run did not resume -- it re-initialised."
+      echo "FATAL: effective mode was continue but the run did not resume -- it re-initialised."
       grep -E "resumed from|init_from" "$LOG" | head; exit 46; }
     echo "resume verified: continued from an existing checkpoint"
   fi
