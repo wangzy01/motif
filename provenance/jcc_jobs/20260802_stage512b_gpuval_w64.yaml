@@ -84,8 +84,23 @@ command: |
   # then resume=true would silently continue from whatever was in it instead of
   # initialising from Stage512a. `mkdir` without -p fails if the directory exists, which
   # is the claim: exactly one node creates it, a retry must use a new name.
+  # The claim is scoped to THIS JOB, not to this pod invocation. A bare `mkdir || exit`
+  # is create-once per process, which means any rank-0 pod restart is fatal: the second
+  # attempt died exactly that way, hitting the directory it had claimed itself 75 minutes
+  # earlier. That is not a hypothetical for the formal run either -- resume=true exists
+  # precisely so a restarted pod continues from last.pt, and a claim that refuses the
+  # restart would disable the entire recovery story it was meant to protect.
+  # So: create it if absent, and if present accept it only when the claim names this job.
   if [ "$NODE_RANK" = 0 ]; then
-    mkdir "$CKPT" 2>/dev/null || { echo "FATAL: $CKPT already exists; use a fresh name"; exit 45; }
+    if mkdir "$CKPT" 2>/dev/null; then
+      printf '%s\n' "$JOBTAG" > "$CKPT/.claim"
+    else
+      OWNER=$(cat "$CKPT/.claim" 2>/dev/null || echo "<none>")
+      [ "$OWNER" = "$JOBTAG" ] || {
+        echo "FATAL: $CKPT is claimed by '$OWNER', not by this job ('$JOBTAG')."
+        echo "       Use a fresh CKPT_DIR."; exit 45; }
+      echo "re-entering our own claim after a pod restart (owner=$OWNER)"
+    fi
     # The source checkpoint is a MUTABLE path -- the Stage512a job would overwrite it if
     # relaunched -- so the digest is verified rather than trusted from a comment. Node 0
     # only: all eight read the same file, so hashing 26 GB eight times buys nothing.
@@ -168,6 +183,12 @@ command: |
   # Phase A initialises from Stage512a and stops at 100; phase B is relaunched with no
   # other change and must pick up at 100, reloading model, optimizer, scheduler and EMA
   # and seeking the loader to the right plan step. Free: the GPU time is identical.
+  # --max-steps, NOT trainer.max_steps=. checkpoint.derive_max_steps treats
+  # trainer.max_steps as informational whenever max_exposure_images is present and
+  # derives the real horizon as exposures / global_batch; only the CLI flag outranks it.
+  # The first attempt set trainer.max_steps=100, train.py logged
+  # "max_steps=250000 ... config.max_steps=100 仅作参考", and phase A ran to step 420
+  # until the pods were killed. The override was accepted and ignored.
   run_phase () {
     local phase=$1 upto=$2
     echo "===== phase $phase -> step $upto ====="
@@ -175,8 +196,7 @@ command: |
     "$PY" -m torch.distributed.run \
       --nnodes "$NNODES" --nproc-per-node 8 --node-rank "$NODE_RANK" \
       --master-addr "$MASTER_ADDR" --master-port "$PORT" \
-      train.py --config "$CFG" \
-      trainer.max_steps=$upto \
+      train.py --config "$CFG" --max-steps "$upto" \
       trainer.checkpoint_dir="$CKPT" \
       trainer.checkpoint_steps=50 \
       trainer.checkpoint_keep_max=2 \
