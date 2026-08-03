@@ -45,7 +45,9 @@ READER_PROMPT = (
     "If the image contains no text, output NOTEXT."
 )
 NO_TEXT_SENTINEL = "NOTEXT"
-MAX_NEW_TOKENS = 256
+# 512, not 256: 197 of the 1,941,791 GT rows exceed 256 tokens, and a fixed eval
+# set that happened to include one would be hard-truncated with nothing marking it.
+MAX_NEW_TOKENS = 512
 
 _QUOTE_PAIRS = (('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’"))
 
@@ -98,9 +100,9 @@ def load_manifest(path: Path) -> list[dict]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--manifest", required=True, type=Path,
+    ap.add_argument("--manifest", type=Path,
                     help="JSONL of {id, image_path, gt_text_raw}")
-    ap.add_argument("--out", required=True, type=Path,
+    ap.add_argument("--out", type=Path,
                     help="JSONL for ocr_exact_string.py --predictions")
     ap.add_argument("--model", type=Path, default=Path("/fsx/models/Qwen3-VL-8B-Instruct"))
     ap.add_argument("--batch-size", type=int, default=8)
@@ -111,6 +113,11 @@ def main() -> int:
 
     if args.self_test:
         return self_test()
+    # Required only for a real run. Marking them argparse-required blocked
+    # --self-test from ever reaching the code it tests.
+    for name, value in (("--manifest", args.manifest), ("--out", args.out)):
+        if value is None:
+            raise SystemExit(f"{name} is required for a real run")
 
     if args.out.exists():
         raise SystemExit(f"refusing to overwrite {args.out}")
@@ -129,6 +136,10 @@ def main() -> int:
     from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
     processor = AutoProcessor.from_pretrained(str(args.model))
+    # Decoder-only generate reads the LAST position's logits, so right padding
+    # makes a short sample's final token a pad and its output dependent on which
+    # batch it landed in. Qwen processors default to right.
+    processor.tokenizer.padding_side = "left"
     model = Qwen3VLForConditionalGeneration.from_pretrained(
         str(args.model), dtype=torch.bfloat16, device_map="cuda"
     ).eval()

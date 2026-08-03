@@ -25,10 +25,11 @@
 #   loss 0.8701 warm vs Stage512a's final-200 mean 0.8611  (+1.2%, no geometry fault)
 #   iter_s p50 2.570 vs 2.618                              (throughput unchanged)
 #   data_wait_frac p50 0.0435 vs 0.048                     (GPIC per-file S3 FUSE is FINE)
-#   peak_mem_gb 17.76 of 80                                (large headroom)
+#   peak_mem_gb 17.76 (torch-allocated); nvidia-smi peak 42,317 MiB of 81,559
+#                                                          (headroom real, not 62 GiB)
 # The GPIC blob question is closed: no blob is needed despite 3.08x the read volume.
 name: evan-s512b-real-formal-w64
-description: "Stage512b-real FORMAL: 250,000 steps x 2048 = 512M exposures over the 13-anchor curated pool, resuming Stage512a's 125,000-step weights. RUN_MODE must be fresh or continue and is checked against the directory; maxRetries 3 relies on resume, which the job asserts in continue mode. All artifact digests verified before the first batch."
+description: "Stage512b-real FORMAL: 250,000 steps x 2048 = 512M exposures over the 13-anchor curated pool, resuming Stage512a's 125,000-step weights. RUN_MODE must be fresh or continue and is checked against the directory; maxRetries 3 relies on resume, which the job asserts in continue mode. Artifact presence, the enforced sampling-config digest and the plan/catalog binding are checked before the first batch; per-file payload digests are verified lazily by the loader as it reads, not up front."
 image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
 numWorkers: 8
 gpuPerWorker: 8
@@ -52,6 +53,11 @@ command: |
   export OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
   export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN FI_EFA_USE_DEVICE_RDMA=1
   export OFFLINE_ARB_PREFETCH_STEPS=4
+  # A crash can leave metrics.jsonl ahead of last.pt, and a retry that simply
+  # appends produces duplicate steps. training/auto_resume_reconcile.py already
+  # handles this fail-closed and is gated behind this variable, which the job was
+  # not setting -- the mechanism existed and was switched off.
+  export OFFLINE_ARB_AUTO_RESUME_RECONCILE=1
   unset OFFLINE_ARB_STEP_TIMEOUT_S OFFLINE_ARB_PROFILE_WINDOWS OFFLINE_ARB_SMOKE_DATASET_CONFIG
   unset OFFLINE_ARB_IO_TELEMETRY_DIR OFFLINE_ARB_GPIC_THREADS_PER_NODE
   unset MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_ ARROW_DEFAULT_MEMORY_POOL LD_PRELOAD
@@ -110,6 +116,19 @@ command: |
   if [ "$NODE_RANK" = 0 ]; then
     EFFECTIVE_MODE=$RUN_MODE
     if [ -e "$CKPT" ]; then
+      # continue must be pointed at a Stage512b FORMAL run, not merely at a directory
+      # that happens to hold a loadable last.pt. Without this, CKPT_DIR set to the frozen
+      # Stage512a recovery_v2 directory is ACCEPTED: its checkpoint is architecturally
+      # identical, so train.py resumes at global_step 125000, trains only the last 125,000
+      # steps of the plan, and the shell writes .jobtag and arrival markers into a frozen
+      # artifact directory. FORMAL_RUN.json with this schema is the proof, and Stage512a's
+      # directory has neither it nor .jobtag.
+      if [ "$RUN_MODE" = continue ]; then
+        grep -q '"stage512b_real_formal_run_v1"' "$CKPT/FORMAL_RUN.json" 2>/dev/null || {
+          echo "FATAL: $CKPT has no Stage512b FORMAL_RUN.json receipt."
+          echo "       continue resumes a Stage512b run; it will not adopt an arbitrary"
+          echo "       checkpoint directory, including Stage512a's."; exit 45; }
+      fi
       OWNER=$(cat "$CKPT/.jobtag" 2>/dev/null || echo "<none>")
       if [ "$OWNER" = "$JOBTAG" ]; then
         if [ -f "$CKPT/last.pt" ]; then
@@ -141,7 +160,15 @@ command: |
       test -f "$CKPT/last.pt" || {
         echo "FATAL: continue mode but $CKPT/last.pt is missing."; exit 45; }
     fi
-    mkdir -p "$CKPT"
+    # Atomic when it matters. `test ! -e` followed by `mkdir -p` is TOCTOU: two fresh
+    # submissions naming the same CKPT_DIR can both observe it absent, both proceed, and
+    # then share a directory -- two optimizers writing one last.pt. Bare mkdir is the
+    # atomic claim; -p is used only when we already established the directory is ours.
+    if [ "$EFFECTIVE_MODE" = fresh ] && [ ! -e "$CKPT/.jobtag" ]; then
+      mkdir "$CKPT" 2>/dev/null || test -d "$CKPT" || { echo "FATAL: cannot create $CKPT"; exit 45; }
+    else
+      mkdir -p "$CKPT"
+    fi
     test -f "$CKPT/.jobtag" || printf '%s\n' "$JOBTAG" > "$CKPT/.jobtag"
 
     if [ "$EFFECTIVE_MODE" = fresh ]; then
@@ -294,6 +321,7 @@ command: |
     --nnodes "$NNODES" --nproc-per-node 8 --node-rank "$NODE_RANK" \
     --master-addr "$MASTER_ADDR" --master-port "$PORT" \
     train.py --config "$CFG" \
+    trainer.checkpoint_dir="$CKPT" \
     2>&1 | tee "$LOG"
   PIPE_RC=("${PIPESTATUS[@]}")
   set -e
@@ -304,10 +332,17 @@ command: |
   # up from last.pt; a silent re-init from Stage512a would discard days of progress and
   # every downstream metric would look healthy. Checked on the line train.py prints.
   if [ "$EFFECTIVE_MODE" = continue ] && [ "$NODE_RANK" = 0 ]; then
-    grep -q "resumed from .* at step [1-9]" "$LOG" || {
+    # `grep ... | head` under `set -o pipefail` reports the pipeline's failure, not the
+    # branch's: no match returns 1 and a SIGPIPE'd grep returns 141, either of which
+    # would replace the intended 46 and mask the real torchrun status. Both greps are
+    # now guarded and the diagnostic output cannot fail the script.
+    if grep -q "resumed from .* at step [1-9]" "$LOG"; then
+      echo "resume verified: continued from an existing checkpoint"
+    else
       echo "FATAL: effective mode was continue but the run did not resume -- it re-initialised."
-      grep -E "resumed from|init_from" "$LOG" | head; exit 46; }
-    echo "resume verified: continued from an existing checkpoint"
+      grep -E "resumed from|init_from" "$LOG" 2>/dev/null | head -5 || true
+      exit 46
+    fi
   fi
   test "$RC" -eq 0 || { echo "training exited $RC"; exit "$RC"; }
   echo "=== DONE ==="

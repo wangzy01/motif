@@ -50,7 +50,13 @@ def extract_block() -> str:
 
 
 def run_case(block: str, *, declared: str, dir_exists: bool, jobtag: str | None,
-             last_pt: bool) -> tuple[int, str]:
+             last_pt: bool, receipt: str | None = "ours") -> tuple[int, str]:
+    """receipt: "ours" = a Stage512b FORMAL_RUN.json, "other" = wrong schema, None = absent.
+
+    Any directory a FORMAL attempt has actually run in HAS this file -- rank 0 writes it
+    every attempt -- so "ours" is the realistic default. None models the Stage512a
+    directory and any other checkpoint dir that was never a Stage512b formal run.
+    """
     tmp = Path(tempfile.mkdtemp(prefix="formal_mode_"))
     try:
         ckpt = tmp / "run"
@@ -60,6 +66,12 @@ def run_case(block: str, *, declared: str, dir_exists: bool, jobtag: str | None,
                 (ckpt / ".jobtag").write_text(jobtag + "\n")
             if last_pt:
                 (ckpt / "last.pt").write_text("x")
+            if receipt == "ours":
+                (ckpt / "FORMAL_RUN.json").write_text(
+                    '{"schema": "stage512b_real_formal_run_v1", "attempts": []}')
+            elif receipt == "other":
+                (ckpt / "FORMAL_RUN.json").write_text(
+                    '{"schema": "stage512a_weighted_w64_recovery_formal_run_20260724v2"}')
         script = "\n".join([
             "set -euo pipefail",
             f'CKPT="{ckpt}"', f'RUN_MODE="{declared}"', f'JOBTAG="{OURS}"',
@@ -102,6 +114,22 @@ CASES = [
     (("continue", False, None, False), (45, ""), "continue + no dir -> exit 45"),
 ]
 
+# The Stage512a-adoption case, which needs the receipt dimension. Pointing CKPT_DIR at
+# the frozen Stage512a directory offers a last.pt that is architecturally identical, so
+# nothing in train.py would object: it would resume at step 125000 and train only the
+# last 125,000 steps of the plan, while the shell wrote .jobtag and arrival markers into
+# a frozen artifact directory.
+RECEIPT_CASES = [
+    (("continue", True, None, True, None), (45, ""),
+     "continue + Stage512a-like dir (no receipt) -> exit 45"),
+    (("continue", True, OURS, True, None), (45, ""),
+     "continue + our dir but no receipt -> exit 45"),
+    (("continue", True, None, True, "other"), (45, ""),
+     "continue + another stage's receipt -> exit 45"),
+    (("fresh", False, None, False, None), (0, "fresh"),
+     "fresh + no dir, no receipt needed -> fresh"),
+]
+
 
 def main() -> int:
     block = extract_block()
@@ -116,15 +144,29 @@ def main() -> int:
         if not ok:
             failures.append(f"{label}: rc={rc} mode={mode!r}, want rc={want_rc} mode={want_mode!r}")
 
-    # The property that matters most, stated as its own assertion rather than left
-    # implicit in the table: there must be NO path where a directory belonging to another
-    # job is silently trained into under a fresh declaration.
+    for args, (want_rc, want_mode), label in RECEIPT_CASES:
+        declared, dir_exists, jobtag, last_pt, receipt = args
+        rc, mode = run_case(block, declared=declared, dir_exists=dir_exists,
+                            jobtag=jobtag, last_pt=last_pt, receipt=receipt)
+        ok = rc == want_rc and (want_mode == "" or mode == want_mode)
+        print(f"  {'ok  ' if ok else 'FAIL'} {label:<58} rc={rc} mode={mode or '-'}")
+        if not ok:
+            failures.append(f"{label}: rc={rc} mode={mode!r}, want rc={want_rc} mode={want_mode!r}")
+
+    # The two properties that matter most, asserted directly rather than left implicit in
+    # the tables: a fresh declaration must never adopt another job's directory, and a
+    # continue must never adopt a directory that was not a Stage512b formal run.
     for jt in (THEIRS, None):
         rc, _ = run_case(block, declared="fresh", dir_exists=True, jobtag=jt, last_pt=True)
         if rc == 0:
             failures.append(f"SILENT ADOPTION: fresh accepted a dir with .jobtag={jt!r}")
+    for receipt in (None, "other"):
+        rc, _ = run_case(block, declared="continue", dir_exists=True, jobtag=None,
+                         last_pt=True, receipt=receipt)
+        if rc == 0:
+            failures.append(f"SILENT ADOPTION: continue accepted a dir with receipt={receipt!r}")
 
-    print(f"\n{len(CASES) + 2} checks, {len(failures)} failures")
+    print(f"\n{len(CASES) + len(RECEIPT_CASES) + 4} checks, {len(failures)} failures")
     for f in failures:
         print(f"  {f}")
     if failures:

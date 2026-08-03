@@ -56,7 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from omegaconf import OmegaConf  # noqa: E402
 
-from training.dataline import anchors_v1  # noqa: E402
+from training.dataline import anchors_v1, caption_build  # noqa: E402
 from training.dataline_offline.offline_dataset import (  # noqa: E402
     OfflineExactDataset,
     OfflineLoaderError,
@@ -224,18 +224,35 @@ class PromptAudit:
                 gt = self.gt.get(int(rows[i])) if self.gt is not None else None
                 if gt:
                     self.textatlas_gt_available += 1
-                    if gt in prompt:
+                    # `gt in prompt` is not evidence of injection. The plain i1 caption
+                    # already contains the full raw GT often enough that a completely
+                    # bypassed injection path would still score 28/28 -- external audit
+                    # measured a 69.5% expected substring-hit rate on captions alone, and
+                    # 17 of the 28 hits in the last smoke needed no injection at all.
+                    # So require the canonical clause, which only compose_* produces.
+                    injected = any(
+                        prompt.startswith(tpl.format(gt=gt))
+                        for tpl in caption_build.TEXTATLAS_GT_TEMPLATES
+                    )
+                    if injected:
                         self.textatlas_gt_in_prompt += 1
                         counter["gt_in_prompt"] += 1
                     else:
                         # Legitimate only when the clause alone blows the budget, in
                         # which case the prompt must be the plain caption and must NOT
                         # contain a piece of the GT.
-                        clause_tokens = len(
-                            self.tokenizer(gt, add_special_tokens=False)["input_ids"]
+                        # Production decides on the WRAPPED clause against the 471-token
+                        # budget, not on raw GT against an arbitrary 400. 13 rows have
+                        # raw >= 400 yet every template fits (e.g. row 85703605, raw 406
+                        # / clause max 414) -- those must be injected, and the old proxy
+                        # excused them.
+                        clause_tokens = max(
+                            len(self.tokenizer(tpl.format(gt=gt),
+                                               add_special_tokens=False)["input_ids"])
+                            for tpl in caption_build.TEXTATLAS_GT_TEMPLATES
                         )
                         counter["gt_fell_back"] += 1
-                        if clause_tokens < 400:
+                        if clause_tokens <= 471:
                             self.failures.append(
                                 f"textatlas row_id={rows[i]} has GT ({clause_tokens} "
                                 "tokens, well inside budget) but the prompt does not "

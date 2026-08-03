@@ -14,8 +14,9 @@
 #           catalog_hash b91e4906df9a1f8b039effa69df83a0555310d964bf22d6e1da7c13e9c781b91
 #   BUILT   offline_plan_root     -- weighted plan, 2026-08-02, 245 blocks / 250,000
 #           steps, plan_hash 50b5ae2bb2a952b18355d5d5876ceac8c4d8086ae72f872b306a8167f84fd685
-#   PENDING offline_anime_freq_root, offline_caption_sidecar_root, and every
-#           trainer: key below.
+#   BUILT   offline_anime_freq_root, offline_caption_sidecar_root (56 GB),
+#           offline_textatlas_gt_root (v2). The trainer: block is complete except
+#           checkpoint_dir, which the FORMAL job supplies via CKPT_DIR.
 
 model_cls: networks.model_mot.MoTT2IModel
 target_device: cuda
@@ -130,7 +131,7 @@ dataset:
   # column, which for a text renderer is a rewritten target: NFKC turns full-width into
   # half-width and folds circled and mathematical characters. The loader refuses v1 by
   # schema name rather than failing later on a missing column.
-  offline_textatlas_gt_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_textatlas_gt_stage512b_v2   # PENDING: v2 not built yet
+  offline_textatlas_gt_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_textatlas_gt_stage512b_v2   # BUILT 2026-08-02, 1,941,791 rows, sha256 09d51bed…
   caption_sidecar_workers: 16
   caption_workers_anime: 8
   caption_workers_monet_real: 8

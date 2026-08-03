@@ -135,5 +135,7 @@ Stage512a 的评测协议**只跑 512×512**,所以这条轴按定义**没有现
 快照是 `checkpoint_keep_format: weights_ema`,约 13 GB 一个、**不可续训**(无 optimizer),
 只供 eval / 回滚;可续训的副本始终是 `last.pt`。8 × 13 GB = 104 GB。
 
-早期(step < 30,000)只有滚动 checkpoint,`checkpoint_steps: 3000` × `keep_max` ⇒ 窗口有限;
-想要早期健全性评测就必须在它滚掉之前跑。
+早期(step < 30,000)**没有任何可回溯的 full checkpoint**。`checkpoint_steps: 3000` 只是
+不断**覆盖同一个 `last.pt`**,不产生 8 个早期快照 —— 我之前写的"`checkpoint_steps` ×
+`keep_max` 的滚动窗口"是错的(外部审计指出)。想要早期健全性评测,只能在训练进行中
+**当场**从 `last.pt` 取,过了就没有了。

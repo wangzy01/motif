@@ -125,11 +125,18 @@ def main() -> int:
 
     rows = []
     missing = 0
+    header: dict | None = None
     for line in args.predictions.read_text().splitlines():
         line = line.strip()
         if not line:
             continue
         record = json.loads(line)
+        # The reader writes its provenance as a JSONL header line. Treating it as a
+        # sample made the documented reader -> scorer command fail on its first line,
+        # so the two halves of the OCR loop had never actually been run back to back.
+        if record.get("_header"):
+            header = record
+            continue
         if "gt_text_raw" not in record:
             raise SystemExit(
                 f"record {record.get('id')!r} has no gt_text_raw. Score against RAW, "
@@ -151,6 +158,16 @@ def main() -> int:
     summary["ocr_engine"] = args.ocr_engine
     summary["checkpoint"] = args.checkpoint
     summary["empty_ocr_results_counted_as_wrong"] = missing
+    if header:
+        # Cross-check the engine the operator claimed against the one the reader
+        # recorded. Previously engine identity was taken purely on trust from the
+        # CLI, so a wrong value scored happily.
+        summary["reader_header"] = header
+        if header.get("engine") and header["engine"] != args.ocr_engine:
+            raise SystemExit(
+                f"--ocr-engine {args.ocr_engine!r} disagrees with the reader header "
+                f"{header['engine']!r}; the engine is part of the protocol")
+
 
     print(f"checkpoint       {args.checkpoint}")
     print(f"ocr engine       {args.ocr_engine}")

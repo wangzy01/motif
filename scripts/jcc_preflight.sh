@@ -31,16 +31,27 @@ head="$(git rev-parse HEAD)"
 echo "expected commit : $expected"
 echo "HEAD            : $head"
 
-# Prefix match so a short sha is accepted; anchored so a short sha cannot match in
-# the middle of a longer one.
-case "$head" in
-  "$expected"*) ;;
+# Full 40 hex digits, compared for equality. Prefix matching was a mistake: it accepted
+# "9" against 9a105ed... and returned 0, so a one-character typo -- or a value that got
+# truncated somewhere in the submission path -- silently disabled the gate while printing
+# a reassuring line. Verified before the fix: `jcc_preflight.sh 9 .` exited 0.
+case "$expected" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
   *)
-    echo "FATAL: HEAD is not the expected commit -- the tree is at a different revision"
-    echo "       than the one that was reviewed.  Re-check out, or fix the job spec."
+    echo "FATAL: expected commit must be a full 40-character lowercase hex sha, got"
+    echo "       '$expected' (${#expected} chars). A prefix is not accepted: it would"
+    echo "       let a truncated value pass the gate while looking correct."
     exit 46
     ;;
 esac
+if [ "$head" != "$expected" ]; then
+  echo "FATAL: HEAD is not the expected commit -- the tree is at a different revision"
+  echo "       than the one that was reviewed.  Re-check out, or fix the job spec."
+  exit 46
+fi
 
 # --porcelain includes untracked files on purpose.  An untracked .py next to a
 # module it shadows changes behaviour just as effectively as an edit does.

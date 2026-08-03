@@ -147,12 +147,27 @@ def compose_textatlas_gt_prompt(gt_text, caption, tokenizer, budget, rng) -> str
         # 光 GT 从句就超预算 → 回退纯 caption。这类行在 512b 里是少数（Paper2Text 那种
         # 整页文本已在 builder 层排除），但必须显式处理：截断的 GT 是错的训练目标。
         return truncate_to_token_budget(caption, tokenizer, budget)
-    # 留 2 token 余量：拼接处的 BPE 合并会让 tokenize(a+b) 略多于 tokenize(a)+tokenize(b)。
+    # 固定留 2 token 余量**不是普适的 BPE 边界**。反例(外部审计给出、已复现)：
+    # caption=`インターネット`、GT 为 142 个 `wN`、budget=471，三个模板拼出来的 inner
+    # 长度分别是 474/473/474 —— 都超了。`truncate_to_token_budget` 解码后不再 tokenize，
+    # 所以按 remaining 截出来的 tail 拼回去可以再涨几个 token。
+    # 唯一可靠的办法是**对最终成品重新计数**，超了就继续只缩 caption 尾巴：
+    # GT 从句永不动，这条不变量比省几次 tokenize 重要。
     remaining = budget - n_clause - 2
     if remaining <= 0 or not caption:
         return clause
     tail = truncate_to_token_budget(caption, tokenizer, remaining)
-    return f"{clause} {tail}".strip() if tail else clause
+    for _ in range(8):                                  # 有界：每轮至少砍掉一成
+        if not tail:
+            return clause
+        prompt = f"{clause} {tail}".strip()
+        if len(tokenizer(prompt, add_special_tokens=False)["input_ids"]) <= budget:
+            return prompt
+        remaining = int(remaining * 0.9) - 1
+        if remaining <= 0:
+            return clause
+        tail = truncate_to_token_budget(tail, tokenizer, remaining)
+    return clause
 
 
 def finalize_real_caption(raw_text: str | None, captioner: str, truncate=(224, 256)) -> str:
