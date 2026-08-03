@@ -317,6 +317,45 @@ FSx 空间充分(约 5.4 TiB 可用,稳态需约 132 GiB)。
 **F-13 真两阶段 resume GPUVAL**:代码已修好并有 19 项穷举测试,但没在 8 节点上真跑过。
 其余启动阻塞项已全部关闭。
 
+## S512B-24 真两阶段 resume GPUVAL 通过(F-13 闭合);正式跑必须 80 核,48 核不行
+
+作业 `evan-s512b-gpuval-resume-20260803-v6-xgmr`,commit `fcf44f7`,8 节点全到,
+phase A 跑到 100 → 停 → phase B 续到 200。**Succeeded,`GPUVAL_POSTCHECK_PASS`。**
+
+| 检查 | 结果 |
+|---|---|
+| `--max-steps` 覆盖 | ✅ train.py 打印"显式 --max-steps=100 优先于 max_exposure_images" |
+| phase A 干净停在 100 并写出可续训 `last.pt` | ✅ |
+| **phase B 真续训** | ✅ `resumed from …/last.pt at step 100` |
+| **scheduler 跨边界连续** | ✅ LR step100 `3.498743e-05` → step101 `3.533384e-05`,正好一步 warmup 增量,不是重置。**这比日志断言更硬** |
+| metrics 跨 resume | ✅ 200 行全唯一、单调、**零重复** |
+| 周期快照 | ✅ `step_100.pt` + `step_200.pt` + `last.pt` |
+| loss vs 512a 末 200 步 | ✅ 比值 **1.012** |
+| 显存 | ✅ 17.76 GB(torch),两次加载都稳 |
+| 8 节点到达屏障 | ✅ 真实错峰下工作 |
+| preflight 40 位 commit 全等门 | ✅ |
+
+⚠️ **但这次是干净停止,不是崩溃。** F-09 关心的"崩溃导致 metrics 跑在 checkpoint 前面"
+那一支**没被触发**;它靠 FORMAL 里刚打开的 `OFFLINE_ARB_AUTO_RESUME_RECONCILE=1` 兜底,
+而该路径仍未在真崩溃下验过。
+
+### 资源降配的实测结论:**48 核不可用于正式跑**
+为改善可调度性把 GPUVAL 降到 `cpu 48 / mem 600`,量出来:
+
+| | 420 步那次(80/900) | 这次(48/600) |
+|---|---:|---:|
+| `iter_s` p50(稳态,排掉两次冷启动) | **2.570 s** | **4.440 s** |
+| `data_wait_frac` p50 | 0.0435 | 0.029 |
+| `data_wait_s` **max** | — | **43.53 s** |
+| `iter_s` max | 6.17 s | **56.36 s** |
+| 折算 250,000 步 | **7.4 天** | **12.8 天** |
+
+**中位步时几乎翻倍(1.73×)。** 注意 `data_wait_frac` 的**中位数反而更低**,是**尾部**炸了
+(max 0.85、单次停顿 43.5 秒)—— 48 核要喂 16 gpic 线程 + 16 caption worker + 8 fetch
+worker,超订后间歇性饥饿。可能还叠加了失去节点独占(48/600 能被塞进已有作业的节点),
+**两个原因我没有分离开**,但结论一样:**FORMAL 保持 `cpu 80 / mem 900`**。
+(这也正是审计说"不能靠假设砍资源"要求的那个测量。)
+
 ---
 
 ## 流程约定(不是数据决策,但同样具约束力)
