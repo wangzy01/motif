@@ -260,7 +260,51 @@ def main() -> int:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    print(f"\n{len(CASES) + len(RECEIPT_CASES) + 7 + len(checks) + 1} checks, "
+    # ---- the reconciler's environment contract (2026-08-04 17:10 UTC, cost a launch) ----
+    # RECONCILE=1 makes every resume call auto_resume_reconcile, whose _bindings_from_env
+    # REQUIRES four variables. The flag was turned on without them; no GPUVAL could catch
+    # it because the GPUVALs never set the flag, so the first real continue of the stage
+    # failed closed across all 64 ranks. This test runs the spec's own export lines and
+    # feeds the resulting environment to the real _bindings_from_env.
+    if "OFFLINE_ARB_AUTO_RESUME_RECONCILE=1" in src:
+        for var in ("OFFLINE_ARB_ATTEMPT_JOBTAG", "OFFLINE_ARB_ATTEMPT_NONCE",
+                    "OFFLINE_ARB_AUTO_RESUME_FREEZE_SHA256",
+                    "OFFLINE_ARB_AUTO_RESUME_PLAN_HEADER_SHA256"):
+            ok = f"export {var}" in src
+            print(f"  {'ok  ' if ok else 'FAIL'} spec exports {var}")
+            if not ok:
+                failures.append(f"RECONCILE=1 but {var} is never exported -- every "
+                                "continue dies in _bindings_from_env before the first batch")
+        start = src.find("export OFFLINE_ARB_ATTEMPT_JOBTAG")
+        end = src.find("export OFFLINE_ARB_AUTO_RESUME_PLAN_HEADER_SHA256")
+        if start != -1 and end != -1:
+            block = src[start:src.index("\n", end)]
+            probe = subprocess.run(
+                ["bash", "-c", "\n".join([
+                    "set -euo pipefail",
+                    'JOBTAG="evan-s512b-real-formal-w64-5v9n-retry-stbf"',
+                    f'RUN_ID="{OURS}"',
+                    'STAMP=20260804T171000Z',
+                    'REPO=/fsx/evan/mot_code_s512b_impl',
+                    'B=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop',
+                    block,
+                    'env | grep ^OFFLINE_ARB_',
+                ])], capture_output=True, text=True)
+            env = dict(line.split("=", 1) for line in probe.stdout.splitlines() if "=" in line)
+            try:
+                sys.path.insert(0, str(ROOT))
+                from training.auto_resume_reconcile import _bindings_from_env
+                bindings = _bindings_from_env(env)
+                ok = probe.returncode == 0 and bindings["jobtag"].startswith("evan-")
+                print(f"  {'ok  ' if ok else 'FAIL'} the spec's exports satisfy "
+                      f"_bindings_from_env  [nonce={bindings['attempt_nonce'][:12]}…]")
+                if not ok:
+                    failures.append("spec export block ran but bindings were rejected")
+            except Exception as exc:  # noqa: BLE001
+                print(f"  FAIL the spec's exports satisfy _bindings_from_env  [{exc}]")
+                failures.append(f"_bindings_from_env rejected the spec's values: {exc}")
+
+    print(f"\n{len(CASES) + len(RECEIPT_CASES) + 7 + len(checks) + 1} checks(+contract), "
           f"{len(failures)} failures")
     for f in failures:
         print(f"  {f}")

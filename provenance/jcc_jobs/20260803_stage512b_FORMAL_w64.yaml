@@ -93,6 +93,29 @@ command: |
   [ -n "${RUN_ID:-}" ] || { echo "FATAL: RUN_ID unset"; exit 43; }
   case "$CKPT_DIR" in *PLACEHOLDER*) echo "FATAL: CKPT_DIR is a placeholder"; exit 43;; esac
   CKPT=$CKPT_DIR
+
+  # The reconciler's environment contract. RECONCILE=1 above makes train.py call
+  # training/auto_resume_reconcile.py on every resume, and _bindings_from_env REQUIRES
+  # these four variables -- a resume without them fails closed before the first batch.
+  # Observed 2026-08-04 17:10: the first real continue of this stage died exactly there,
+  # across all 64 ranks. The flag had been turned on without its contract; nothing in the
+  # repo had ever exported these, so no GPUVAL could have caught it -- the GPUVALs never
+  # set RECONCILE=1, which is how "resume works" and "resume works with reconcile on"
+  # came apart. The comment above ("the mechanism existed and was switched off") was me
+  # flipping a switch without reading what the mechanism needed. Ninth of the family.
+  #
+  # Values: JOBTAG is the pod-derived attempt identity (safe-name); the nonce must be a
+  # fresh sha256 per LAUNCH (pod generation), which RUN_ID.JOBTAG.STAMP gives since STAMP
+  # is minted at pod start; the two sha bindings are recorded into the evidence receipts,
+  # not verified, so the most useful identities are the loader-enforced sampling config
+  # and the plan header the run is bound to.
+  export OFFLINE_ARB_ATTEMPT_JOBTAG="$JOBTAG"
+  OFFLINE_ARB_ATTEMPT_NONCE=$(printf '%s' "$RUN_ID.$JOBTAG.$STAMP" | sha256sum | awk '{print $1}')
+  export OFFLINE_ARB_ATTEMPT_NONCE
+  OFFLINE_ARB_AUTO_RESUME_FREEZE_SHA256=$(sha256sum "$REPO/data_analysis/configs/t5_sampling_stage512b_real_v1.json" | awk '{print $1}')
+  export OFFLINE_ARB_AUTO_RESUME_FREEZE_SHA256
+  OFFLINE_ARB_AUTO_RESUME_PLAN_HEADER_SHA256=$(sha256sum "$B/offline_arb_plan_stage512b_w64_512m_anchors_v1_20260802/header.json" | awk '{print $1}')
+  export OFFLINE_ARB_AUTO_RESUME_PLAN_HEADER_SHA256
   case "${RUN_MODE:-}" in
     fresh|continue) ;;
     *) echo "FATAL: RUN_MODE must be 'fresh' or 'continue', got '${RUN_MODE:-}'"; exit 43;;
