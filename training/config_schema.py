@@ -243,6 +243,7 @@ SCHEMA = {
         "gc_freeze_after_steps": int,          # gated GC 修复(2026-07-03 creep)：>0 进程启动后第N步 gc.collect+freeze(默认0=关, 建议50)
         "gc_refreeze_every": int,              # gated GC 修复(2026-07-05 p90/p99 creep)：>0 进程启动后每N步 gc.collect+freeze，治 post-freeze 长存对象累积(默认0=关, 建议100+)
         # ---- 诊断开关（默认关，关时对训练逐位无影响）---- #
+        "gc_pause_probe": bool,                # 2026-08-04：gc.callbacks 直测每次回收停顿，跨 rank max 写进 metrics(gc_allrank_*/data_wait_allrank_max_s)。上面三个开关是实测产物，但跑起来后从没量过一次停顿 → 残余尾巴只能靠推断吵架
         "debug_step_trace": bool,
         "debug_step_trace_dir": NO_TYPECHECK,  # str 或 null
         "debug_trace_dump_interval": float,

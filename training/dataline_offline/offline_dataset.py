@@ -120,6 +120,20 @@ _TELEMETRY_SCHEMA = "offline_arb_io_profile_v1"
 # network errors keep their existing inner 3x/20s policy.  The combined
 # worst-case remains below the loader's default 600-second step timeout.
 _ANIME_EXACT_REFETCH_DELAYS_S = (1.0, 4.0, 16.0, 64.0)
+# Per-rank ceiling on anime metadata-drift rows whose crop_loss against the DECODED
+# pixels exceeds the threshold their anchor was assigned under.  Such a row is usable
+# (crop_loss_max is a corpus-composition constraint enforced offline, at plan build
+# time); what is NOT acceptable is tolerating them at an unbounded rate, because a
+# systematically wrong row->file mapping would present as exactly this signal.  So it
+# is a circuit breaker, not a mute button, and every occurrence prints.
+#
+# Derived, not guessed.  The 2026-08-04 formal run measured 1 such row in 660 steps x
+# 64 ranks x 32 slots = 1,351,680 decoded samples (7.4e-7).  Over the full plan each
+# rank decodes 512,000,000 / 64 = 8,000,000 rows, so the expectation is ~6 per rank.
+# 2000 leaves ~340x headroom for a rate estimate drawn from a single event, while a
+# real mapping fault -- which would hit a large fraction of rows -- trips it within
+# minutes instead of training on mismatched image/caption pairs for seven days.
+_ANIME_DRIFT_CROP_TOLERATED_MAX = 2000
 _ANIME_CAPTION_SOURCE_PARENT = Path("/s3/evan/anime_core_ditv04_ct_soft/data")
 _ANIME_SOURCE_IMAGE_BINDING_COLUMNS = (
     "md5",
@@ -1771,6 +1785,11 @@ class OfflineExactDataset:
         # time we read them.
         self._anchors_mode = _header_bucket_mode(header) == anchors_v1.BUCKET_MODE
         self._anchors_crop_loss: dict[str, float] = {}
+        # Per-rank, per-process count of anime native-drift rows whose crop_loss against
+        # the decoded pixels exceeded the catalog's threshold.  Bounded by
+        # _ANIME_DRIFT_CROP_TOLERATED_MAX; resets on restart, which is the conservative
+        # direction (a resumed run gets a fresh budget rather than inheriting a spent one).
+        self._anchors_drift_crop_tolerated = 0
         if self._anchors_mode:
             mar = inputs.get("multi_ar_params")
             if not isinstance(mar, Mapping) or "crop_loss_max" not in mar:
@@ -3965,6 +3984,12 @@ class OfflineExactDataset:
                     f"decoded RGB array has invalid shape/layout "
                     f"row_id={planned.row_id}: {native_u8.shape}"
                 )
+            # Set only by the anime tolerance below, and read only by the anchors_v1
+            # gate further down.  The two checks are separated by the elif branch, so
+            # the fact "this row's catalog geometry was overridden by its decoded
+            # pixels" has to be carried across; recomputing it at the gate would
+            # duplicate the tolerance condition and let the two drift apart.
+            anime_native_drift = False
             if (actual_w, actual_h) != (expected_w, expected_h):
                 # Anime HTTP-served payloads can have upstream width/height
                 # metadata that disagrees with valid current pixels.  The
@@ -4006,6 +4031,7 @@ class OfflineExactDataset:
                     f"target={target_w}x{target_h}",
                     flush=True,
                 )
+                anime_native_drift = True
             elif actual_w < target_w or actual_h < target_h:
                 # Defence in depth, and deliberately redundant: decoded ==
                 # catalog here, and _prepare_window already refused any row
@@ -4050,6 +4076,36 @@ class OfflineExactDataset:
                             f"slot={planned.slot},row_id={planned.row_id},"
                             f"domain={planned.domain}"
                         ),
+                    )
+                except anchors_v1.AnchorCropLossError as exc:
+                    # crop_loss超阈 + 这一行走过 anime metadata 漂移容忍 = 唯一放过的组合。
+                    # 其他域、上采样、anchor 越界一律 fail-closed（下面那个 except）。
+                    #
+                    # 为什么放过：`crop_loss_max` 是**语料组成**约束，在离线 plan 建库时执行；
+                    # 对 anime 漂移行，plan 依据的 catalog 尺寸和实际像素本来就允许不一致
+                    # （见上面那条容忍分支的注释），所以这里的超阈是那条已批准的容忍在几何上
+                    # 的必然投影，不是新的缺陷。切狠一点的个别行对组成无影响。
+                    #
+                    # 为什么原来会死：512a 一直容忍这种行（那时 verify_binding 没有生产调用者）；
+                    # 512b 把它接上后，一行 1e-6 概率的行就能杀掉 64 卡 7 天的跑 —— 2026-08-04
+                    # step 660 真实发生（row_id=3902543，catalog 1032x1457 / 解码 668x594）。
+                    # 按实测频率，512M 曝光期望命中 ~380 次，等于这条路必然跑不完。
+                    if not anime_native_drift:
+                        raise OfflineLoaderError(f"anchors_v1 binding rejected: {exc}") from exc
+                    self._anchors_drift_crop_tolerated += 1
+                    if self._anchors_drift_crop_tolerated > _ANIME_DRIFT_CROP_TOLERATED_MAX:
+                        raise OfflineLoaderError(
+                            "anime native-drift crop_loss tolerance exhausted after "
+                            f"{self._anchors_drift_crop_tolerated} rows on rank {self.rank} "
+                            f"(cap {_ANIME_DRIFT_CROP_TOLERATED_MAX}); at the measured 7.4e-7 "
+                            "rate this many rows means the row->file mapping is wrong, not "
+                            f"that upstream metadata drifted: {exc}"
+                        ) from exc
+                    print(
+                        "[offline_dataset] WARNING anchors_v1 crop_loss tolerated on an "
+                        f"anime native-drift row ({self._anchors_drift_crop_tolerated}/"
+                        f"{_ANIME_DRIFT_CROP_TOLERATED_MAX} on rank {self.rank}): {exc}",
+                        flush=True,
                     )
                 except anchors_v1.AnchorGeometryError as exc:
                     raise OfflineLoaderError(f"anchors_v1 binding rejected: {exc}") from exc

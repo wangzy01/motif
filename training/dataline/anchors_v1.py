@@ -90,6 +90,28 @@ class AnchorGeometryError(RuntimeError):
     """锚几何契约被破坏（fail-closed，不静默降级）。"""
 
 
+class AnchorCropLossError(AnchorGeometryError):
+    """**只**表示 crop_loss 超阈，不表示上采样/anchor_id 越界/尺寸非法。
+
+    单独一个类型，是因为调用方需要**结构化地**区分这两类失败，而它们的严重性完全不同：
+
+    - 上采样、anchor_id 越界、尺寸非法 = 绑定本身坏了，必须 fail-closed；
+    - crop_loss 超阈 = 这张图能用，只是切得比 plan 建库时的阈值狠。`crop_loss_max`
+      本质是**语料组成**约束（属于离线 plan 阶段），运行期个别行超阈不影响组成。
+
+    真实事故（2026-08-04，step 660 杀掉 64 卡正式跑）：anime 域按设计允许 upstream 的
+    width/height metadata 与当前像素不一致（见 offline_dataset 里那条容忍分支），
+    catalog 记 1032x1457、解码出 668x594，于是 plan 冻结的 anchor 2 (432x576) 对**实际
+    像素**的 crop_loss 是 0.333 > 0.20。Stage512a 一路容忍这种行，是 512b 新接上的
+    `verify_binding` 把它变成了杀作业的异常。基类捕获会把上采样一起放过去，所以必须分型。
+    """
+
+    def __init__(self, message: str, *, crop_loss: float, crop_loss_max: float) -> None:
+        super().__init__(message)
+        self.crop_loss = crop_loss
+        self.crop_loss_max = crop_loss_max
+
+
 def _validate_table() -> None:
     assert _N == 13, f"B13 must have 13 anchors, got {_N}"
     assert len(set(ANCHORS_V1_WH)) == _N, "duplicate anchor"
@@ -296,9 +318,11 @@ def verify_binding(w, h, anchor_id: int, *,
     a, b = wi * H, hi * W
     lo, hi_ = (a, b) if a <= b else (b, a)
     if den * lo < num * hi_:
-        raise AnchorGeometryError(
+        raise AnchorCropLossError(
             f"crop_loss {1.0 - lo / hi_:.6f} > {crop_loss_max} for decoded {wi}x{hi} "
-            f"-> anchor {anchor_id} ({W}x{H}) {context}")
+            f"-> anchor {anchor_id} ({W}x{H}) {context}",
+            crop_loss=1.0 - lo / hi_,
+            crop_loss_max=crop_loss_max)
 
 
 def params_from_values(area_gate, crop_loss_max, crop_loss_max_by_domain=None) -> dict:

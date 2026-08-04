@@ -357,6 +357,58 @@ def main():
         gc.set_threshold(_g0, _g1, gc_gen2_threshold)
         log(f"[train] gc gen2 threshold {_g2} -> {gc_gen2_threshold}（gen0/gen1 不变 {_g0}/{_g1}）")
 
+    # ---- GC 停顿**直测**（gated，2026-08-04 第五轮）---- #
+    # 上面三个开关是 07-03/07-05 两轮实测的产物，但**跑起来之后没有任何一处真的量过一次停顿**，
+    # 于是残余尾巴只能靠推断吵架。2026-08-04 这笔账付了半天：p90 是 p50 的 2.7 倍，而"集群
+    # 干扰 / GC 创变 / 暖机瞬态"三种解释在 rank0 指标上全都成立、彼此无法区分。
+    # 这个探针把它变成一个数：gc.callbacks 在每次回收前后各调一次，逐 generation 累计
+    # 次数/总时长/最长单次，`_gc_pause_all_rank_metrics()` 再跨 rank 取 max 写进 metrics。
+    # 开销是每次回收两次 perf_counter（~50ns），gen0 每步上千次也只有 0.1ms 量级。
+    class _GcPauseTracker:
+        """逐 generation 记 gc 回收停顿。**只测量，不改任何 GC 行为。**
+
+        单个 `_t0` 就够：CPython 的 gc 不可重入，任何时刻只有一次回收在跑，且 callbacks
+        在持 GIL 时调用，所以 start/stop 必然成对且不交错——即使回收是被数据线 producer
+        线程触发的（07-03 实测的正是这种情形）。
+        """
+
+        __slots__ = ("n", "sum_s", "max_s", "_t0")
+
+        def __init__(self) -> None:
+            self.n = [0, 0, 0]
+            self.sum_s = [0.0, 0.0, 0.0]
+            self.max_s = [0.0, 0.0, 0.0]
+            self._t0 = None
+
+        def __call__(self, phase, info) -> None:
+            if phase == "start":
+                self._t0 = time.perf_counter()
+                return
+            if self._t0 is None:      # 探针在一次回收中途注册：丢掉这半次，不猜时长
+                return
+            dt = time.perf_counter() - self._t0
+            self._t0 = None
+            g = int(info.get("generation", 0))
+            if 0 <= g < 3:
+                self.n[g] += 1
+                self.sum_s[g] += dt
+                if dt > self.max_s[g]:
+                    self.max_s[g] = dt
+
+        def drain(self):
+            """取走并清零。**每个 rank 必须同频调用**，否则跨 rank 比的不是同一窗口。"""
+            out = (list(self.n), list(self.sum_s), list(self.max_s))
+            self.n = [0, 0, 0]
+            self.sum_s = [0.0, 0.0, 0.0]
+            self.max_s = [0.0, 0.0, 0.0]
+            return out
+
+    gc_pause_probe = bool(config.trainer.get("gc_pause_probe", False))
+    gc_tracker = _GcPauseTracker() if gc_pause_probe else None
+    if gc_tracker is not None:
+        gc.callbacks.append(gc_tracker)
+        log("[train] gc pause probe on：逐 generation 记停顿，metrics 里 gc_allrank_* 是跨 rank max")
+
     # EMA(G5)：须在 fully_shard 之后（EMA 镜像 sharded DTensor）、resume 之前 init（往 _ema 加载）。
     ema_cfg = config.trainer.get("ema", {}) or {}
     use_ema = bool(ema_cfg.get("enabled", False))
@@ -522,6 +574,39 @@ def main():
         except Exception:
             pass
         return out
+
+    def _gc_pause_all_rank_metrics(step_data_wait_s: float):
+        """跨 rank 取极值的 GC 停顿 / 供数指标。**所有 rank 都必须进来**（内含 collective）。
+
+        为什么非得跨 rank：`metrics.jsonl` 只由 rank0 写，而 07-03 实测的失效模式是
+        "48 rank 任一停顿即拖全体 FSDP collective" —— 别的 rank 卡住时 rank0 看到的是
+        **自己 iter_s 变长、自己的 data_wait 不变**。2026-08-04 我被这个结构性盲区误导了
+        两次：rank0 的 data_wait 在慢步和快步上一样平（0.115 vs 0.120），于是"慢的不是
+        数据线"这个结论下得比证据允许的硬。`data_wait_allrank_max_s` 就是补这个洞的。
+        """
+        if gc_tracker is None:
+            return {}
+        n, sum_s, max_s = gc_tracker.drain()
+        # freeze_count 取负再求 MAX = 求 min：需要的是**最小**值，才能发现某个 rank 根本
+        # 没冻结（取 max 会被正常 rank 掩盖）。其余全部是 max 语义。
+        local = torch.tensor(
+            [max_s[2], sum_s[2], float(n[2]),
+             max(max_s[0], max_s[1]), sum_s[0] + sum_s[1], float(n[0] + n[1]),
+             float(step_data_wait_s), float(-gc.get_freeze_count())],
+            dtype=torch.float64, device=device)
+        if is_dist:
+            dist.all_reduce(local, op=dist.ReduceOp.MAX)
+        v = local.cpu().tolist()
+        return {
+            "gc_allrank_gen2_max_s": round(v[0], 4),   # 最长单次 gen2 停顿（跨 rank）
+            "gc_allrank_gen2_sum_s": round(v[1], 4),   # 本窗口 gen2 总停顿
+            "gc_allrank_gen2_n": v[2],                 # 本窗口 gen2 次数
+            "gc_allrank_gen01_max_s": round(v[3], 4),
+            "gc_allrank_gen01_sum_s": round(v[4], 4),
+            "gc_allrank_gen01_n": v[5],
+            "data_wait_allrank_max_s": round(v[6], 3),  # 最饿的那个 rank，不是 rank0
+            "gc_allrank_freeze_count_min": -v[7],
+        }
 
     def _gpic_all_rank_metrics(ds):
         """Aggregate the formal blob-health canaries on every rank in lockstep."""
@@ -715,6 +800,11 @@ def main():
         gpic_all_rank = (
             _gpic_all_rank_metrics(dataset) if emit_dataline_metrics else {}
         )
+        # 与 gpic 同频、同在 is_main 之外：内含 collective，少一个 rank 进来就是死锁。
+        # emit_dataline_metrics 只由 global_step 决定，各 rank 必然一致。
+        gc_all_rank = (
+            _gc_pause_all_rank_metrics(data_wait_s) if emit_dataline_metrics else {}
+        )
         if is_main:
             record = {
                 "step": global_step,
@@ -734,16 +824,26 @@ def main():
             if emit_dataline_metrics:
                 record.update(_dataline_metrics(dataset, _dl_prev_mix))
                 record.update(gpic_all_rank)
+                record.update(gc_all_rank)
             mf.write(json.dumps(record) + "\n")
             wandb_logger.log(record, global_step)
             if global_step % log_every == 0 or global_step == 1:
                 mf.flush()
                 mem_str = f" peak {record['peak_mem_gb']:.1f}G" if "peak_mem_gb" in record else ""
+                # 探针开着时把两个跨 rank 数字直接放进控制台行：iter_s 尖峰要能当场对上
+                # gen2 停顿或"最饿 rank 的 data_wait"，而不是事后再去 join metrics。
+                gc_str = ""
+                if "gc_allrank_gen2_max_s" in record:
+                    gc_str = (
+                        f" gc2 {record['gc_allrank_gen2_max_s']:.2f}s"
+                        f"x{int(record['gc_allrank_gen2_n'])}"
+                        f" dwmax {record['data_wait_allrank_max_s']:.2f}s"
+                    )
                 print(
                     f"[train] step {global_step}/{max_steps} loss {record['loss']:.4f} "
                     f"grad {grad_norm:.3f} lr {record['lr']:.2e} shift {record.get('shift', 0):.2f} "
                     f"sigma_mean {record.get('sigma_mean', 0):.3f} iter {iter_time:.2f}s "
-                    f"dw {data_wait_s:.2f}s({record['data_wait_frac']:.0%}){mem_str}", flush=True)
+                    f"dw {data_wait_s:.2f}s({record['data_wait_frac']:.0%}){mem_str}{gc_str}", flush=True)
         trace(global_step, "iter_logged")
 
         if ckpt_every > 0 and global_step % ckpt_every == 0:

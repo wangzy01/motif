@@ -307,9 +307,19 @@ trainer:
   init_load_optimizer: true
   skip_distributed_teardown: true
   force_os_exit_after_train: true
+  # Carried from Stage512a unchanged.  The three values are the product of the 2026-07-03
+  # and 07-05 investigations into iter_s creep (root cause: gen2 full-heap collections in
+  # the data producer thread; any one of N ranks pausing drags the whole FSDP collective).
   gc_gen2_threshold: 200
   gc_freeze_after_steps: 50
   gc_refreeze_every: 10000
+  # 2026-08-04: the mitigations were on for the formal run and it still showed p90 = 3.0x
+  # p50 with the tail growing.  Nothing had ever measured an actual pause, so three
+  # incompatible explanations all fit the rank-0 metrics equally well.  This probe ends
+  # that argument with a number instead of another round of inference, and it adds the
+  # cross-rank data_wait max -- rank-0-only metrics are structurally blind to another
+  # rank starving, which is precisely how the FSDP collective transmits the stall.
+  gc_pause_probe: true
   debug_step_trace: false
   debug_step_trace_dir: null
   debug_trace_dump_interval: 0

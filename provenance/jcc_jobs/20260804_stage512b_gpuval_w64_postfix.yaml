@@ -1,0 +1,388 @@
+# Stage512b GPUVAL, 2026-08-04 -- validation after the formal run died at step 660.
+#
+# The formal run (evan-s512b-real-formal-w64-v3-kvlp) started 06:13 UTC and was killed at
+# 07:10 by its own loader:
+#
+#   step=660 rank=12 slot=3 row_id=3902543 domain=anime
+#   catalog 1032x1457, decoded 668x594, anchor 2 (432x576)
+#   AnchorGeometryError: crop_loss 0.333084 > 0.2
+#
+# The anime domain deliberately tolerates upstream width/height metadata that disagrees
+# with the decoded pixels, and Stage512a trained 125,000 steps that way. Stage512b wired
+# up anchors_v1.verify_binding(), which re-derives crop_loss from the decoded size, so a
+# row the tolerance had already approved became fatal -- at a measured 7.4e-7 rate, about
+# 380 expected hits over 512M exposures. The run could never have finished.
+#
+# Three things this job has to establish, in order of how badly they would hurt:
+#
+#  1. Plan step 660 survives the loader. Phase A runs to 700, so the row is crossed
+#     inside a single process and cannot be explained away by a resume boundary. The row
+#     lands on rank 12 = node 1, so the assertion reads every node's log, not node 0's.
+#  2. The new cross-rank GC/data-wait collective does not deadlock. It is an all_reduce
+#     inside the metrics path; if any rank can skip it the formal run hangs rather than
+#     crashes, which is strictly worse. Reaching step 700 at all proves it.
+#  3. fresh -> stop -> continue still works. This was already validated by the 08-03 v6
+#     GPUVAL (S512B-24), so it is a re-validation, not a first: the loader changed today,
+#     and resume seeks the plan through the same _bucket_u8_for_item path that was
+#     patched. Free -- the two phases cost the same GPU time as one.
+#
+# And one thing it measures rather than proves: GC pause durations, cross-rank, via the
+# new gc_pause_probe. The formal run showed p90 = 3.0x p50 with the tail growing, and
+# "cluster interference", "GC creep" and "warm-up transient" all fit the rank-0 metrics
+# equally well -- rank-0 metrics are structurally blind to another rank stalling, since
+# that arrives as our own collective taking longer with our own data_wait unchanged.
+# Stage512a over its own steps 100-650 was mean/p50 1.31 and settled to 1.04 by step
+# 5000, so a similar number here is warm-up, not a defect. This job does not have to
+# settle the question -- the probe ships in the formal run and answers it there with
+# 250,000 steps of data instead of 800.
+#
+# NOT SUBMITTED AUTOMATICALLY. 64 GPUs, and the checkpoint directory is create-once.
+name: evan-s512b-gpuval-w64-20260804
+description: "Stage512b W64 GPUVAL after the 2026-08-04 formal-run crash. 800 steps, phase A to 700 then a real process restart to 800. Proves three things the failed run left open: that plan step 660 -- the anime metadata-drift row that killed 64 GPUs -- now survives the loader, that the new cross-rank GC/data-wait collective does not deadlock, and that fresh -> stop -> continue actually works. Also the first run to measure GC pauses instead of inferring them."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 8
+gpuPerWorker: 8
+# 48/600, not the 80/900 inherited from Stage512a -- a SCHEDULABILITY change, measured
+# rather than guessed. A node can have all 8 GPUs free and still refuse this pod because
+# it shares CPU with someone else's job: nodes with free GPUs were observed at 73.1/95.7
+# CPU used, i.e. 22.6 free against a request for 80. That is the likeliest reason the
+# first attempt got 3 of 8 nodes while 5 looked free.
+# The headroom is real: the GPUVAL measured data_wait_frac p50 0.0435, so the data
+# pipeline is nowhere near CPU-bound. This run re-measures it at the lower allocation,
+# and the FORMAL job keeps 80/900 until that number comes back low -- a 7-day run does
+# not get its resources cut on an untested assumption.
+# 80/900, NOT the 48/600 the 08-02 GPUVAL used to improve schedulability. That saving is
+# not available to this run: the 48-core allocation was measured at iter_s p50 4.440s
+# against 2.570s at 80 cores, so a GPUVAL at 48 cannot say anything about the tail the
+# formal run has to be judged on. Matching the formal request is the whole point here.
+cpuPerWorker: 80
+memGBPerWorker: 900
+maxRetries: 0
+environments:
+  EXPECTED_COMMIT: ""
+  # Fresh every attempt. The directory is claimed with mkdir, so reusing a name after a
+  # failure trips exit 45 -- which is the point, not an inconvenience.
+  CKPT_DIR: ""
+  # Seconds the arrived nodes hold while the rest queue. Default 1800.
+  ARRIVAL_WAIT_S: ""
+command: |
+  set -euo pipefail
+  REPO=/fsx/evan/mot_code_s512b_impl
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  test -x "$PY" && test -d "$REPO/.git" || { echo "FATAL: env"; exit 43; }
+  cd "$REPO"
+  export PYTHONPATH="$REPO"
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN FI_EFA_USE_DEVICE_RDMA=1
+  export OFFLINE_ARB_PREFETCH_STEPS=4
+  unset OFFLINE_ARB_STEP_TIMEOUT_S OFFLINE_ARB_PROFILE_WINDOWS OFFLINE_ARB_SMOKE_DATASET_CONFIG
+  unset OFFLINE_ARB_IO_TELEMETRY_DIR OFFLINE_ARB_GPIC_THREADS_PER_NODE
+  unset MALLOC_ARENA_MAX MALLOC_TRIM_THRESHOLD_ ARROW_DEFAULT_MEMORY_POOL LD_PRELOAD
+  unset PYTHONOPTIMIZE
+  [ "$("$PY" -c 'import sys; print(sys.flags.optimize)')" = 0 ] \
+    || { echo "FATAL: optimized Python is forbidden"; exit 64; }
+  mkdir -p /local/evan/anime_img_cache /local/evan/cache
+
+  # PHASE_A must clear plan step 660 inside phase A, because that is the row that killed
+  # the formal run and a resume-boundary artefact must not be able to explain surviving
+  # it. 700 leaves 40 steps of margin; the restart then runs 700 -> 800.
+  NNODES=8; PORT=29814; PHASE_A=700; STEPS=800; CRASH_STEP=660
+  CFG=configs/stage512b_real_anchors_v1.yaml
+  # Supplied at submission, because create-once means a retry MUST use a new name and
+  # baking one into git guarantees the second attempt trips its own gate.
+  [ -n "${CKPT_DIR:-}" ] || { echo "FATAL: CKPT_DIR unset"; exit 43; }
+  case "$CKPT_DIR" in *PLACEHOLDER*) echo "FATAL: CKPT_DIR is a placeholder"; exit 43;; esac
+  CKPT=$CKPT_DIR
+  INIT=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_20260724_weighted_w64_recovery_v2/last.pt
+  INIT_SHA=957bfcf12b89c4042a32056566012a2451e72aa0b2706b0ca51808ab79155c31
+  A512_METRICS=/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_20260724_weighted_w64_recovery_v2/metrics.jsonl
+
+  HOST=$(hostname); NODE_RANK=${HOST##*-}; JOBTAG=${HOST%-*}
+  STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+  case "$NODE_RANK" in (*[!0-9]*|'') echo "FATAL: malformed node rank: $NODE_RANK"; exit 21;; esac
+  test "$NODE_RANK" -lt "$NNODES" || { echo "FATAL: node rank out of range"; exit 21; }
+
+  [ -n "${EXPECTED_COMMIT:-}" ] || { echo "FATAL: EXPECTED_COMMIT unset"; exit 43; }
+  bash scripts/jcc_preflight.sh "$EXPECTED_COMMIT" "$REPO"
+
+  test -f "$INIT" || { echo "FATAL: init_from missing"; exit 43; }
+
+  # Create-once as an ATOMIC CLAIM, not an existence test. `test ! -e last.pt` would
+  # happily reuse the half-written directory a previous failed attempt left behind, and
+  # then resume=true would silently continue from whatever was in it instead of
+  # initialising from Stage512a. `mkdir` without -p fails if the directory exists, which
+  # is the claim: exactly one node creates it, a retry must use a new name.
+  # The claim is scoped to THIS JOB, not to this pod invocation. A bare `mkdir || exit`
+  # is create-once per process, which means any rank-0 pod restart is fatal: the second
+  # attempt died exactly that way, hitting the directory it had claimed itself 75 minutes
+  # earlier. That is not a hypothetical for the formal run either -- resume=true exists
+  # precisely so a restarted pod continues from last.pt, and a claim that refuses the
+  # restart would disable the entire recovery story it was meant to protect.
+  # So: create it if absent, and if present accept it only when the claim names this job.
+  if [ "$NODE_RANK" = 0 ]; then
+    if mkdir "$CKPT" 2>/dev/null; then
+      printf '%s\n' "$JOBTAG" > "$CKPT/.claim"
+    else
+      OWNER=$(cat "$CKPT/.claim" 2>/dev/null || echo "<none>")
+      [ "$OWNER" = "$JOBTAG" ] || {
+        echo "FATAL: $CKPT is claimed by '$OWNER', not by this job ('$JOBTAG')."
+        echo "       Use a fresh CKPT_DIR."; exit 45; }
+      echo "re-entering our own claim after a pod restart (owner=$OWNER)"
+    fi
+    # The source checkpoint is a MUTABLE path -- the Stage512a job would overwrite it if
+    # relaunched -- so the digest is verified rather than trusted from a comment. Node 0
+    # only: all eight read the same file, so hashing 26 GB eight times buys nothing.
+    GOT=$(sha256sum "$INIT" | awk '{print $1}')
+    [ "$GOT" = "$INIT_SHA" ] || { echo "FATAL: init_from sha drift: $GOT != $INIT_SHA"; exit 44; }
+    echo "init_from sha verified: $GOT"
+  fi
+  RES=$CKPT
+
+  # Both the wait and the freshness window scale with ARRIVAL_WAIT_S. Hard-coding them
+  # at 30 min / 2 h was fine when the barrier could only wait 30 min, and becomes a bug
+  # the moment a submission asks the job to queue for longer: node 0 writes the
+  # rendezvous immediately, so a node scheduled three hours later would reject a
+  # perfectly good address as stale and exit 20 -- failing for a reason that has nothing
+  # to do with the run.
+  WAIT_S=${ARRIVAL_WAIT_S:-1800}
+  RDZV_STALE_S=$((WAIT_S + 3600))
+
+  RDZV=$RES/rdzv.$JOBTAG.addr
+  if [ "$NODE_RANK" = 0 ]; then
+    MYIP=$(hostname -i | awk '{print $1}')
+    printf '%s %s %s\n' "$MYIP" "$(date +%s)" "$JOBTAG" > "$RDZV.tmp"
+    mv "$RDZV.tmp" "$RDZV"; MASTER_ADDR=$MYIP
+  else
+    MASTER_ADDR=""
+    for _ in $(seq 1 $((WAIT_S / 5))); do
+      if test -s "$RDZV" && test ! -L "$RDZV"; then
+        read -r ADDR TS TOKEN < "$RDZV" || true
+        case "$TS" in (*[!0-9]*|'') TS="";; esac
+        NOW=$(date +%s)
+        if [ -n "$TS" ] && [ "$TOKEN" = "$JOBTAG" ] && [ $((NOW - TS)) -lt "$RDZV_STALE_S" ]; then
+          MASTER_ADDR=$ADDR; break
+        fi
+      fi
+      sleep 5
+    done
+    test -n "$MASTER_ADDR" || { echo "FATAL: rendezvous missing after ${WAIT_S}s"; exit 20; }
+  fi
+
+  # NODE ARRIVAL BARRIER. torchrun's static rendezvous waits 900s and then dies with
+  # "N/8 clients joined", which costs fifteen minutes of the nodes that DID arrive and
+  # leaves a claimed directory behind. The first attempt burned exactly that: the
+  # cluster had three schedulable 8-GPU nodes and the job asked for eight.
+  # Counting markers first turns a capacity shortfall into a cheap, legible failure,
+  # and guarantees the rendezvous itself never has to wait once it starts.
+  # Rank 0 marks itself only AFTER hashing init_from, so nobody enters torchrun early.
+  # ARRIVAL_WAIT_S is how long the arrived nodes will hold while the rest queue. The
+  # cluster is contended (63 of 90 nodes at 8/8), so this is deliberately a submission
+  # parameter, not a constant: waiting holds GPUs idle, which is a real cost to other
+  # users, and the right value depends on how badly the run is wanted right now.
+  : > "$CKPT/ready.n$NODE_RANK"
+  ARRIVED=0
+  for _ in $(seq 1 $((WAIT_S / 5))); do
+    ARRIVED=$(ls "$CKPT"/ready.n* 2>/dev/null | wc -l)
+    [ "$ARRIVED" -ge "$NNODES" ] && break
+    sleep 5
+  done
+  if [ "$ARRIVED" -lt "$NNODES" ]; then
+    echo "FATAL: only $ARRIVED/$NNODES nodes arrived; the cluster could not schedule this job."
+    echo "       Check free capacity with 'jcc node list' and resubmit with a NEW CKPT_DIR."
+    exit 47
+  fi
+  echo "all $NNODES nodes arrived"
+
+  echo "===== STAGE512B GPUVAL node=$NODE_RANK master=$MASTER_ADDR world=64 global=2048 steps=$STEPS ====="
+  { hostname; nvidia-smi -L; df -h /local | tail -1;
+    sha256sum "$CFG"; } 2>&1 | tee "$RES/probe.n$NODE_RANK.$STAMP.log"
+
+  (while true; do
+     date -u
+     [ -r /sys/fs/cgroup/memory.current ] && echo "mem.current: $(cat /sys/fs/cgroup/memory.current)"
+     nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader
+     df --output=avail /local | tail -1
+     sleep 60
+   done) > "$RES/nodemon.n$NODE_RANK.$STAMP.log" 2>&1 &
+
+  # TWO PHASES, same total step count. A single 200-step run proves the trainer can
+  # SAVE; it never proves it can RESUME -- and resume is what every JCC retry of a
+  # 250,000-step run depends on, since trainer.resume=true is the whole recovery story.
+  # Phase A initialises from Stage512a and stops at 100; phase B is relaunched with no
+  # other change and must pick up at 100, reloading model, optimizer, scheduler and EMA
+  # and seeking the loader to the right plan step. Free: the GPU time is identical.
+  # --max-steps, NOT trainer.max_steps=. checkpoint.derive_max_steps treats
+  # trainer.max_steps as informational whenever max_exposure_images is present and
+  # derives the real horizon as exposures / global_batch; only the CLI flag outranks it.
+  # The first attempt set trainer.max_steps=100, train.py logged
+  # "max_steps=250000 ... config.max_steps=100 仅作参考", and phase A ran to step 420
+  # until the pods were killed. The override was accepted and ignored.
+  run_phase () {
+    local phase=$1 upto=$2
+    echo "===== phase $phase -> step $upto ====="
+    set +e
+    "$PY" -m torch.distributed.run \
+      --nnodes "$NNODES" --nproc-per-node 8 --node-rank "$NODE_RANK" \
+      --master-addr "$MASTER_ADDR" --master-port "$PORT" \
+      train.py --config "$CFG" --max-steps "$upto" \
+      trainer.checkpoint_dir="$CKPT" \
+      trainer.checkpoint_steps=50 \
+      trainer.checkpoint_keep_max=2 \
+      trainer.checkpoint_keep_every=100 \
+      2>&1 | tee "$RES/train.$phase.n$NODE_RANK.$STAMP.log"
+    local pipe=("${PIPESTATUS[@]}")
+    set -e
+    test "${pipe[1]}" -eq 0 || exit "${pipe[1]}"
+    test "${pipe[0]}" -eq 0 || { echo "FATAL: phase $phase exited ${pipe[0]}"; exit "${pipe[0]}"; }
+  }
+
+  run_phase A "$PHASE_A"
+  test -f "$CKPT/last.pt" || { echo "FATAL: phase A wrote no last.pt"; exit 46; }
+  run_phase B "$STEPS"
+
+  [ "$NODE_RANK" = 0 ] || { echo "node $NODE_RANK done"; exit 0; }
+
+  # The resume assertion, made against the log line train.py actually prints. Without
+  # it, phase B silently re-initialising from Stage512a would look identical to a
+  # successful resume in every downstream metric.
+  RESUMED=$(grep -c "resumed from .* at step $PHASE_A" "$RES"/train.B.n0.*.log || true)
+  [ "${RESUMED:-0}" -ge 1 ] || {
+    echo "FATAL: phase B did not resume at step $PHASE_A; it re-initialised instead"
+    grep -E "resumed from|init_from" "$RES"/train.B.n0.*.log | head; exit 46; }
+  echo "resume verified: phase B continued from step $PHASE_A"
+
+  # THE reason this job exists. The formal run died in the supply thread at plan step 660
+  # on an anime row whose upstream metadata disagreed with its pixels, so phase A must
+  # have walked past 660 without the loader raising. Asserted on all eight nodes' logs
+  # because the row landed on rank 12, i.e. node 1 -- checking only node 0 would pass
+  # while the exact failure recurred one node over.
+  if grep -h "anchors_v1 binding rejected" "$RES"/train.*.n*.log >/dev/null 2>&1; then
+    echo "FATAL: a row was still rejected by the anchors_v1 gate -- the fix does not hold"
+    grep -h "anchors_v1 binding rejected" "$RES"/train.*.n*.log | head -3
+    exit 46
+  fi
+  # `grep -h pattern files | wc -l`, not `grep -hc | paste | expr`: -c with several files
+  # emits one count per file, and summing them needs bc, which is not installed in this
+  # image. The `|| true` matters more -- under `set -o pipefail` a grep that matches
+  # nothing exits 1 and would kill the job at its final, purely informational step.
+  DRIFT=$( { grep -h "native-size metadata mismatch" "$RES"/train.*.n*.log 2>/dev/null || true; } | wc -l)
+  TOLER=$( { grep -h "crop_loss tolerated on an anime native-drift row" "$RES"/train.*.n*.log 2>/dev/null || true; } | wc -l)
+  echo "passed plan step $CRASH_STEP; anime native-size mismatches=$DRIFT, of which"
+  echo "  crop_loss needed tolerating=$TOLER (over $((STEPS * 2048)) decoded rows)"
+
+  echo "=== postcheck (rank 0) ==="
+  "$PY" - "$RES" "$A512_METRICS" "$STEPS" <<'PYEOF'
+  import json, sys, pathlib, statistics
+  res, a512, steps = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), int(sys.argv[3])
+  rows = [json.loads(l) for l in (res / "metrics.jsonl").read_text().splitlines() if l.strip()]
+  assert rows, "no metrics written"
+  assert "loss" in rows[-1], f"metrics schema changed; keys={sorted(rows[-1])}"
+  last_step = max(int(r["step"]) for r in rows)
+  assert last_step >= steps - 10, f"only reached step {last_step} of {steps}"
+  bad = [r["step"] for r in rows if not (float(r["loss"]) == float(r["loss"]))
+         or abs(float(r["loss"])) == float("inf")]
+  assert not bad, f"non-finite loss at steps {bad[:5]}"
+
+  def col(name, src=rows):
+      return [float(r[name]) for r in src if name in r]
+
+  # Stage512a's own tail is the only honest reference.  Skip the first step of each --
+  # 512a's step 1 took 27.3s cold and would poison a mean of five.
+  tail = []
+  with a512.open() as fh:
+      for line in fh:
+          try: r = json.loads(line)
+          except ValueError: continue
+          if "loss" in r: tail.append(r)
+  first5 = col("loss")[:5]
+  tail200 = [float(r["loss"]) for r in tail[-200:]]
+  print("512b gpuval first 5 losses :", [round(v, 4) for v in first5])
+  print("512a final 200-step mean   :", round(statistics.fmean(tail200), 4) if tail200 else "n/a")
+  if tail200:
+      ratio = statistics.fmean(first5) / statistics.fmean(tail200)
+      print(f"ratio first5(512b)/tail200(512a) = {ratio:.3f}")
+      assert ratio < 2.0, f"loss level jumped {ratio:.2f}x against Stage512a's tail"
+
+  warm = [r for r in rows if int(r["step"]) > 20]      # past cold start and cache fill
+  for name in ("iter_s", "data_wait_s", "data_wait_frac", "peak_mem_gb"):
+      vals = col(name, warm)
+      if vals:
+          print(f"{name:<15} p50 {statistics.median(vals):8.3f}  max {max(vals):8.3f}")
+  # The GPIC question, answered by a number rather than a guess.  Stage512a ran around
+  # data_wait_frac 0.2 WITH the packed blob; Stage512b reads 3.08x the GPIC volume from
+  # per-file S3 FUSE.  A high steady-state wait fraction here means the formal run would
+  # be I/O bound and a Stage512b GPIC blob build is needed before launch.
+  waits = col("data_wait_frac", warm)
+  if waits:
+      p50 = statistics.median(waits)
+      print(f"\nDATA WAIT FRACTION p50 = {p50:.3f}"
+            + ("   <- I/O bound; build a Stage512b GPIC blob before the formal run"
+               if p50 > 0.35 else "   <- acceptable"))
+  mix = {k: statistics.fmean(col(k, warm)) for k in rows[-1] if k.startswith("mix_")}
+  if mix:
+      print("realized mix over the run:",
+            {k: round(v, 4) for k, v in sorted(mix.items())})
+
+  # ---- the tail, stated the way wall clock actually consumes it ----
+  # 2026-08-04: the formal run's ETA was quoted from iter_s p50 and came out 8.4 days;
+  # the mean was 4.43s and the wall clock 4.92s/step, i.e. 14 days. With a right-skewed
+  # distribution the median is the wrong statistic, so print both and the ratio.
+  it = col("iter_s", warm)
+  if it:
+      mean, p50 = statistics.fmean(it), statistics.median(it)
+      p90 = sorted(it)[int(len(it) * 0.9)]
+      print(f"\niter_s mean {mean:.3f}  p50 {p50:.3f}  p90 {p90:.3f}  mean/p50 {mean / p50:.2f}")
+      print(f"  250,000 steps at this MEAN = {mean * 250000 / 86400:.2f} days"
+            f"   (at p50 it would read {p50 * 250000 / 86400:.2f} -- the misleading number)")
+      # Stage512a over its own steps 100-650 was mean/p50 1.31, settling to 1.04 by step
+      # 5000. Anything near 1.3 here is the same warm-up shape, not a new defect.
+      print("  Stage512a at the same run age was 1.31, settling to 1.04 by step 5000")
+
+  # ---- GC pauses: measured, finally ----
+  # Three explanations for the tail (cluster interference, GC creep, warm-up) all fit
+  # rank-0 metrics equally well, because rank-0 metrics cannot see another rank stall:
+  # that arrives as *our* collective taking longer, with our own data_wait unchanged.
+  gc2 = col("gc_allrank_gen2_max_s", warm)
+  if not gc2:
+      print("\nFAIL: no gc_allrank_* fields -- the probe did not run, so the tail question")
+      print("      is still unanswerable. Check trainer.gc_pause_probe in the config.")
+      raise SystemExit(1)
+  print(f"\ngc gen2 pause (cross-rank max): p50 {statistics.median(gc2):.3f}s  "
+        f"max {max(gc2):.3f}s  over {len(gc2)} windows")
+  n2 = col("gc_allrank_gen2_n", warm)
+  if n2:
+      print(f"gen2 collections per window: total {int(sum(n2))}, max {int(max(n2))}")
+  dw_self = col("data_wait_s", warm)
+  dw_all = col("data_wait_allrank_max_s", warm)
+  if dw_all and dw_self:
+      print(f"data_wait  rank0 p50 {statistics.median(dw_self):.3f}s   "
+            f"slowest-rank p50 {statistics.median(dw_all):.3f}s   "
+            f"max {max(dw_all):.3f}s")
+      if statistics.median(dw_all) > 4 * max(statistics.median(dw_self), 1e-6):
+          print("  <- the slowest rank waits far more than rank 0: the loader IS the tail,")
+          print("     and every rank-0-only conclusion drawn before this run was blind to it")
+  fz = col("gc_allrank_freeze_count_min", warm)
+  if fz:
+      print(f"gc freeze count (min across ranks): {int(min(fz))}"
+            + ("   <- a rank never froze" if min(fz) <= 0 else ""))
+  # Does the tail coincide with gen2 pauses at all?  Compare the slow windows against the
+  # rest rather than eyeballing a correlation over 80 points.
+  paired = [(float(r["iter_s"]), float(r["gc_allrank_gen2_max_s"])) for r in warm
+            if "gc_allrank_gen2_max_s" in r]
+  if len(paired) >= 8:
+      cut = statistics.median([p[0] for p in paired])
+      slow = [g for i, g in paired if i > cut]
+      fast = [g for i, g in paired if i <= cut]
+      if slow and fast:
+          print(f"gen2 pause on slow windows {statistics.fmean(slow):.3f}s vs "
+                f"fast {statistics.fmean(fast):.3f}s")
+          print("  a large gap means GC; a flat comparison means the tail is elsewhere")
+
+  ck = sorted(p.name for p in res.glob("*.pt"))
+  assert ck, "no checkpoint written"
+  print("checkpoints:", ck)
+  print("GPUVAL_POSTCHECK_PASS")
+  PYEOF
+  echo "=== DONE ==="
