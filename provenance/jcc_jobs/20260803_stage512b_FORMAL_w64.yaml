@@ -40,6 +40,13 @@ environments:
   EXPECTED_COMMIT: ""
   CKPT_DIR: ""
   RUN_MODE: ""
+  # Stable identity for the RUN, supplied by the operator and therefore preserved across
+  # JCC retries because it lives in the job spec. This exists because the pod-derived
+  # JOBTAG is NOT stable: JCC renames a retry's pods (…-v2-5dlx -> …-v2-5dlx-retry-7mrd),
+  # so JOBTAG changes and directory ownership keyed on it stops recognising our own run.
+  # Observed exactly that on 2026-08-04: the first attempt exited 47 on capacity and the
+  # retry then exited 45 against a directory it had itself created.
+  RUN_ID: ""
   ARRIVAL_WAIT_S: ""
 command: |
   set -euo pipefail
@@ -83,6 +90,7 @@ command: |
   bash scripts/jcc_preflight.sh "$EXPECTED_COMMIT" "$REPO"
 
   [ -n "${CKPT_DIR:-}" ] || { echo "FATAL: CKPT_DIR unset"; exit 43; }
+  [ -n "${RUN_ID:-}" ] || { echo "FATAL: RUN_ID unset"; exit 43; }
   case "$CKPT_DIR" in *PLACEHOLDER*) echo "FATAL: CKPT_DIR is a placeholder"; exit 43;; esac
   CKPT=$CKPT_DIR
   case "${RUN_MODE:-}" in
@@ -96,11 +104,17 @@ command: |
   # directory the first attempt created, and exits 45 -- so a seven-day run would die
   # permanently on its first eviction, which is the exact scenario maxRetries exists for.
   #
-  # So intent is combined with identity. $CKPT/.jobtag records which submission owns the
-  # directory; a retry sees its own tag and promotes fresh -> continue. Another
-  # submission still gets exit 45. If the first attempt died before writing any
-  # checkpoint, .jobtag matches but last.pt is absent, and the run correctly stays fresh
-  # -- train.py's init_from branch fires on "no local last.pt".
+  # So intent is combined with identity. $CKPT/.jobtag records the RUN_ID that owns the
+  # directory; a retry carries the same RUN_ID and promotes fresh -> continue. Another
+  # run still gets exit 45. If the first attempt died before writing any checkpoint,
+  # RUN_ID matches but last.pt is absent, and the run correctly stays fresh -- train.py's
+  # init_from branch fires on "no local last.pt".
+  #
+  # OWNERSHIP uses RUN_ID (stable across retries); RENDEZVOUS AND ARRIVAL keep using
+  # JOBTAG (which changes on retry) -- and that split is right in both directions. A
+  # retry must not adopt the previous attempt's master address or its arrival markers,
+  # so per-attempt naming there is the isolation the audit's F-02 asked for, obtained
+  # from JCC's own renaming rather than from a nonce protocol.
   # RANK 0 DECIDES ALONE. Having every rank run this resolution is racy, and not
   # theoretically: rank 0 creates $CKPT and then writes .jobtag as two operations, so a
   # non-zero rank that reads the directory in between sees it exist with no .jobtag,
@@ -130,7 +144,7 @@ command: |
           echo "       checkpoint directory, including Stage512a's."; exit 45; }
       fi
       OWNER=$(cat "$CKPT/.jobtag" 2>/dev/null || echo "<none>")
-      if [ "$OWNER" = "$JOBTAG" ]; then
+      if [ "$OWNER" = "$RUN_ID" ]; then
         if [ -f "$CKPT/last.pt" ]; then
           EFFECTIVE_MODE=continue
           [ "$RUN_MODE" = continue ] || echo "retry of our own attempt: fresh -> continue"
@@ -150,7 +164,7 @@ command: |
           echo "retry of our own attempt, no checkpoint yet: staying fresh"
         fi
       elif [ "$RUN_MODE" = fresh ]; then
-        echo "FATAL: RUN_MODE=fresh but $CKPT exists and is owned by '$OWNER'."
+        echo "FATAL: RUN_MODE=fresh but $CKPT is owned by RUN_ID '$OWNER', not '$RUN_ID'."
         echo "       Use RUN_MODE=continue to resume it, or a new CKPT_DIR."; exit 45
       fi
     elif [ "$RUN_MODE" = continue ]; then
@@ -169,7 +183,7 @@ command: |
     else
       mkdir -p "$CKPT"
     fi
-    test -f "$CKPT/.jobtag" || printf '%s\n' "$JOBTAG" > "$CKPT/.jobtag"
+    test -f "$CKPT/.jobtag" || printf '%s\n' "$RUN_ID" > "$CKPT/.jobtag"
 
     if [ "$EFFECTIVE_MODE" = fresh ]; then
       # Only meaningful on a fresh launch: init_from is a mutable path that the frozen
@@ -274,12 +288,12 @@ command: |
   echo "all $NNODES nodes arrived"
 
   if [ "$NODE_RANK" = 0 ]; then
-    "$PY" - "$CKPT" "$CFG" "$JOBTAG" "$EXPECTED_COMMIT" "$EFFECTIVE_MODE" "$INIT_SHA" <<'PYEOF'
+    "$PY" - "$CKPT" "$CFG" "$RUN_ID" "$EXPECTED_COMMIT" "$EFFECTIVE_MODE" "$INIT_SHA" <<'PYEOF'
   import hashlib, json, pathlib, sys
-  ckpt, cfg, jobtag, commit, mode, init_sha = sys.argv[1:7]
+  ckpt, cfg, run_id, commit, mode, init_sha = sys.argv[1:7]
   out = pathlib.Path(ckpt) / "FORMAL_RUN.json"
   rec = {
-      "schema": "stage512b_real_formal_run_v1", "jobtag": jobtag, "commit": commit,
+      "schema": "stage512b_real_formal_run_v1", "run_id": run_id, "attempt_jobtag": None, "commit": commit,
       "run_mode": mode, "config_sha256": hashlib.sha256(pathlib.Path(cfg).read_bytes()).hexdigest(),
       "init_from_sha256": init_sha, "world_size": 64, "global_batch": 2048,
       "max_steps": 250000, "max_exposure_images": 512_000_000,

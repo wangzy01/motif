@@ -28,8 +28,14 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 JOB = ROOT / "provenance/jcc_jobs/20260803_stage512b_FORMAL_w64.yaml"
-OURS = "evan-s512b-real-formal-w64-abcd"
-THEIRS = "evan-s512b-real-formal-w64-zzzz"
+# The RUN_ID the operator supplies, stable across JCC retries because it lives in the job
+# spec. RETRY_JOBTAG is what the pod name gives a retry -- JCC renames retry pods, so the
+# pod-derived JOBTAG is NOT the run identity. Getting that wrong made maxRetries
+# decorative for the second time: the first attempt exited 47 on capacity and the retry
+# exited 45 against the directory it had itself created.
+OURS = "s512b-real-20260804-v1"
+THEIRS = "s512b-real-20260804-v9"
+RETRY_JOBTAG = "evan-s512b-real-formal-w64-v2-5dlx-retry-7mrd"
 
 
 def extract_block() -> str:
@@ -50,7 +56,8 @@ def extract_block() -> str:
 
 
 def run_case(block: str, *, declared: str, dir_exists: bool, jobtag: str | None,
-             last_pt: bool, receipt: str | None = "ours") -> tuple[int, str]:
+             last_pt: bool, receipt: str | None = "ours",
+             jobtag_env: str | None = None) -> tuple[int, str]:
     """receipt: "ours" = a Stage512b FORMAL_RUN.json, "other" = wrong schema, None = absent.
 
     Any directory a FORMAL attempt has actually run in HAS this file -- rank 0 writes it
@@ -74,8 +81,13 @@ def run_case(block: str, *, declared: str, dir_exists: bool, jobtag: str | None,
                     '{"schema": "stage512a_weighted_w64_recovery_formal_run_20260724v2"}')
         script = "\n".join([
             "set -euo pipefail",
-            f'CKPT="{ckpt}"', f'RUN_MODE="{declared}"', f'JOBTAG="{OURS}"',
+            f'CKPT="{ckpt}"', f'RUN_MODE="{declared}"',
+            # JOBTAG is pod-derived and CHANGES on a retry; RUN_ID comes from the job spec
+            # and does not. Setting them to the same value would make the retry cases
+            # vacuous -- the bug being fixed is precisely that they diverge.
+            f'JOBTAG="{jobtag_env or OURS}"',
             'NODE_RANK=0', 'INIT_SHA=deadbeef', 'INIT=/dev/null',
+            f'RUN_ID="{OURS}"',
             block,
             'echo "RESOLVED=$EFFECTIVE_MODE"',
         ])
@@ -153,6 +165,32 @@ def main() -> int:
         if not ok:
             failures.append(f"{label}: rc={rc} mode={mode!r}, want rc={want_rc} mode={want_mode!r}")
 
+    # A JCC retry: the pod name (and therefore JOBTAG) differs from the first attempt's,
+    # while RUN_ID is unchanged. Ownership must key on RUN_ID, so this must resolve rather
+    # than exit -- it is the case that broke the real run on 2026-08-04.
+    for label, last_pt, want in (
+        ("retry (new JOBTAG) + no checkpoint -> fresh", False, (0, "fresh")),
+        ("retry (new JOBTAG) + checkpoint -> continue", True, (0, "continue")),
+    ):
+        rc, mode = run_case(block, declared="fresh", dir_exists=True, jobtag=OURS,
+                            last_pt=last_pt, receipt="ours",
+                            jobtag_env=RETRY_JOBTAG)
+        ok = rc == want[0] and mode == want[1]
+        print(f"  {'ok  ' if ok else 'FAIL'} {label:<58} rc={rc} mode={mode or '-'}")
+        if not ok:
+            failures.append(f"{label}: rc={rc} mode={mode!r}, want {want}")
+
+    # Guard against a regression to JOBTAG-keyed ownership: with the pod-derived tag
+    # written into .jobtag, a retry whose JOBTAG differs must be REFUSED -- which is what
+    # broke the real run. If someone reverts the keying, this case flips and the suite
+    # fails instead of the seven-day job.
+    rc, _ = run_case(block, declared="fresh", dir_exists=True, jobtag=RETRY_JOBTAG,
+                     last_pt=False, receipt="ours", jobtag_env=RETRY_JOBTAG)
+    ok = rc == 45
+    print(f"  {'ok  ' if ok else 'FAIL'} {'a dir owned by a pod-tag is not ours -> exit 45':<58} rc={rc}")
+    if not ok:
+        failures.append(f"ownership appears keyed on JOBTAG again: rc={rc}")
+
     # The two properties that matter most, asserted directly rather than left implicit in
     # the tables: a fresh declaration must never adopt another job's directory, and a
     # continue must never adopt a directory that was not a Stage512b formal run.
@@ -166,7 +204,7 @@ def main() -> int:
         if rc == 0:
             failures.append(f"SILENT ADOPTION: continue accepted a dir with receipt={receipt!r}")
 
-    print(f"\n{len(CASES) + len(RECEIPT_CASES) + 4} checks, {len(failures)} failures")
+    print(f"\n{len(CASES) + len(RECEIPT_CASES) + 7} checks, {len(failures)} failures")
     for f in failures:
         print(f"  {f}")
     if failures:
