@@ -140,7 +140,19 @@ dataset:
   fetch_workers_anime: 8
   fetch_workers_tar: 8
   gpic_payload_in_memory: true
-  gpic_threads_per_node: 16
+  # 64, raised from 16 on 2026-08-04 after the probe verdict (28 windows on the live
+  # run): allrank data_wait slow/fast = 15.1x with gen2 pauses ~0 everywhere and rank 0's
+  # own wait flat at 0.12s -- non-rank-0 ranks starving on GPIC payload reads, transmitted
+  # through the FSDP collective. 16 / LOCAL_WORLD_SIZE 8 = 2 threads per rank, inherited
+  # from Stage512a's 13% GPIC mix; 512b runs 20% overall and up to 821 items in one step
+  # (~11.3 files on the slowest rank, skew measured at 1.03x). At the measured 170 ms
+  # per file that is 0.96 s of serial I/O against a 2.624 s zero-GPIC step: 2.7x headroom,
+  # so any storage-latency wobble beyond that stalls the whole world -- observed twice
+  # (08-04 morning, and 436 ms/file with 2.4 s outliers the same evening, ETA 22 days).
+  # 8 threads per rank takes the headroom to 10.9x. Concurrency only: same rows, same
+  # order, same bytes. Chosen over 128 to stay clear of FUSE/S3 throttling; one step at
+  # a time.
+  gpic_threads_per_node: 64
   gpic_source_consistency_mode: strict_path
 
   buffer_size: 4096
