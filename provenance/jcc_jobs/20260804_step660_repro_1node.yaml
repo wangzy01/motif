@@ -1,0 +1,46 @@
+# Prove the 2026-08-04 crash row survives the loader -- on one node, in minutes.
+#
+# The formal run died at plan step 660 on an anime row whose upstream metadata disagreed
+# with its pixels (see S512B-26). Confirming the fix by training to 660 costs 8 nodes and
+# ~55 minutes, and right now the cluster has 1 node that fits the formal request and 4
+# with 8 GPUs free at all -- so an 8-node job would hold arrived nodes idle and probably
+# still time out.
+#
+# ``set_start_step`` seeks the loader to an absolute plan step, and the plan deals cards
+# per (rank, step), so ONE process declaring itself rank 12 of world 64 draws exactly the
+# cards rank 12 drew at 07:10 UTC -- including row_id 3902543 at slot 3 of step 660. That
+# makes this the same row through the same code, not an approximation of it.
+#
+# Not run on the dev pod: the loader builds real catalog/plan/sidecar structures and the
+# pod's cgroup ceiling is 32 GiB with ~30 GiB already held in kernel caches.
+#
+# 1 GPU requested because JCC allocates in whole workers; the repro is CPU-only.
+name: evan-s512b-step660-repro
+description: "Seek the Stage512b loader to plan step 650 as rank 12 of world 64 and decode through 665, covering row_id 3902543 -- the anime metadata-drift row whose crop_loss killed the formal run at 07:10 UTC. Exits non-zero if the anchors_v1 gate still rejects it."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 1
+cpuPerWorker: 16
+memGBPerWorker: 200
+maxRetries: 0
+environments:
+  EXPECTED_COMMIT: ""
+command: |
+  set -euo pipefail
+  REPO=/fsx/evan/mot_code_s512b_impl
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  test -x "$PY" && test -d "$REPO/.git" || { echo "FATAL: env"; exit 43; }
+  cd "$REPO"
+  export PYTHONPATH="$REPO"
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  unset OFFLINE_ARB_STEP_TIMEOUT_S OFFLINE_ARB_SMOKE_DATASET_CONFIG PYTHONOPTIMIZE
+  mkdir -p /local/evan/anime_img_cache /local/evan/cache
+
+  [ -n "${EXPECTED_COMMIT:-}" ] || { echo "FATAL: EXPECTED_COMMIT unset"; exit 43; }
+  bash scripts/jcc_preflight.sh "$EXPECTED_COMMIT" "$REPO"
+
+  echo "===== step-660 repro on $(hostname) ====="
+  "$PY" scripts/repro_step660_anime_drift_v1.py
+  echo "=== DONE ==="

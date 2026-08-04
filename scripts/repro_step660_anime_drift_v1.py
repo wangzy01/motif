@@ -54,6 +54,7 @@ def main() -> int:
 
         seen_rows: list[int] = []
         shapes: dict[int, tuple] = {}
+        anchors: dict[int, int] = {}
         # The tolerance prints to stdout from inside the supply thread.  Capture it so the
         # WARNING can be asserted on rather than merely eyeballed -- a fix that stopped
         # printing would be a mute button, which is exactly what must not happen.
@@ -63,10 +64,15 @@ def main() -> int:
                 batch = next(loader)
                 pixels = batch["pixels"]
                 shapes[step] = (int(pixels.shape[-2]), int(pixels.shape[-1]))
+                # `item_rows`, the key the loader actually writes (offline_dataset.py:4197).
+                # Guessing "row_ids" here would have made the row-presence line always
+                # report False while the script still exited 0 -- a check that cannot fail,
+                # reporting the one fact the whole script exists to establish.
                 trace = getattr(dataset, "last_item_trace", None) or {}
-                rows = trace.get("row_ids") or []
-                if rows:
-                    seen_rows.extend(int(r) for r in rows)
+                rows = trace.get("item_rows") or []
+                seen_rows.extend(int(r) for r in rows)
+                if trace.get("bucket_idx") is not None:
+                    anchors[step] = int(trace["bucket_idx"])
         captured = buf.getvalue()
         print(captured, end="")
 
@@ -75,9 +81,17 @@ def main() -> int:
               f"reproduced here before the fix")
 
         hit = CRASH_ROW_ID in seen_rows
-        print(f"row_id {CRASH_ROW_ID} present in the decoded rows: {hit}"
-              + ("" if hit else "  (row_ids unavailable from last_item_trace; the "
-                                "no-raise result above still stands)"))
+        print(f"decoded {len(seen_rows)} rows; row_id {CRASH_ROW_ID} among them: {hit}")
+        if not hit:
+            # Without the row, "it did not raise" proves nothing about this crash: the
+            # script would be green while never touching the failing input.
+            print(f"  FAIL the target row was never drawn, so nothing was proven. "
+                  f"Check that rank {CRASH_RANK}/world 64 and steps "
+                  f"{START_STEP}..{STOP_STEP} still cover it.")
+            ok = False
+        if anchors.get(CRASH_STEP) is not None:
+            print(f"step {CRASH_STEP} drew anchor {anchors[CRASH_STEP]} (the crash was on "
+                  f"anchor 2)")
 
         drift = "native-size metadata mismatch" in captured
         tolerated = "crop_loss tolerated on an anime native-drift row" in captured
