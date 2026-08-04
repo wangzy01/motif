@@ -40,6 +40,7 @@ CRASH_SLOT = 3
 CRASH_ROW_ID = 3902543
 START_STEP = 650
 STOP_STEP = 665
+PER_RANK_BS = 32
 
 from smoke_anchors_loader_v1 import build_dataset  # noqa: E402
 
@@ -47,10 +48,12 @@ from smoke_anchors_loader_v1 import build_dataset  # noqa: E402
 def main() -> int:
     print(f"seeking rank {CRASH_RANK} of world 64 to plan step {START_STEP}, "
           f"running through {STOP_STEP} (the crash is at {CRASH_STEP})", flush=True)
-    dataset = build_dataset(CONFIG, CRASH_RANK, 64, 32)
+    dataset = build_dataset(CONFIG, CRASH_RANK, 64, PER_RANK_BS)
     try:
         dataset.set_start_step(START_STEP)
-        loader = dataset.loader()
+        # loader(batch_size) -- and it must equal the plan's per_rank_bs, which the loader
+        # itself enforces. Passing 32 is not a free choice: the plan was dealt at 32.
+        loader = dataset.loader(PER_RANK_BS)
 
         seen_rows: list[int] = []
         shapes: dict[int, tuple] = {}
