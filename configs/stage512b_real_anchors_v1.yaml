@@ -154,6 +154,22 @@ dataset:
   # a time.
   gpic_threads_per_node: 64
   gpic_source_consistency_mode: strict_path
+  # offline_gpic_blob_v1, switched 2026-08-05 at the step-3000 boundary (authorized).
+  # Same rows, same order, same bytes -- Gate A proved 2971/2971 byte-identical against
+  # the source files, three whole top-dose plan steps included. The reason is transport:
+  # per-file S3 reads degraded 170 -> 3200 ms/file within one day and starved non-rank-0
+  # ranks (probe: iter excess == slowest rank's data wait, r ~ 1); blob range reads
+  # measured ~275 ms/item during the same incident window, ~10x faster, and are
+  # structurally immune to per-object first-byte latency.
+  # The manifest sha binds the candidate the shipped GpicBlobOverlay validated end to
+  # end: join 15,787,767/15,787,767, all quality counters zero, index re-hash matched.
+  gpic_payload_backend: offline_gpic_blob_v1
+  offline_gpic_blob_root: /fsx/evan/s512b_ops/gpic_reuse_stage512b_v1_candidate
+  gpic_blob_manifest_sha256: 6e7b967e032ec1e254a5bba49466df21cf3d52be537c1a49370176576c73e8fb
+  # >= blob_count (680) so every blob's FD is opened once and leased thereafter --
+  # fd_misses mean re-OPEN, and open is the operation the degraded mount makes slow.
+  # 8 ranks x 680 = 5,440 FDs/node against the pods' 65,536 RLIMIT_NOFILE.
+  gpic_blob_fd_cache_size: 680
 
   buffer_size: 4096
   queue_size: 128
