@@ -204,7 +204,64 @@ def main() -> int:
         if rc == 0:
             failures.append(f"SILENT ADOPTION: continue accepted a dir with receipt={receipt!r}")
 
-    print(f"\n{len(CASES) + len(RECEIPT_CASES) + 7} checks, {len(failures)} failures")
+    # ---- the pod-generation rendezvous race (2026-08-04 10:28 UTC, cost the run) ----
+    # JOBTAG comes from the pod hostname and a RESTART reuses it; only a JCC retry gets a
+    # new one. So rdzv.$JOBTAG.addr survives a restart holding the dead generation's rank-0
+    # IP, and rank 0 republishes it only after sha256-ing 26 GB -- a ~40s window in which
+    # every restarting peer reads a dead address and wedges in TCPStore retry for 900s.
+    # Seven nodes did exactly that. The fix is to remove the file BEFORE the slow work.
+    src = yaml.safe_load(JOB.read_text())["command"]
+    i_def = src.find("RDZV=$RES/rdzv.$JOBTAG.addr")
+    i_rm = src.find('rm -f "$RDZV"')
+    i_sha = src.find('sha256sum "$INIT"')
+    i_pub = src.find('> "$RDZV.tmp"')
+    checks = [
+        (src.count("RDZV=$RES/rdzv.$JOBTAG.addr") == 1,
+         "rendezvous path is defined exactly once (two spellings drift apart)"),
+        (i_rm != -1, "rank 0 removes the stale rendezvous"),
+        (i_def != -1 and i_def < i_rm,
+         "the path is defined before it is removed"),
+        (i_rm != -1 and i_sha != -1 and i_rm < i_sha,
+         "removal precedes the 26 GB hash -- otherwise the window it closes is still open"),
+        (i_rm != -1 and i_pub != -1 and i_rm < i_pub,
+         "removal precedes republication"),
+    ]
+    for ok, label in checks:
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}")
+        if not ok:
+            failures.append(label)
+
+    # Behavioural, on the shipped text: a stale rendezvous must not survive rank 0's pass.
+    tmp = Path(tempfile.mkdtemp(prefix="formal_rdzv_"))
+    try:
+        ckpt = tmp / "run"
+        ckpt.mkdir()
+        (ckpt / ".jobtag").write_text(OURS + "\n")
+        (ckpt / "FORMAL_RUN.json").write_text(
+            '{"schema": "stage512b_real_formal_run_v1", "attempts": []}')
+        stale = ckpt / f"rdzv.{OURS}.addr"
+        stale.write_text(f"10.64.180.10 {int(1785839000)} {OURS}\n")
+        script = "\n".join([
+            "set -euo pipefail",
+            f'CKPT="{ckpt}"', 'RUN_MODE="fresh"', f'JOBTAG="{OURS}"',
+            'NODE_RANK=0', 'INIT_SHA=deadbeef', 'INIT=/dev/null', f'RUN_ID="{OURS}"',
+            block,
+            'echo "RESOLVED=$EFFECTIVE_MODE"',
+        ])
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        gone = not stale.exists()
+        ok = proc.returncode == 0 and gone
+        print(f"  {'ok  ' if ok else 'FAIL'} a stale rendezvous is gone after rank 0's pass"
+              f"  [rc={proc.returncode} removed={gone}]")
+        if not ok:
+            failures.append(
+                f"stale rendezvous survived (rc={proc.returncode}, exists={stale.exists()}); "
+                "restarting peers would read a dead master address")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print(f"\n{len(CASES) + len(RECEIPT_CASES) + 7 + len(checks) + 1} checks, "
+          f"{len(failures)} failures")
     for f in failures:
         print(f"  {f}")
     if failures:

@@ -127,6 +127,11 @@ command: |
   # $RDZV only after publishing, so the ordering is already enforced by the rendezvous.
   RES=$CKPT
   MODEFILE=$CKPT/.runmode.$JOBTAG
+  # ONE definition, used both by rank 0's publish below and by the peers' read further
+  # down. It used to be declared only next to the rendezvous block; the early
+  # invalidation below needs it here, and two spellings of the same path is precisely how
+  # a gate ends up guarding a different file from the one that gets written.
+  RDZV=$RES/rdzv.$JOBTAG.addr
   if [ "$NODE_RANK" = 0 ]; then
     EFFECTIVE_MODE=$RUN_MODE
     if [ -e "$CKPT" ]; then
@@ -185,6 +190,29 @@ command: |
     fi
     test -f "$CKPT/.jobtag" || printf '%s\n' "$RUN_ID" > "$CKPT/.jobtag"
 
+    # Invalidate the previous POD GENERATION's rendezvous before doing anything slow.
+    #
+    # Observed 2026-08-04 10:28 UTC and it cost the run. JCC restarted all eight pods of
+    # evan-...-retry-pkl2 after the first generation died at step 10. JOBTAG is derived
+    # from the pod hostname, and a restart REUSES it -- only a JCC retry gets a new one --
+    # so $RDZV still held the dead generation's rank-0 IP (10.64.180.10). Rank 0 republishes
+    # it, but only AFTER sha256-ing the 26 GB init_from, which takes ~40 seconds; every
+    # peer restarted inside that window, read the dead address, and sat in TCPStore retry
+    # against "No route to host" with a 900-second timeout. Seven nodes, wedged.
+    #
+    # The freshness check downstream cannot catch this: the stale file was five minutes
+    # old, far inside RDZV_STALE_S, and it carried the right JOBTAG token. Staleness in
+    # SECONDS is not the property that matters -- generation is -- and no timeout tuning
+    # fixes that. Removing the file before the slow work is what makes the window ~0
+    # instead of ~40s: peers then find nothing and keep polling, which is exactly what
+    # they should do while rank 0 is still working.
+    #
+    # This is the eighth instance of one error: reasoning about the first invocation and
+    # forgetting the second. Naming these files by JOBTAG isolates RETRIES, and I wrote a
+    # comment claiming it isolates attempts -- but a pod restart is a second generation
+    # under the SAME name, which that naming does not cover at all.
+    rm -f "$RDZV"
+
     if [ "$EFFECTIVE_MODE" = fresh ]; then
       # Only meaningful on a fresh launch: init_from is a mutable path that the frozen
       # Stage512a job would overwrite if it were ever relaunched. On a continue the
@@ -241,7 +269,8 @@ command: |
         f"snapshots {snaps} <= keep_max {cfg.trainer.checkpoint_keep_max}")
   PYEOF
 
-  RDZV=$RES/rdzv.$JOBTAG.addr
+  # RDZV is defined once, up beside MODEFILE, because rank 0 must invalidate the previous
+  # pod generation's copy before its 26 GB hash -- long before this point.
   if [ "$NODE_RANK" = 0 ]; then
     MYIP=$(hostname -i | awk '{print $1}')
     printf '%s %s %s\n' "$MYIP" "$(date +%s)" "$JOBTAG" > "$RDZV.tmp"

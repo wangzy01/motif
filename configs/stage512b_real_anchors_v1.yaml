@@ -253,7 +253,19 @@ trainer:
   gradient_clip_val: 1.0
   log_every: 10
   dataline_metrics_every: 50
-  checkpoint_steps: 3000
+  # 1500, halved on 2026-08-04 after a day with three interruptions in four hours (our own
+  # step-660 crash, a pod eviction, and an external stop). Measured, not guessed: the step
+  # after each of Stage512a's 20 saves cost a median +61.2s over baseline (max +91.5s), so
+  #   3000 steps -> 0.70% throughput, up to 2.42 h of work lost per interruption
+  #   1500 steps -> 1.41% throughput, up to 1.21 h
+  # Over an 8-day run the extra 0.7% is ~1.4 h; it pays for itself after two interruptions.
+  #
+  # MUST divide checkpoint_keep_every. The periodic-snapshot branch lives INSIDE
+  # save_checkpoint (checkpoint.py:174), which only runs when global_step %
+  # checkpoint_steps == 0, so a keep_every that is not a multiple of this value would never
+  # coincide with a save and all eight evaluation snapshots would silently never be
+  # written. 30000 / 1500 = 20.
+  checkpoint_steps: 1500
   # 30000, not the inherited 60000 (Evan, 2026-08-02). This is an EVALUATION decision,
   # not a storage one: keep_every decides which steps still exist when someone wants to
   # score them, and it cannot be fixed after the fact -- raising it later does not bring
