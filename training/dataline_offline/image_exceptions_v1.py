@@ -253,6 +253,53 @@ STAGE512A_WEIGHTED_TEXTATLAS_FORMAL_EXPOSURES: Mapping[int, int] = MappingProxyT
 STAGE512A_WEIGHTED_TEXTATLAS_TOTAL_FORMAL_EXPOSURES = 10
 
 
+# Stage512b anchors_v1 production profile.  The three reviewed JPEGs carry over --
+# same source bytes, same reviewed repairs, same pixel identities -- but the Stage512b
+# catalog RENUMBERED the rows (85.67M textatlas base instead of 93.2M) and re-bucketed
+# them under the 13-anchor scheme, and this registry is keyed by row_id.  Nobody re-keyed
+# it, so bind_image_exceptions() found no Stage512b profile and returned the empty map:
+# the formal run then died at plan step 5746 on row 89,134,630 (the PPT2Structured image
+# below), whose truncation had been known, reviewed and repaired since stage256.
+# Every byte and pixel identity here was re-measured against the Stage512b catalog and
+# matched the frozen constants exactly before this profile was added (2026-08-05).
+STAGE512B_ANCHORS_PLAN_ID = "stage512b_offline_exact_v2_w64_512m_anchors_v1"
+STAGE512B_ANCHORS_STAGE = "512b"
+STAGE512B_ANCHORS_ELIGIBILITY = "elig_512"
+STAGE512B_ANCHORS_PLAN_HASH = (
+    "50b5ae2bb2a952b18355d5d5876ceac8c4d8086ae72f872b306a8167f84fd685"
+)
+STAGE512B_ANCHORS_CATALOG_HASH = (
+    "b91e4906df9a1f8b039effa69df83a0555310d964bf22d6e1da7c13e9c781b91"
+)
+STAGE512B_ANCHORS_PLAN_HEADER_SHA256 = (
+    "5cd978e8b8392ff379c0e2961f2d515279b052cf1ab766a097fc15922349c806"
+)
+STAGE512B_ANCHORS_CATALOG_HEADER_SHA256 = (
+    "4ab78bb39715cf596362a8e68eed0e4b77abdfbf1f44f06bbcca454aee366ed8"
+)
+
+
+def _rekeyed_stage512b_repair(
+    old_row_id: int, new_row_id: int, new_bucket_idx: int
+) -> TextAtlasJpegEoiRepair:
+    """The Stage512b identity of a reviewed repair: new row_id and anchor bucket, every
+    byte- and pixel-level field UNCHANGED from the frozen stage256 review."""
+    import dataclasses
+    base = TEXTATLAS_JPEG_EOI_REPAIRS[old_row_id]
+    return dataclasses.replace(base, row_id=new_row_id, bucket_idx=new_bucket_idx)
+
+
+STAGE512B_ANCHORS_TEXTATLAS_JPEG_EOI_REPAIRS: Mapping[
+    int, TextAtlasJpegEoiRepair
+] = MappingProxyType(
+    {
+        88_575_641: _rekeyed_stage512b_repair(94_682_834, 88_575_641, 0),
+        89_134_630: _rekeyed_stage512b_repair(93_569_671, 89_134_630, 1),
+        89_161_949: _rekeyed_stage512b_repair(93_606_908, 89_161_949, 1),
+    }
+)
+
+
 class ImageExceptionBindingError(ValueError):
     pass
 
@@ -306,6 +353,16 @@ _PROFILES = (
         STAGE512A_WEIGHTED_PLAN_HEADER_SHA256,
         STAGE512A_WEIGHTED_CATALOG_HEADER_SHA256,
         STAGE512A_WEIGHTED_TEXTATLAS_JPEG_EOI_REPAIRS,
+    ),
+    (
+        STAGE512B_ANCHORS_STAGE,
+        STAGE512B_ANCHORS_ELIGIBILITY,
+        STAGE512B_ANCHORS_PLAN_ID,
+        STAGE512B_ANCHORS_PLAN_HASH,
+        STAGE512B_ANCHORS_CATALOG_HASH,
+        STAGE512B_ANCHORS_PLAN_HEADER_SHA256,
+        STAGE512B_ANCHORS_CATALOG_HEADER_SHA256,
+        STAGE512B_ANCHORS_TEXTATLAS_JPEG_EOI_REPAIRS,
     ),
 )
 
