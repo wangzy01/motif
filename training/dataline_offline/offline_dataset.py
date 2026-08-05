@@ -94,6 +94,20 @@ from training.dataline_offline.anime_native_upsample_exceptions_weighted_v1 impo
     apply_anime_native_upsample_exception,
     bind_anime_native_upsample_exceptions,
 )
+from training.dataline_offline.anime_native_upsample_exceptions_weighted_512b_v1 import (
+    EXPOSURE_COUNT as _S512B_UPSAMPLE_EXPOSURES,
+    FORMAL_STEP_STOP as _S512B_UPSAMPLE_STEP_STOP,
+    PER_RANK_BATCH as _S512B_UPSAMPLE_BATCH,
+    WORLD_SIZE as _S512B_UPSAMPLE_WORLD,
+    bind_stage512b_anime_native_upsample_exceptions,
+)
+
+_STAGE512B_UPSAMPLE_CLOSURE = (
+    _S512B_UPSAMPLE_EXPOSURES,
+    _S512B_UPSAMPLE_STEP_STOP,
+    _S512B_UPSAMPLE_WORLD,
+    _S512B_UPSAMPLE_BATCH,
+)
 from training.dataline_offline.textatlas_gt_v1 import (
     TextAtlasGroundTruth,
     TextAtlasGroundTruthError,
@@ -1097,20 +1111,40 @@ class OfflineExactDataset:
                 f"cannot bind frozen image exceptions: {exc}"
             ) from exc
         try:
-            self._anime_native_upsample_exceptions = (
-                bind_anime_native_upsample_exceptions(
-                    stage=self.stage,
-                    eligibility=self.eligibility,
-                    plan_id=self.plan_id,
-                    plan_hash=str(self.plan_header.get("plan_hash", "")),
-                    catalog_hash=str(self.catalog_header["catalog_hash"]),
-                    plan_header_sha256=_sha256_file(self.plan_root / "header.json"),
-                    catalog_header_sha256=_sha256_file(self.catalog_root / "header.json"),
-                    decode_domain=lambda row_id: self.domains[
-                        self._row_decoder.decode(row_id)[0]
-                    ],
-                )
+            # Both binds are fail-closed on identity and return the empty map for plans
+            # they do not recognise, so consulting the Stage512b registry when the 512a
+            # one declined is a disjoint union, not a fallback that can shadow anything.
+            # Two registries exist because the 512a module's closure checks pin ITS
+            # horizon (125,000) and exposure count; the run that made this necessary
+            # died at plan step 11,270 when the renumbered catalog left the reviewed
+            # exception unreachable (2026-08-05).
+            _upsample_bind_kwargs = dict(
+                stage=self.stage,
+                eligibility=self.eligibility,
+                plan_id=self.plan_id,
+                plan_hash=str(self.plan_header.get("plan_hash", "")),
+                catalog_hash=str(self.catalog_header["catalog_hash"]),
+                plan_header_sha256=_sha256_file(self.plan_root / "header.json"),
+                catalog_header_sha256=_sha256_file(self.catalog_root / "header.json"),
+                decode_domain=lambda row_id: self.domains[
+                    self._row_decoder.decode(row_id)[0]
+                ],
             )
+            self._anime_native_upsample_exceptions = (
+                bind_anime_native_upsample_exceptions(**_upsample_bind_kwargs)
+            )
+            # apply() re-validates the definition against a (exposure_count, step_stop,
+            # world, batch) closure; each registry has its own. None = the 512a module's
+            # globals, preserving the released behaviour bit-for-bit.
+            self._anime_upsample_closure: tuple[int, int, int, int] | None = None
+            if not self._anime_native_upsample_exceptions:
+                self._anime_native_upsample_exceptions = (
+                    bind_stage512b_anime_native_upsample_exceptions(
+                        **_upsample_bind_kwargs
+                    )
+                )
+                if self._anime_native_upsample_exceptions:
+                    self._anime_upsample_closure = _STAGE512B_UPSAMPLE_CLOSURE
         except AnimeNativeUpsampleBindingError as exc:
             raise OfflineLoaderError(
                 f"cannot bind frozen anime native-upsample exceptions: {exc}"
@@ -3961,6 +3995,7 @@ class OfflineExactDataset:
                         target_width=target_w,
                         crop_v_anchor=self._v_anchor_for(planned.domain),
                         resize_u8_to_bucket=resize_u8_to_bucket,
+                        closure=self._anime_upsample_closure,
                     )
                 except AnimeNativeUpsampleMismatchError as exc:
                     raise OfflineLoaderError(

@@ -533,6 +533,38 @@ rank 0 会 `rm -rf` 它;rendezvous 是"覆盖"而不是"先删",于是留下了�
 30000 / 1500 = 20 ✓(已加断言实测:8 个快照 30000…240000,keep_max 8)。
 
 
+## S512B-30 GPIC 切换 packed blob 复用(2026-08-05 06:30 执行,判据 PASS)
+
+逐文件 S3 读一天内退化 14 倍(170→3200 ms/张,并发 1 实测),非零 rank 饿死经 FSDP 传导
+(探针:iter 超额 ≡ 最饿 rank 等待,r≈1;GC 排除)。复用 7 月 PASS 的 2.91 TB packed
+payload(680 blobs),只为本 catalog 新建 884 MB dense index:join 15,787,767/15,787,767
+全命中、质量计数器全 0、shipped overlay 全验、**Gate A 2971/2971 字节一致**(含 3 个最高
+剂量完整 step)。同一退化窗口 blob 读 ~275 ms/张。step 3000 边界 continue 切换,
+**判据 PASS:mean 2.670 / p50 2.604 / p90 2.779,ETA ~7.6 天**。样本/顺序/像素零改动。
+
+## S512B-31 anime 上采样豁免重键(明示 waiver:8/512M = 1.56e-8)
+
+正式跑死于 plan 步 11,270:row 534,123(kemono `a2Vtb2…`)catalog 元数据 600×600、
+真实像素 363×450(source-bound md5 证实为建库时同一批像素,**元数据本身错**),覆盖
+512×512 锚需 1.4105× 上采样,anchors 门禁按设计击杀。**该图 512a 已审阅并豁免**
+(`anime_native_upsample_exceptions_weighted_v1`,decoded/raw/output sha 全部钉死),
+512b catalog 重编号(11,163,647→534,123)后豁免失联 —— 与 S512B 第十个 bug(textatlas
+修复表)同类,**同一根因的第二例**。
+
+处置(用户确认方案四,拒绝了我先提的"source-bound md5 通用放行" —— md5 只证像素一致,
+证不了元数据正确,通用放行会合法化未来的映射错误):
+- 新模块 `anime_native_upsample_exceptions_weighted_512b_v1`:8 个 plan 坐标
+  (全量 245 block 扫描,0 次已过)逐坐标钉死;字节/像素常量沿用 512a 审阅值,
+  提交前三层重测(raw/decoded/output sha 逐位吻合)。
+- `apply` 的闭包检查参数化(默认 None = 512a 全局,released 行为逐位不变);
+  行为测试先于生产抓到了"8 坐标撞 512a 的 EXPOSURE_COUNT=5 闭包"。
+- **waiver:8 次曝光 / 512,000,000 = 1.56e-8 来自上采样像素。** 其余小于锚的行仍 fail-closed。
+- 新增 `scripts/test_registry_rekey_closure_v1.py`:三个 row_id 键控注册表
+  (textatlas 修复 / anime 上采样 / 无 caption MONET)对当前 catalog+plan 的闭包审计,
+  防第三例。无 caption MONET 的 6 行实测在 512b catalog 但 **plan 引用 0 次**,无需 profile。
+- **预授权(用户):后续再有不在任何旧名单的新坏行,重复该机械流程**(停链→实测全部身份→
+  逐坐标精确豁免→重测→重放→continue),偏离模板的情况仍停下询问。
+
 ---
 
 ## 流程约定(不是数据决策,但同样具约束力)

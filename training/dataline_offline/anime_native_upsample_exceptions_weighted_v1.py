@@ -149,18 +149,31 @@ def _strict_float(value: Any, name: str) -> float:
 
 
 def _validate_definition(
-    mapping_key: int, exception: AnimeNativeUpsampleException
+    mapping_key: int,
+    exception: AnimeNativeUpsampleException,
+    closure: tuple[int, int, int, int] | None = None,
 ) -> None:
+    # closure = (exposure_count, step_stop, world_size, per_rank_batch).  None keeps the
+    # released Stage512a behaviour bit-for-bit (this module's own globals).  It exists
+    # because a second production profile (Stage512b, 8 coordinates over a 250,000-step
+    # horizon) reuses this validated apply path, and re-checking ITS definition against
+    # THIS module's pinned 5/125,000 closure rejected a correct exception -- caught by a
+    # behavioural test on 2026-08-05 before it could reach a run.
+    exposure_count, step_stop, world_size, per_rank_batch = (
+        (EXPOSURE_COUNT, FORMAL_STEP_STOP, WORLD_SIZE, PER_RANK_BATCH)
+        if closure is None
+        else closure
+    )
     if type(mapping_key) is not int or mapping_key != exception.row_id:
         raise AnimeNativeUpsampleBindingError("anime exception row-id drift")
     if (
         not exception.coordinates
-        or len(exception.coordinates) != EXPOSURE_COUNT
+        or len(exception.coordinates) != exposure_count
         or any(
             type(item) is not AnimePlanCoordinate
-            or not 0 <= item.step < FORMAL_STEP_STOP
-            or not 0 <= item.rank < WORLD_SIZE
-            or not 0 <= item.slot < PER_RANK_BATCH
+            or not 0 <= item.step < step_stop
+            or not 0 <= item.rank < world_size
+            or not 0 <= item.slot < per_rank_batch
             for item in exception.coordinates
         )
     ):
@@ -269,8 +282,9 @@ def apply_anime_native_upsample_exception(
     target_width: int,
     crop_v_anchor: float,
     resize_u8_to_bucket: Callable[[np.ndarray, int, int, float], np.ndarray],
+    closure: tuple[int, int, int, int] | None = None,
 ) -> np.ndarray:
-    _validate_definition(exception.row_id, exception)
+    _validate_definition(exception.row_id, exception, closure)
     coordinate = AnimePlanCoordinate(
         _strict_int(step, "step"),
         _strict_int(rank, "rank"),
