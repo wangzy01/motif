@@ -137,6 +137,9 @@ ALLOWED_CONFIG_DELTAS = frozenset(
         "trainer.checkpoint_keep_every",
         "trainer.checkpoint_keep_format",
         "trainer.checkpoint_dir",
+        # Operational fail-closed fence; historical A predates the formal
+        # launcher and therefore has no equivalent leaf.
+        "trainer.formal_launch_required",
         "trainer.init_from",
         "trainer.init_from_rng_policy",
         "trainer.gc_pause_probe",
