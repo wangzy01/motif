@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import io
 import json
 import math
 import os
@@ -788,17 +789,47 @@ def phase_flux2_vae(args: argparse.Namespace, rank: int, device: torch.device) -
         print("PASS flux2-vae", json.dumps(receipt["diagnostics"], sort_keys=True), flush=True)
 
 
-def _trace_destination(value: Any) -> str:
+def _classify_torch_save_destination(value: Any) -> dict[str, Any]:
+    if type(value) is io.BytesIO:
+        return {
+            "event": "torch.save.memory",
+            "destination": "<BytesIO>",
+            "filesystem": False,
+            "backing": "memory",
+        }
+    if isinstance(value, (str, bytes, os.PathLike)):
+        return {
+            "event": "torch.save",
+            "destination": os.fsdecode(os.fspath(value)),
+            "filesystem": True,
+            "backing": "pathlike",
+        }
     try:
         fd = int(value.fileno())
-        return os.readlink(f"/proc/self/fd/{fd}")
+        return {
+            "event": "torch.save",
+            "destination": os.readlink(f"/proc/self/fd/{fd}"),
+            "filesystem": True,
+            "backing": "fileno",
+        }
     except (AttributeError, OSError, TypeError, ValueError):
         pass
-    candidate = getattr(value, "name", value)
-    try:
-        return os.fspath(candidate)
-    except TypeError:
-        return f"<{type(value).__name__}>"
+    candidate = getattr(value, "name", None)
+    if isinstance(candidate, (str, bytes, os.PathLike)):
+        return {
+            "event": "torch.save",
+            "destination": os.fsdecode(os.fspath(candidate)),
+            "filesystem": True,
+            "backing": "name-pathlike",
+        }
+    # Unknown destinations are conservatively filesystem-backed so a new
+    # serializer cannot silently evade the rank-0-only publication assertion.
+    return {
+        "event": "torch.save",
+        "destination": f"<{type(value).__name__}>",
+        "filesystem": True,
+        "backing": "unknown",
+    }
 
 
 def _validate_checkpoint_io_trace(
@@ -811,7 +842,11 @@ def _validate_checkpoint_io_trace(
 
     checkpoint = str(checkpoint_path)
     periodic = str(periodic_path)
-    saves = [(index, item) for index, item in enumerate(events) if item["event"] == "torch.save"]
+    saves = [
+        (index, item)
+        for index, item in enumerate(events)
+        if item["event"] == "torch.save"
+    ]
     replaces = [(index, item) for index, item in enumerate(events) if item["event"] == "replace"]
     links = [(index, item) for index, item in enumerate(events) if item["event"] == "link"]
     chmods = [(index, item) for index, item in enumerate(events) if item["event"] == "chmod"]
@@ -915,7 +950,7 @@ def save_checkpoint_with_io_trace(
 
     def recording_torch_save(*call_args: Any, **call_kwargs: Any) -> Any:
         destination = call_args[1] if len(call_args) > 1 else call_kwargs.get("f")
-        events.append({"event": "torch.save", "destination": _trace_destination(destination)})
+        events.append(_classify_torch_save_destination(destination))
         return real_torch_save(*call_args, **call_kwargs)
 
     def recording_fsync(fd: int) -> None:
@@ -974,7 +1009,15 @@ def save_checkpoint_with_io_trace(
     dist.barrier()
     gathered: list[Any] = [None] * dist.get_world_size()
     dist.all_gather_object(gathered, events)
-    require(gathered[1] == [], f"rank1 performed checkpoint filesystem writes: {gathered[1]}")
+    rank1_filesystem_events = [
+        item
+        for item in gathered[1]
+        if item["event"] != "torch.save.memory"
+    ]
+    require(
+        rank1_filesystem_events == [],
+        f"rank1 performed checkpoint filesystem writes: {rank1_filesystem_events}",
+    )
     summary = _validate_checkpoint_io_trace(
         gathered[0], checkpoint_path=checkpoint_path, periodic_path=periodic_path
     )
@@ -1000,7 +1043,9 @@ def expect_full_capacity_failure(
 
     def recording_torch_save(*call_args: Any, **call_kwargs: Any) -> Any:
         nonlocal torch_save_calls
-        torch_save_calls += 1
+        destination = call_args[1] if len(call_args) > 1 else call_kwargs.get("f")
+        if _classify_torch_save_destination(destination)["event"] == "torch.save":
+            torch_save_calls += 1
         return real_torch_save(*call_args, **call_kwargs)
 
     error: str | None = None
@@ -1114,7 +1159,14 @@ def phase_save_reference(args: argparse.Namespace, rank: int, device: torch.devi
         "step_dev": periodic_stat.st_dev,
         "step_ino": periodic_stat.st_ino,
         "nlink": last_stat.st_nlink,
-        "torch_save_calls": sum(item["event"] == "torch.save" for item in io_traces[rank]),
+        "torch_save_calls": sum(
+            item["event"] == "torch.save"
+            for item in io_traces[rank]
+        ),
+        "memory_torch_save_calls": sum(
+            item["event"] == "torch.save.memory"
+            for item in io_traces[rank]
+        ),
     }
     require(retention_local["samefile"], "step_1.pt is not the same file as last.pt")
     require(last_stat.st_dev == periodic_stat.st_dev, "full snapshot device differs")
@@ -1185,10 +1237,20 @@ def phase_save_reference(args: argparse.Namespace, rank: int, device: torch.devi
                 "checkpoint_keep_max": 4,
                 "per_rank": retention_before_crash,
                 "rank0_torch_save_calls": sum(
-                    item["event"] == "torch.save" for item in io_traces[0]
+                    item["event"] == "torch.save"
+                    for item in io_traces[0]
                 ),
                 "rank1_torch_save_calls": sum(
-                    item["event"] == "torch.save" for item in io_traces[1]
+                    item["event"] == "torch.save"
+                    for item in io_traces[1]
+                ),
+                "rank0_memory_torch_save_calls": sum(
+                    item["event"] == "torch.save.memory"
+                    for item in io_traces[0]
+                ),
+                "rank1_memory_torch_save_calls": sum(
+                    item["event"] == "torch.save.memory"
+                    for item in io_traces[1]
                 ),
                 "durable_atomic_publication": io_summary,
                 "predictable_tmp_symlink_canary_untouched": True,

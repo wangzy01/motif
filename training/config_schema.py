@@ -218,6 +218,7 @@ SCHEMA = {
 
     # --- trainer.* （train.py + diagnostics.py + checkpoint.py 消费）--- #
     "trainer": {
+        "formal_launch_required": bool,       # 正式训练必须由已绑定身份的 formal launcher 启动
         "seed": int,
         "amp_dtype": NO_TYPECHECK,             # "bfloat16"/"bf16" 或 null
         "batch_size": int,

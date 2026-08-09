@@ -23,6 +23,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import torch
+from omegaconf import OmegaConf
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -49,11 +50,13 @@ from training.checkpoint import (  # noqa: E402
     should_write_final_checkpoint,
     sync_metrics_before_checkpoint,
 )
-from training.formal_boot import verify_expected_boot_mode  # noqa: E402
+from training.config_schema import validate_config  # noqa: E402
 from training.formal_boot import (  # noqa: E402
     EXPECTED_RUN_LINEAGE_ENV,
     FORMAL_RUN_LINEAGE_KEY,
     resolve_checkpoint_boot_branch,
+    verify_expected_boot_mode,
+    verify_formal_launch_requirement,
 )
 from training.rng_state import (  # noqa: E402
     FULL_CHECKPOINT_SCHEMA,
@@ -786,6 +789,70 @@ class RngFixCpuTests(unittest.TestCase):
             _ema_state_integrity_check(broken_ema, trainable, model)
 
     def test_formal_boot_contract(self):
+        final_config_warnings = validate_config(
+            OmegaConf.load(
+                REPO / "configs/stage512a_continue_control_rngfix_v1.yaml"
+            ),
+            log=lambda _message: None,
+        )
+        self.assertEqual(final_config_warnings, [])
+        self.assertEqual(
+            validate_config(
+                OmegaConf.create({"trainer": {"formal_launch_required": True}}),
+                log=lambda _message: None,
+            ),
+            [],
+        )
+        schema_messages = []
+        validate_config(
+            OmegaConf.create({"trainer": {"formal_launch_required": "true"}}),
+            log=schema_messages.append,
+        )
+        self.assertTrue(any("formal_launch_required" in item for item in schema_messages))
+        lineage = "a" * 64
+        verify_formal_launch_requirement(
+            required=False,
+            expected_boot_mode=None,
+            expected_run_lineage=None,
+        )
+        verify_formal_launch_requirement(
+            required=True,
+            expected_boot_mode="fresh",
+            expected_run_lineage=lineage,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "MOT_EXPECTED_BOOT_MODE.*MOT_EXPECTED_RUN_LINEAGE_SHA256",
+        ):
+            verify_formal_launch_requirement(
+                required=True,
+                expected_boot_mode=None,
+                expected_run_lineage=None,
+            )
+        with self.assertRaisesRegex(RuntimeError, "MOT_EXPECTED_BOOT_MODE"):
+            verify_formal_launch_requirement(
+                required=True,
+                expected_boot_mode=None,
+                expected_run_lineage=lineage,
+            )
+        with self.assertRaisesRegex(RuntimeError, "MOT_EXPECTED_RUN_LINEAGE_SHA256"):
+            verify_formal_launch_requirement(
+                required=True,
+                expected_boot_mode="fresh",
+                expected_run_lineage=None,
+            )
+        with self.assertRaisesRegex(RuntimeError, "must be one of"):
+            verify_formal_launch_requirement(
+                required=True,
+                expected_boot_mode="invalid",
+                expected_run_lineage=lineage,
+            )
+        with self.assertRaisesRegex(RuntimeError, "must be a boolean"):
+            verify_formal_launch_requirement(
+                required="true",
+                expected_boot_mode="fresh",
+                expected_run_lineage=lineage,
+            )
         template = (
             REPO
             / "provenance/jcc_jobs/20260809_stage512a_continue_control_rngfix_FORMAL_w64.yaml"

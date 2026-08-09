@@ -50,10 +50,10 @@ from training.config_schema import validate_config
 from training.diagnostics import BatchReadyBarrier, StepTraceDiagnostics
 from training.formal_boot import (
     EXPECTED_BOOT_MODE_ENV,
-    EXPECTED_RUN_LINEAGE_ENV,
     resolve_checkpoint_boot_branch,
     resolve_expected_run_lineage_sha256,
     verify_expected_boot_mode,
+    verify_formal_launch_requirement,
 )
 from training.rng_state import (
     RNG_STATE_SCHEMA,
@@ -179,6 +179,24 @@ def main():
     # 暴露拼写错误（见 training/config_schema.py 顶部动机）。绝不修改 cfg、不改运行行为。
     if is_main:
         validate_config(config, log=log)
+
+    # Resolve and synchronize the formal identity before creating the output
+    # directory or constructing model/data state. The production config sets
+    # formal_launch_required=true, so dropping the launcher identity is fatal.
+    expected_boot_mode = os.environ.get(EXPECTED_BOOT_MODE_ENV)
+    expected_run_lineage = resolve_expected_run_lineage_sha256(is_dist=is_dist)
+    if is_dist:
+        expected_modes = [None] * world_size
+        dist.all_gather_object(expected_modes, expected_boot_mode)
+        if len(set(expected_modes)) != 1:
+            raise RuntimeError(
+                f"{EXPECTED_BOOT_MODE_ENV} differs across ranks: {expected_modes}"
+            )
+    verify_formal_launch_requirement(
+        required=config.trainer.get("formal_launch_required", False),
+        expected_boot_mode=expected_boot_mode,
+        expected_run_lineage=expected_run_lineage,
+    )
 
     seed = int(config.trainer.get("seed", 42))
     random.seed(seed)
@@ -444,22 +462,8 @@ def main():
     if use_ema:
         model.init_ema(float(ema_cfg.get("decay", 0.9999)))
 
-    # Resolve the immutable formal lineage before loading any local checkpoint.
-    # This catches a missing/malformed/rank-local environment binding before
-    # model/optimizer state can be mutated by a wrong but shape-compatible last.pt.
-    expected_boot_mode = os.environ.get(EXPECTED_BOOT_MODE_ENV)
-    expected_run_lineage = resolve_expected_run_lineage_sha256(is_dist=is_dist)
-    if is_dist:
-        expected_modes = [None] * world_size
-        dist.all_gather_object(expected_modes, expected_boot_mode)
-        if len(set(expected_modes)) != 1:
-            raise RuntimeError(
-                f"{EXPECTED_BOOT_MODE_ENV} differs across ranks: {expected_modes}"
-            )
-    if expected_boot_mode is not None and expected_run_lineage is None:
-        raise RuntimeError(
-            f"formal boot requires {EXPECTED_RUN_LINEAGE_ENV}"
-        )
+    # The immutable formal identity was validated before output/model setup.
+    # Select the filesystem-dependent branch immediately before state loading.
     selected_boot_branch = resolve_checkpoint_boot_branch(
         ckpt_path,
         resume=bool(config.trainer.get("resume", True)),

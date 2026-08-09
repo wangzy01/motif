@@ -574,6 +574,7 @@ def validate(config_path: Path, contract_path: Path,
     assert str(cfg.scheduler.decay) == "constant"
 
     assert int(t.seed) == 42 and int(t.batch_size) == 32
+    assert t.formal_launch_required is True
     assert int(t.max_steps) == 125_000
     assert int(t.max_exposure_images) == 256_000_000
     assert Path(str(t.checkpoint_dir)) == EXPECTED_CKPT

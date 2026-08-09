@@ -63,6 +63,33 @@ def resolve_expected_run_lineage_sha256(*, is_dist: bool) -> str | None:
     return values[0]
 
 
+def verify_formal_launch_requirement(
+    *,
+    required: bool,
+    expected_boot_mode: str | None,
+    expected_run_lineage: str | None,
+) -> None:
+    """Fail closed before output/model setup when a formal launch is required."""
+
+    if not isinstance(required, bool):
+        raise RuntimeError("trainer.formal_launch_required must be a boolean")
+    if expected_boot_mode is not None and expected_boot_mode not in VALID_BOOT_MODES:
+        raise RuntimeError(
+            f"{EXPECTED_BOOT_MODE_ENV} must be one of {VALID_BOOT_MODES}, "
+            f"got {expected_boot_mode!r}"
+        )
+    normalize_expected_run_lineage_sha256(expected_run_lineage)
+    missing = []
+    if required and expected_boot_mode is None:
+        missing.append(EXPECTED_BOOT_MODE_ENV)
+    if (required or expected_boot_mode is not None) and expected_run_lineage is None:
+        missing.append(EXPECTED_RUN_LINEAGE_ENV)
+    if missing:
+        raise RuntimeError(
+            "formal launch identity is required but missing: " + ", ".join(missing)
+        )
+
+
 def resolve_checkpoint_boot_branch(
     checkpoint_path: str,
     *,
