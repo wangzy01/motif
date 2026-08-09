@@ -437,6 +437,24 @@ def _raise_synchronized_validation_error(error, *, is_dist: bool, context: str) 
         raise error
 
 
+def sync_metrics_before_checkpoint(metrics_file, *, rank: int, is_dist: bool) -> None:
+    """Durably commit rank-0 metrics before any checkpoint collective."""
+    flush_error = None
+    if rank == 0:
+        try:
+            if metrics_file is None:
+                raise RuntimeError("rank 0 metrics handle is missing")
+            metrics_file.flush()
+            os.fsync(metrics_file.fileno())
+        except BaseException as exc:
+            flush_error = exc
+    _raise_synchronized_validation_error(
+        flush_error,
+        is_dist=is_dist,
+        context="metrics durable checkpoint boundary",
+    )
+
+
 def _fsync_directory(path: str) -> None:
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
@@ -694,15 +712,25 @@ def _publish_periodic_snapshot(path, full_payload, config) -> str | None:
     if os.path.lexists(snapshot):
         if os.path.islink(snapshot) or not os.path.isfile(snapshot):
             raise RuntimeError(f"periodic snapshot target is not a regular file: {snapshot}")
-        if os.lstat(snapshot).st_mode & 0o222:
-            raise RuntimeError(f"periodic snapshot target is not read-only: {snapshot}")
         if fmt == "full":
             if not os.path.samefile(path, snapshot):
                 raise RuntimeError(
                     "full periodic snapshot is not the same inode as validated last.pt; "
                     f"refusing stale or copied target: {snapshot}"
                 )
+            value = os.lstat(snapshot)
+            if value.st_mode & 0o222:
+                if stat.S_IMODE(value.st_mode) != 0o600 or value.st_nlink != 2:
+                    raise RuntimeError(
+                        "full periodic snapshot has an unexpected writable mode/link count: "
+                        f"mode={oct(stat.S_IMODE(value.st_mode))}, nlink={value.st_nlink}"
+                    )
+                os.chmod(snapshot, 0o444)
+                _fsync_regular_file(snapshot, context="repaired full periodic snapshot")
+                _fsync_directory(directory)
         else:
+            if os.lstat(snapshot).st_mode & 0o222:
+                raise RuntimeError(f"periodic snapshot target is not read-only: {snapshot}")
             _validate_weights_ema_snapshot(snapshot, full_payload)
     else:
         if fmt == "full":
@@ -838,7 +866,7 @@ def load_checkpoint(path, model, optimizer, scheduler, is_dist, config=None) -> 
     pending_rng_state = None
     validation_error = None
     try:
-        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        ckpt = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
         pending_rng_state = validate_resume_checkpoint(
             ckpt,
             model,
@@ -956,7 +984,7 @@ def init_from_checkpoint(path, model, optimizer, is_dist, config=None, load_opti
     rng_policy = None
     ckpt = None
     try:
-        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        ckpt = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
         _ablation_mismatch_check(ckpt["trainable_state"].keys(), model)
         if config is None:
             raise RuntimeError("init_from requires config for architecture and RNG policy checks")

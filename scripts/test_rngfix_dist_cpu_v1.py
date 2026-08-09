@@ -30,6 +30,7 @@ from training.formal_boot import (  # noqa: E402
     resolve_checkpoint_boot_branch,
     resolve_expected_run_lineage_sha256,
 )
+from training.checkpoint import sync_metrics_before_checkpoint  # noqa: E402
 
 
 class DummyRngModel:
@@ -142,6 +143,25 @@ def worker(rank, world_size, rendezvous):
         flags = [None] * world_size
         dist.all_gather_object(flags, branch_failed)
         assert flags == [True, True]
+
+        class BrokenMetrics:
+            def flush(self):
+                raise OSError("injected metrics fsync boundary failure")
+
+        metrics_failed = False
+        try:
+            sync_metrics_before_checkpoint(
+                BrokenMetrics() if rank == 0 else None,
+                rank=rank,
+                is_dist=True,
+            )
+        except RuntimeError as exc:
+            assert "metrics durable checkpoint boundary" in str(exc)
+            metrics_failed = True
+        flags = [None] * world_size
+        dist.all_gather_object(flags, metrics_failed)
+        assert flags == [True, True]
+        dist.barrier()
     finally:
         dist.destroy_process_group()
 

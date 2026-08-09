@@ -12,6 +12,7 @@ import copy
 import os
 import random
 import shutil
+import stat
 import sys
 import tempfile
 import types
@@ -46,6 +47,7 @@ from training.checkpoint import (  # noqa: E402
     load_checkpoint,
     save_checkpoint,
     should_write_final_checkpoint,
+    sync_metrics_before_checkpoint,
 )
 from training.formal_boot import verify_expected_boot_mode  # noqa: E402
 from training.formal_boot import (  # noqa: E402
@@ -301,6 +303,100 @@ class RngFixCpuTests(unittest.TestCase):
             for name, value in resumed.model.named_parameters():
                 self.assertTrue(torch.equal(expected_params[name], value))
             self.assertEqual(expected_scheduler, resumed_scheduler.state_dict())
+
+    def test_checkpoint_loads_use_safe_mmap_for_resume_and_legacy_init(self):
+        launcher = (REPO / "scripts/stage512a_control_formal_launch.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'torch.load(path, map_location="cpu", weights_only=True, mmap=True)',
+            launcher,
+        )
+        self.assertNotIn("weights_only=False", launcher)
+
+        source, source_optimizer, source_scheduler = make_training()
+        stochastic_step(source, source_optimizer, source_scheduler)
+        with tempfile.TemporaryDirectory() as td:
+            v2 = os.path.join(td, "v2.pt")
+            legacy = os.path.join(td, "legacy.pt")
+            save_checkpoint(v2, source, source_optimizer, source_scheduler, 1, False, 0, make_config())
+            payload = torch.load(v2, map_location="cpu", weights_only=True, mmap=True)
+            del payload["checkpoint_schema"]
+            del payload["rng_state"]
+            torch.save(payload, legacy)
+
+            target, target_optimizer, target_scheduler = make_training()
+            with unittest.mock.patch(
+                "training.checkpoint.torch.load", wraps=torch.load
+            ) as safe_load:
+                step, _ = load_checkpoint(
+                    v2, target, target_optimizer, target_scheduler, False, make_config()
+                )
+            self.assertEqual(step, 1)
+            self.assertTrue(all(call.kwargs.get("weights_only") is True for call in safe_load.call_args_list))
+            self.assertTrue(all(call.kwargs.get("mmap") is True for call in safe_load.call_args_list))
+
+            target, target_optimizer, _ = make_training()
+            with unittest.mock.patch(
+                "training.checkpoint.torch.load", wraps=torch.load
+            ) as safe_load:
+                policy = init_from_checkpoint(
+                    legacy, target, target_optimizer, False, make_config(legacy=True), True
+                )
+            self.assertEqual(policy, "legacy_missing_rng")
+            self.assertIs(safe_load.call_args.kwargs["weights_only"], True)
+            self.assertIs(safe_load.call_args.kwargs["mmap"], True)
+
+    def test_metrics_flush_and_fsync_precede_checkpoint_or_fail_closed(self):
+        events = []
+
+        class Metrics:
+            def flush(self):
+                events.append("flush")
+
+            def fileno(self):
+                events.append("fileno")
+                return 17
+
+        with unittest.mock.patch(
+            "training.checkpoint.os.fsync", side_effect=lambda fd: events.append(("fsync", fd))
+        ):
+            sync_metrics_before_checkpoint(Metrics(), rank=0, is_dist=False)
+        self.assertEqual(events, ["flush", "fileno", ("fsync", 17)])
+
+        class BrokenMetrics:
+            def flush(self):
+                raise OSError("disk full")
+
+        with self.assertRaisesRegex(OSError, "disk full"):
+            sync_metrics_before_checkpoint(BrokenMetrics(), rank=0, is_dist=False)
+
+    def test_full_snapshot_repairs_only_same_inode_0600_crash_window(self):
+        config = make_config(keep_full=True, keep_format="full")
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "last.pt")
+            snapshot = os.path.join(td, "step_1.pt")
+            torch.save({"global_step": 1}, path)
+            os.chmod(path, 0o600)
+            os.link(path, snapshot)
+            _publish_periodic_snapshot(path, {"global_step": 1}, config)
+            self.assertEqual(stat.S_IMODE(os.lstat(snapshot).st_mode), 0o444)
+
+            unknown_alias = os.path.join(td, "unknown_alias.pt")
+            os.link(snapshot, unknown_alias)
+            os.chmod(snapshot, 0o600)
+            self.assertEqual(os.lstat(snapshot).st_nlink, 3)
+            with self.assertRaisesRegex(RuntimeError, "unexpected writable mode/link count"):
+                _publish_periodic_snapshot(path, {"global_step": 1}, config)
+            os.unlink(unknown_alias)
+
+            os.unlink(snapshot)
+            stale = snapshot + ".stale"
+            torch.save({"global_step": 1}, stale)
+            os.chmod(stale, 0o600)
+            os.replace(stale, snapshot)
+            with self.assertRaisesRegex(RuntimeError, "not the same inode"):
+                _publish_periodic_snapshot(path, {"global_step": 1}, config)
 
     def test_periodic_snapshot_existing_targets_fail_closed(self):
         model, optimizer, scheduler = make_training()
@@ -690,6 +786,24 @@ class RngFixCpuTests(unittest.TestCase):
             _ema_state_integrity_check(broken_ema, trainable, model)
 
     def test_formal_boot_contract(self):
+        template = (
+            REPO
+            / "provenance/jcc_jobs/20260809_stage512a_continue_control_rngfix_FORMAL_w64.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/"
+            "autobuild@sha256:0fa488a392ba06e91c576466dbb39407b823fd656fff88c1ee7a9eccf89b1d7f",
+            template,
+        )
+        self.assertIn('BASH_ENV: "/dev/null"', template)
+        self.assertIn(
+            'exec /bin/bash --noprofile --norc -p '
+            '"$FORMAL_REPO/scripts/stage512a_control_formal_launch.sh"',
+            template,
+        )
+        self.assertNotIn(
+            "exec /bin/bash --noprofile --norc -p scripts/", template
+        )
         self.assertEqual(
             verify_expected_boot_mode(
                 "fresh",

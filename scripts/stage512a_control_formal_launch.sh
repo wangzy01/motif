@@ -215,7 +215,7 @@ root = pathlib.Path(sys.argv[1])
 for step in (30000, 60000, 90000, 120000):
     path = root / f"step_{step}.pt"
     assert path.is_file() and not path.is_symlink() and path.stat().st_size > 20_000_000_000
-    value = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+    value = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
     assert value["checkpoint_schema"] == "mot_full_training_v2"
     assert int(value["global_step"]) == step
     assert value["rng_state"]["schema"] == "mot_rng_state_v1"

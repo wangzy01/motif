@@ -40,6 +40,7 @@ from training.checkpoint import (  # noqa: F401  re-export 供 scripts/experimen
     load_checkpoint,
     save_checkpoint,
     should_write_final_checkpoint,
+    sync_metrics_before_checkpoint,
 )
 from training.auto_resume_reconcile import (
     auto_resume_reconcile_enabled,
@@ -970,6 +971,7 @@ def main():
 
         if ckpt_every > 0 and global_step % ckpt_every == 0:
             trace(global_step, "before_checkpoint")
+            sync_metrics_before_checkpoint(mf, rank=rank, is_dist=is_dist)
             save_checkpoint(ckpt_path, model, optimizer, scheduler, global_step, is_dist, rank, config)
             last_checkpoint_step = global_step
             log(f"[train] checkpoint saved at step {global_step} -> {ckpt_path}")
@@ -982,6 +984,7 @@ def main():
         global_step, last_checkpoint_step
     ):
         trace(global_step, "before_final_checkpoint")
+        sync_metrics_before_checkpoint(mf, rank=rank, is_dist=is_dist)
         save_checkpoint(ckpt_path, model, optimizer, scheduler, global_step, is_dist, rank, config)
         last_checkpoint_step = global_step
         trace(global_step, "after_final_checkpoint")

@@ -41,4 +41,4 @@ environments:
   LD_PRELOAD: ""
   LD_AUDIT: ""
 command: |
-  exec /bin/bash --noprofile --norc -p scripts/stage512a_control_formal_launch.sh
+  exec /bin/bash --noprofile --norc -p "$FORMAL_REPO/scripts/stage512a_control_formal_launch.sh"
