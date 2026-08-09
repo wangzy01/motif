@@ -3,7 +3,7 @@
 # production files are frozen and the reviewed gate is committed.
 name: evan-rng-resume-gpu-gate-w2-20260809-freeze4-final
 description: "Two-GPU hard gate: real FLUX.2 CUDA posterior rank epsilon, FSDP2/DCP exact next-update restart, v2 per-rank RNG closure, and synchronized corruption failures. No formal training."
-image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild@sha256:0fa488a392ba06e91c576466dbb39407b823fd656fff88c1ee7a9eccf89b1d7f
 numWorkers: 1
 gpuPerWorker: 2
 cpuPerWorker: 16

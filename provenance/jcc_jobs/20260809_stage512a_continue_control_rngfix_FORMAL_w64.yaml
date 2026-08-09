@@ -7,7 +7,7 @@
 # avoiding a self-referential EXPECTED_COMMIT.
 name: evan-s512a-cont-rngfix-formal-w64
 description: "Stage512a practical continuation control with rank-specific VAE posterior RNG, exact full-state resume, sealed fresh plan/registry/assets, four permanent full-state hardlink snapshots, generation-scoped W64 rendezvous, and a rank-0 lifetime FSx lease. 8 nodes x 8 H100; 125000 local steps x global batch 2048 = 256M exposures."
-image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild@sha256:0fa488a392ba06e91c576466dbb39407b823fd656fff88c1ee7a9eccf89b1d7f
 numWorkers: 8
 gpuPerWorker: 8
 cpuPerWorker: 80
@@ -29,5 +29,16 @@ environments:
   RUN_ID: "stage512a_continue_control_rngfix_v1"
   RUN_MODE: "fresh"
   ARRIVAL_WAIT_S: "3600"
+  # JCC currently normalizes the requested entrypoint to `/usr/bin/env bash -c`.
+  # Make that outer shell inert, then enter the tracked launcher with explicit
+  # no-profile/no-rc flags.  The digest-pinned image fixes the outer runtime.
+  PATH: "/usr/bin:/bin"
+  BASH_ENV: "/dev/null"
+  ENV: "/dev/null"
+  PYTHONNOUSERSITE: "1"
+  PYTHONSAFEPATH: "1"
+  PYTHONOPTIMIZE: ""
+  LD_PRELOAD: ""
+  LD_AUDIT: ""
 command: |
-  exec bash scripts/stage512a_control_formal_launch.sh
+  exec /bin/bash --noprofile --norc -p scripts/stage512a_control_formal_launch.sh

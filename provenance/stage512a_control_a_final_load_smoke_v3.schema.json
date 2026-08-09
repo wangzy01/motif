@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evan.invalid/schemas/stage512a_control_a_final_load_smoke_v3_render_v1.json",
+  "title": "Stage512A control A-final load smoke v3 render receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "release",
+    "phase_a",
+    "artifacts",
+    "runtime_git_blob_raw_sha256",
+    "dedicated_asset_git_blob_raw_sha256",
+    "semantic_contract"
+  ],
+  "properties": {
+    "schema": {"const": "stage512a_control_a_final_load_smoke_v3_render_v1"},
+    "status": {"const": "PASS"},
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo", "commit", "git_status_porcelain", "config_sha256"],
+      "properties": {
+        "repo": {"type": "string", "pattern": "^/"},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "git_status_porcelain": {"const": []},
+        "config_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "phase_a": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest_path",
+        "manifest_sha256",
+        "training_lineage_path",
+        "training_lineage_sha256"
+      ],
+      "properties": {
+        "manifest_path": {"type": "string", "pattern": "^/"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "training_lineage_path": {"type": "string", "pattern": "^/"},
+        "training_lineage_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "template_path",
+        "template_sha256",
+        "resolved_spec_path",
+        "resolved_spec_sha256",
+        "smoke_output_path",
+        "placeholder_count"
+      ],
+      "properties": {
+        "template_path": {"type": "string", "pattern": "^/"},
+        "template_sha256": {"$ref": "#/$defs/sha256"},
+        "resolved_spec_path": {"type": "string", "pattern": "^/"},
+        "resolved_spec_sha256": {"$ref": "#/$defs/sha256"},
+        "smoke_output_path": {"type": "string", "pattern": "^/"},
+        "placeholder_count": {"const": 22}
+      }
+    },
+    "runtime_git_blob_raw_sha256": {
+      "$ref": "#/$defs/runtimeMap"
+    },
+    "dedicated_asset_git_blob_raw_sha256": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/sha256"},
+      "minProperties": 14,
+      "maxProperties": 14,
+      "required": [
+        "train.py",
+        "training/checkpoint.py",
+        "training/rng_state.py",
+        "training/formal_boot.py",
+        "training/config_schema.py",
+        "networks/model_mot.py",
+        "networks/vae.py",
+        "configs/stage512a_continue_control_rngfix_v1.yaml",
+        "scripts/stage512a_control_a_final_load_smoke_v3.py",
+        "scripts/validate_stage512a_control_a_final_load_smoke_v3.py",
+        "provenance/jcc_jobs/20260809_stage512a_control_a_final_load_smoke_v3.yaml",
+        "scripts/render_stage512a_control_a_final_load_smoke_v3.py",
+        "scripts/test_stage512a_control_a_final_load_smoke_v3.py",
+        "provenance/stage512a_control_a_final_load_smoke_v3.schema.json"
+      ]
+    },
+    "semantic_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "world_size",
+        "trainable_raw_ema_adam_count",
+        "adam_step",
+        "stage_local_step",
+        "scheduler_last_epoch",
+        "scheduler_step_count",
+        "warmup_steps",
+        "base_lr",
+        "first_optimizer_update_lr",
+        "step1_logged_lr",
+        "branch_resolver"
+      ],
+      "properties": {
+        "world_size": {"const": 2},
+        "trainable_raw_ema_adam_count": {"const": 483},
+        "adam_step": {"const": 291667},
+        "stage_local_step": {"const": 0},
+        "scheduler_last_epoch": {"const": 0},
+        "scheduler_step_count": {"const": 1},
+        "warmup_steps": {"const": 500},
+        "base_lr": {"const": 0.0001732051},
+        "first_optimizer_update_lr": {"const": 3.464102e-7},
+        "step1_logged_lr": {"const": 6.928204e-7},
+        "branch_resolver": {"const": "training.formal_boot.resolve_checkpoint_boot_branch"}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "not": {"const": "0000000000000000000000000000000000000000000000000000000000000000"}
+    },
+    "runtimeMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "train.py",
+        "training/checkpoint.py",
+        "training/rng_state.py",
+        "training/formal_boot.py",
+        "training/config_schema.py",
+        "networks/model_mot.py",
+        "networks/vae.py",
+        "configs/stage512a_continue_control_rngfix_v1.yaml",
+        "scripts/stage512a_control_a_final_load_smoke_v3.py",
+        "scripts/validate_stage512a_control_a_final_load_smoke_v3.py",
+        "provenance/jcc_jobs/20260809_stage512a_control_a_final_load_smoke_v3.yaml"
+      ],
+      "properties": {
+        "train.py": {"$ref": "#/$defs/sha256"},
+        "training/checkpoint.py": {"$ref": "#/$defs/sha256"},
+        "training/rng_state.py": {"$ref": "#/$defs/sha256"},
+        "training/formal_boot.py": {"$ref": "#/$defs/sha256"},
+        "training/config_schema.py": {"$ref": "#/$defs/sha256"},
+        "networks/model_mot.py": {"$ref": "#/$defs/sha256"},
+        "networks/vae.py": {"$ref": "#/$defs/sha256"},
+        "configs/stage512a_continue_control_rngfix_v1.yaml": {"$ref": "#/$defs/sha256"},
+        "scripts/stage512a_control_a_final_load_smoke_v3.py": {"$ref": "#/$defs/sha256"},
+        "scripts/validate_stage512a_control_a_final_load_smoke_v3.py": {"$ref": "#/$defs/sha256"},
+        "provenance/jcc_jobs/20260809_stage512a_control_a_final_load_smoke_v3.yaml": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

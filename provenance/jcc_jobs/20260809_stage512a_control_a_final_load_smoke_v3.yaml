@@ -1,0 +1,228 @@
+name: evan-stage512a-control-a-final-load-smoke-v3
+description: "Final-code read-only 2-GPU A-final load gate: exact final Git-blob map (seven core sources plus config/probe/validator/template), full alias SHA, exact 483 raw/EMA/Adam mapping, fresh local-step scheduler, and strict negative controls."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild@sha256:0fa488a392ba06e91c576466dbb39407b823fd656fff88c1ee7a9eccf89b1d7f
+numWorkers: 1
+gpuPerWorker: 2
+cpuPerWorker: 40
+memGBPerWorker: 500
+maxRetries: 0
+environments:
+  REPO: PLACEHOLDER_RELEASE_REPO_PATH
+  CONFIG: PLACEHOLDER_RELEASE_CONFIG_PATH
+  CHECKPOINT: /fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_continue_control_rngfix_v1_inputs/a_final_step125000.last.pt
+  ORIGINAL_CHECKPOINT: /fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_20260724_weighted_w64_recovery_v2/last.pt
+  ASSET_RECEIPT: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/stage512a_continue_asset_rehash_20260809v2/REPORT.json
+  PHASE_A_MANIFEST: PLACEHOLDER_PHASE_A_MANIFEST_PATH
+  EXPECTED_PHASE_A_MANIFEST_SHA256: PLACEHOLDER_PHASE_A_MANIFEST_SHA256
+  CANONICAL_TRAINING_LINEAGE: PLACEHOLDER_CANONICAL_TRAINING_LINEAGE_PATH
+  EXPECTED_CANONICAL_TRAINING_LINEAGE_SHA256: PLACEHOLDER_CANONICAL_TRAINING_LINEAGE_SHA256
+  PROBE: PLACEHOLDER_RELEASE_PROBE_PATH
+  PROBE_SHA256: PLACEHOLDER_PROBE_SHA256
+  VALIDATOR: PLACEHOLDER_RELEASE_VALIDATOR_PATH
+  VALIDATOR_SHA256: PLACEHOLDER_VALIDATOR_SHA256
+  JOB_TEMPLATE: PLACEHOLDER_RELEASE_JOB_TEMPLATE_PATH
+  JOB_TEMPLATE_SHA256: PLACEHOLDER_JOB_TEMPLATE_SHA256
+  EXPECTED_COMMIT: PLACEHOLDER_EXPECTED_COMMIT
+  EXPECTED_TRAIN_PY_GIT_BLOB_RAW_SHA256: PLACEHOLDER_TRAIN_PY_GIT_BLOB_RAW_SHA256
+  EXPECTED_TRAINING_CHECKPOINT_PY_GIT_BLOB_RAW_SHA256: PLACEHOLDER_TRAINING_CHECKPOINT_PY_GIT_BLOB_RAW_SHA256
+  EXPECTED_TRAINING_RNG_STATE_PY_GIT_BLOB_RAW_SHA256: PLACEHOLDER_TRAINING_RNG_STATE_PY_GIT_BLOB_RAW_SHA256
+  EXPECTED_TRAINING_FORMAL_BOOT_PY_GIT_BLOB_RAW_SHA256: PLACEHOLDER_TRAINING_FORMAL_BOOT_PY_GIT_BLOB_RAW_SHA256
+  EXPECTED_TRAINING_CONFIG_SCHEMA_PY_GIT_BLOB_RAW_SHA256: PLACEHOLDER_TRAINING_CONFIG_SCHEMA_PY_GIT_BLOB_RAW_SHA256
+  EXPECTED_NETWORKS_MODEL_MOT_PY_GIT_BLOB_RAW_SHA256: PLACEHOLDER_NETWORKS_MODEL_MOT_PY_GIT_BLOB_RAW_SHA256
+  EXPECTED_NETWORKS_VAE_PY_GIT_BLOB_RAW_SHA256: PLACEHOLDER_NETWORKS_VAE_PY_GIT_BLOB_RAW_SHA256
+  EXPECTED_CONFIG_SHA256: PLACEHOLDER_CONFIG_SHA256
+  OUTPUT: PLACEHOLDER_CREATE_ONCE_OUTPUT
+command: |
+  set -euo pipefail
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  EXPECTED_INIT_SHA=957bfcf12b89c4042a32056566012a2451e72aa0b2706b0ca51808ab79155c31
+  EXPECTED_INIT_BYTES=26328353144
+  EXPECTED_ABLATION_FP_SHA=bc452da33095f73230c05c9eeee2e0d027295bd48813ea69f05bc1c159b69895
+  EXPECTED_ASSET_RECEIPT_SHA=71c69d5dd56e5e1ac09ca7f3fbd9f380d6ce3bdbc5e328d3a7111a8da675041a
+  for value in "$REPO" "$CONFIG" "$PHASE_A_MANIFEST" \
+    "$EXPECTED_PHASE_A_MANIFEST_SHA256" "$CANONICAL_TRAINING_LINEAGE" \
+    "$EXPECTED_CANONICAL_TRAINING_LINEAGE_SHA256" "$PROBE" "$PROBE_SHA256" \
+    "$VALIDATOR" "$VALIDATOR_SHA256" "$JOB_TEMPLATE" \
+    "$JOB_TEMPLATE_SHA256" "$EXPECTED_COMMIT" \
+    "$EXPECTED_TRAIN_PY_GIT_BLOB_RAW_SHA256" \
+    "$EXPECTED_TRAINING_CHECKPOINT_PY_GIT_BLOB_RAW_SHA256" \
+    "$EXPECTED_TRAINING_RNG_STATE_PY_GIT_BLOB_RAW_SHA256" \
+    "$EXPECTED_TRAINING_FORMAL_BOOT_PY_GIT_BLOB_RAW_SHA256" \
+    "$EXPECTED_TRAINING_CONFIG_SCHEMA_PY_GIT_BLOB_RAW_SHA256" \
+    "$EXPECTED_NETWORKS_MODEL_MOT_PY_GIT_BLOB_RAW_SHA256" \
+    "$EXPECTED_NETWORKS_VAE_PY_GIT_BLOB_RAW_SHA256" \
+    "$EXPECTED_CONFIG_SHA256" "$OUTPUT"; do
+    case "$value" in *PLACEHOLDER*) echo "FATAL: unresolved final-smoke placeholder: $value"; exit 43;; esac
+  done
+  test -x "$PY" && git -C "$REPO" rev-parse --git-dir >/dev/null \
+    && test -f "$CONFIG" && test -f "$CHECKPOINT" && test -f "$ORIGINAL_CHECKPOINT" \
+    && test -f "$ASSET_RECEIPT" && test -f "$(dirname "$ASSET_RECEIPT")/_SUCCESS" \
+    && test -f "$PHASE_A_MANIFEST" && test ! -L "$PHASE_A_MANIFEST" \
+    && test -f "$CANONICAL_TRAINING_LINEAGE" && test ! -L "$CANONICAL_TRAINING_LINEAGE" \
+    && test -f "$PROBE" && test ! -L "$PROBE" \
+    && test -f "$VALIDATOR" && test ! -L "$VALIDATOR" \
+    && test -f "$JOB_TEMPLATE" && test ! -L "$JOB_TEMPLATE" \
+    || { echo "FATAL: missing input"; exit 43; }
+  test ! -L "$CHECKPOINT" && test ! -L "$ORIGINAL_CHECKPOINT" \
+    || { echo "FATAL: init checkpoint must be ordinary hardlinks, not symlinks"; exit 43; }
+  [ "$(git -C "$REPO" rev-parse HEAD)" = "$EXPECTED_COMMIT" ] \
+    || { echo "FATAL: commit drift"; exit 44; }
+  test -z "$(git -C "$REPO" status --porcelain --untracked-files=all)" \
+    || { echo "FATAL: final-code smoke requires clean worktree"; git -C "$REPO" status --short; exit 44; }
+  [ "$(sha256sum "$PROBE" | awk '{print $1}')" = "$PROBE_SHA256" ] \
+    || { echo "FATAL: probe SHA drift"; exit 44; }
+  [ "$(sha256sum "$VALIDATOR" | awk '{print $1}')" = "$VALIDATOR_SHA256" ] \
+    || { echo "FATAL: validator SHA drift"; exit 44; }
+  [ "$(sha256sum "$JOB_TEMPLATE" | awk '{print $1}')" = "$JOB_TEMPLATE_SHA256" ] \
+    || { echo "FATAL: job-template SHA drift"; exit 44; }
+  verify_final_blob() {
+    relative_path="$1"
+    expected_sha256="$2"
+    source_path="$REPO/$relative_path"
+    test -f "$source_path" && test ! -L "$source_path" \
+      || { echo "FATAL: runtime source is not an ordinary file: $relative_path"; return 1; }
+    object_type="$(git -C "$REPO" cat-file -t "$EXPECTED_COMMIT:$relative_path")"
+    [ "$object_type" = blob ] \
+      || { echo "FATAL: final source object is not a blob: $relative_path ($object_type)"; return 1; }
+    blob_sha256="$(git -C "$REPO" cat-file blob "$EXPECTED_COMMIT:$relative_path" | sha256sum | awk '{print $1}')"
+    worktree_sha256="$(sha256sum "$source_path" | awk '{print $1}')"
+    [ "$blob_sha256" = "$expected_sha256" ] \
+      || { echo "FATAL: expected final Git-blob raw SHA drift: $relative_path $blob_sha256 != $expected_sha256"; return 1; }
+    [ "$worktree_sha256" = "$blob_sha256" ] \
+      || { echo "FATAL: runtime source differs from final Git blob: $relative_path"; return 1; }
+  }
+  verify_final_blob train.py "$EXPECTED_TRAIN_PY_GIT_BLOB_RAW_SHA256"
+  verify_final_blob training/checkpoint.py "$EXPECTED_TRAINING_CHECKPOINT_PY_GIT_BLOB_RAW_SHA256"
+  verify_final_blob training/rng_state.py "$EXPECTED_TRAINING_RNG_STATE_PY_GIT_BLOB_RAW_SHA256"
+  verify_final_blob training/formal_boot.py "$EXPECTED_TRAINING_FORMAL_BOOT_PY_GIT_BLOB_RAW_SHA256"
+  verify_final_blob training/config_schema.py "$EXPECTED_TRAINING_CONFIG_SCHEMA_PY_GIT_BLOB_RAW_SHA256"
+  verify_final_blob networks/model_mot.py "$EXPECTED_NETWORKS_MODEL_MOT_PY_GIT_BLOB_RAW_SHA256"
+  verify_final_blob networks/vae.py "$EXPECTED_NETWORKS_VAE_PY_GIT_BLOB_RAW_SHA256"
+  case "$CONFIG" in "$REPO"/*) CONFIG_RELATIVE="${CONFIG#"$REPO"/}";; *) echo "FATAL: config outside release repo"; exit 44;; esac
+  case "$PROBE" in "$REPO"/*) PROBE_RELATIVE="${PROBE#"$REPO"/}";; *) echo "FATAL: probe outside release repo"; exit 44;; esac
+  case "$VALIDATOR" in "$REPO"/*) VALIDATOR_RELATIVE="${VALIDATOR#"$REPO"/}";; *) echo "FATAL: validator outside release repo"; exit 44;; esac
+  case "$JOB_TEMPLATE" in "$REPO"/*) JOB_TEMPLATE_RELATIVE="${JOB_TEMPLATE#"$REPO"/}";; *) echo "FATAL: template outside release repo"; exit 44;; esac
+  verify_final_blob "$CONFIG_RELATIVE" "$EXPECTED_CONFIG_SHA256"
+  verify_final_blob "$PROBE_RELATIVE" "$PROBE_SHA256"
+  verify_final_blob "$VALIDATOR_RELATIVE" "$VALIDATOR_SHA256"
+  verify_final_blob "$JOB_TEMPLATE_RELATIVE" "$JOB_TEMPLATE_SHA256"
+  [ "$(sha256sum "$CONFIG" | awk '{print $1}')" = "$EXPECTED_CONFIG_SHA256" ] \
+    || { echo "FATAL: config SHA drift"; exit 44; }
+  VERIFIED_ASSET_RECEIPT_SHA256=$(sha256sum "$ASSET_RECEIPT" | awk '{print $1}')
+  [ "$VERIFIED_ASSET_RECEIPT_SHA256" = "$EXPECTED_ASSET_RECEIPT_SHA" ] \
+    && [ "$(cat "$(dirname "$ASSET_RECEIPT")/_SUCCESS")" = "$EXPECTED_ASSET_RECEIPT_SHA" ] \
+    || { echo "FATAL: A-final asset receipt drift"; exit 44; }
+  export VERIFIED_ASSET_RECEIPT_SHA256
+  VERIFIED_PHASE_A_MANIFEST_SHA256=$(sha256sum "$PHASE_A_MANIFEST" | awk '{print $1}')
+  [ "$VERIFIED_PHASE_A_MANIFEST_SHA256" = "$EXPECTED_PHASE_A_MANIFEST_SHA256" ] \
+    || { echo "FATAL: Phase A manifest SHA drift"; exit 44; }
+  export VERIFIED_PHASE_A_MANIFEST_SHA256
+  VERIFIED_CANONICAL_TRAINING_LINEAGE_SHA256=$(sha256sum "$CANONICAL_TRAINING_LINEAGE" | awk '{print $1}')
+  [ "$VERIFIED_CANONICAL_TRAINING_LINEAGE_SHA256" = "$EXPECTED_CANONICAL_TRAINING_LINEAGE_SHA256" ] \
+    || { echo "FATAL: canonical training lineage SHA drift"; exit 44; }
+  export VERIFIED_CANONICAL_TRAINING_LINEAGE_SHA256
+  read -r ALIAS_DEV ALIAS_INO ALIAS_BYTES ALIAS_MODE < <(stat -c '%d %i %s %a' "$CHECKPOINT")
+  read -r ORIG_DEV ORIG_INO ORIG_BYTES ORIG_MODE < <(stat -c '%d %i %s %a' "$ORIGINAL_CHECKPOINT")
+  [ "$ALIAS_DEV:$ALIAS_INO" = "$ORIG_DEV:$ORIG_INO" ] \
+    || { echo "FATAL: frozen alias is not the A-final hardlink inode"; exit 44; }
+  [ "$ALIAS_BYTES" = "$EXPECTED_INIT_BYTES" ] && [ "$ORIG_BYTES" = "$EXPECTED_INIT_BYTES" ] \
+    || { echo "FATAL: A-final size drift"; exit 44; }
+  [ "$ALIAS_MODE" = "444" ] && [ "$ORIG_MODE" = "444" ] \
+    || { echo "FATAL: A-final inode is not sealed mode 0444: alias=$ALIAS_MODE original=$ORIG_MODE"; exit 44; }
+  [ "$(stat -c %a "$(dirname "$CHECKPOINT")")" = "555" ] \
+    || { echo "FATAL: frozen A-final alias parent is not mode 0555"; exit 44; }
+  export VERIFIED_CHECKPOINT_DEVICE_INODE="$ALIAS_DEV:$ALIAS_INO"
+  export VERIFIED_CHECKPOINT_BYTES="$ALIAS_BYTES"
+  export VERIFIED_CHECKPOINT_MODE="$ALIAS_MODE"
+  export VERIFIED_CHECKPOINT_SAMEFILE_WITH_ORIGINAL=1
+  VERIFIED_CHECKPOINT_SHA256=$(sha256sum "$CHECKPOINT" | awk '{print $1}')
+  [ "$VERIFIED_CHECKPOINT_SHA256" = "$EXPECTED_INIT_SHA" ] \
+    || { echo "FATAL: A-final full SHA drift: $VERIFIED_CHECKPOINT_SHA256"; exit 44; }
+  export VERIFIED_CHECKPOINT_SHA256
+  echo "A-final alias full SHA verified: $VERIFIED_CHECKPOINT_SHA256 inode=$ALIAS_INO bytes=$ALIAS_BYTES"
+  OUTPUT_ATTEMPT="$(dirname "$OUTPUT")/.$(basename "$OUTPUT").attempt"
+  { test ! -e "$OUTPUT" && test ! -L "$OUTPUT" \
+    && test ! -e "$OUTPUT_ATTEMPT" && test ! -L "$OUTPUT_ATTEMPT"; } \
+    || { echo "FATAL: create-once output or attempt exists: $OUTPUT / $OUTPUT_ATTEMPT"; exit 45; }
+  export PYTHONPATH="$REPO" PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONDONTWRITEBYTECODE=1
+  unset PYTHONOPTIMIZE
+  [ "$("$PY" -c 'import sys; print(sys.flags.optimize)')" = "0" ] \
+    || { echo "FATAL: optimized Python disables audit assertions"; exit 44; }
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export PYTHONPYCACHEPREFIX=/local/evan/pycache/a_final_init_fsdp2_smoke_v3
+  export OMP_NUM_THREADS=4 TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN
+  mkdir -p "$PYTHONPYCACHEPREFIX" /local/evan/cache
+  cd "$REPO"
+  timeout --signal=TERM --kill-after=180s 7200s \
+    "$PY" -m torch.distributed.run --standalone --nproc-per-node=2 \
+      "$PROBE" \
+      --repo "$REPO" \
+      --config "$CONFIG" \
+      --validator "$VALIDATOR" \
+      --job-template "$JOB_TEMPLATE" \
+      --checkpoint "$CHECKPOINT" \
+      --original-checkpoint "$ORIGINAL_CHECKPOINT" \
+      --phase-a-manifest "$PHASE_A_MANIFEST" \
+      --canonical-training-lineage "$CANONICAL_TRAINING_LINEAGE" \
+      --expected-commit "$EXPECTED_COMMIT" \
+      --expected-train-py-git-blob-raw-sha256 "$EXPECTED_TRAIN_PY_GIT_BLOB_RAW_SHA256" \
+      --expected-training-checkpoint-py-git-blob-raw-sha256 "$EXPECTED_TRAINING_CHECKPOINT_PY_GIT_BLOB_RAW_SHA256" \
+      --expected-training-rng-state-py-git-blob-raw-sha256 "$EXPECTED_TRAINING_RNG_STATE_PY_GIT_BLOB_RAW_SHA256" \
+      --expected-training-formal-boot-py-git-blob-raw-sha256 "$EXPECTED_TRAINING_FORMAL_BOOT_PY_GIT_BLOB_RAW_SHA256" \
+      --expected-training-config-schema-py-git-blob-raw-sha256 "$EXPECTED_TRAINING_CONFIG_SCHEMA_PY_GIT_BLOB_RAW_SHA256" \
+      --expected-networks-model-mot-py-git-blob-raw-sha256 "$EXPECTED_NETWORKS_MODEL_MOT_PY_GIT_BLOB_RAW_SHA256" \
+      --expected-networks-vae-py-git-blob-raw-sha256 "$EXPECTED_NETWORKS_VAE_PY_GIT_BLOB_RAW_SHA256" \
+      --expected-config-sha256 "$EXPECTED_CONFIG_SHA256" \
+      --expected-probe-sha256 "$PROBE_SHA256" \
+      --expected-validator-sha256 "$VALIDATOR_SHA256" \
+      --expected-job-template-sha256 "$JOB_TEMPLATE_SHA256" \
+      --expected-checkpoint-sha256 "$EXPECTED_INIT_SHA" \
+      --expected-ablation-fingerprint-sha256 "$EXPECTED_ABLATION_FP_SHA" \
+      --expected-phase-a-manifest-sha256 "$EXPECTED_PHASE_A_MANIFEST_SHA256" \
+      --expected-canonical-training-lineage-sha256 "$EXPECTED_CANONICAL_TRAINING_LINEAGE_SHA256" \
+      --expected-step 125000 \
+      --expected-optimizer-step 291667 \
+      --expected-trainable-count 483 \
+      --expected-keyset-sha256 6c61b43d30a8bde2f13fc8a91e30a8a0de271934ba5c3fd72df392cd027a4424 \
+      --output "$OUTPUT"
+  test -d "$OUTPUT" && test ! -L "$OUTPUT" \
+    && test -f "$OUTPUT/REPORT.json" && test ! -L "$OUTPUT/REPORT.json" \
+    && test -f "$OUTPUT/_SUCCESS" && test ! -L "$OUTPUT/_SUCCESS" \
+    || { echo "FATAL: sealed success receipt missing or wrong file type"; exit 46; }
+  [ "$(stat -c %a "$OUTPUT")" = "555" ] \
+    && [ "$(stat -c %a "$OUTPUT/REPORT.json")" = "444" ] \
+    && [ "$(stat -c %a "$OUTPUT/_SUCCESS")" = "444" ] \
+    || { echo "FATAL: output receipt is not sealed 0555/0444"; exit 46; }
+  cd "$OUTPUT"
+  test "$(cat _SUCCESS)" = "$(sha256sum REPORT.json | awk '{print $1}')" \
+    || { echo "FATAL: report receipt mismatch"; exit 46; }
+  "$PY" "$VALIDATOR" \
+    --report-dir "$OUTPUT" \
+    --expected-release-repo "$REPO" \
+    --expected-commit "$EXPECTED_COMMIT" \
+    --expected-train-py-git-blob-raw-sha256 "$EXPECTED_TRAIN_PY_GIT_BLOB_RAW_SHA256" \
+    --expected-training-checkpoint-py-git-blob-raw-sha256 "$EXPECTED_TRAINING_CHECKPOINT_PY_GIT_BLOB_RAW_SHA256" \
+    --expected-training-rng-state-py-git-blob-raw-sha256 "$EXPECTED_TRAINING_RNG_STATE_PY_GIT_BLOB_RAW_SHA256" \
+    --expected-training-formal-boot-py-git-blob-raw-sha256 "$EXPECTED_TRAINING_FORMAL_BOOT_PY_GIT_BLOB_RAW_SHA256" \
+    --expected-training-config-schema-py-git-blob-raw-sha256 "$EXPECTED_TRAINING_CONFIG_SCHEMA_PY_GIT_BLOB_RAW_SHA256" \
+    --expected-networks-model-mot-py-git-blob-raw-sha256 "$EXPECTED_NETWORKS_MODEL_MOT_PY_GIT_BLOB_RAW_SHA256" \
+    --expected-networks-vae-py-git-blob-raw-sha256 "$EXPECTED_NETWORKS_VAE_PY_GIT_BLOB_RAW_SHA256" \
+    --expected-config-path "$CONFIG" \
+    --expected-config-sha256 "$EXPECTED_CONFIG_SHA256" \
+    --expected-probe-path "$PROBE" \
+    --expected-probe-sha256 "$PROBE_SHA256" \
+    --expected-validator-path "$VALIDATOR" \
+    --expected-validator-sha256 "$VALIDATOR_SHA256" \
+    --expected-job-template-path "$JOB_TEMPLATE" \
+    --expected-job-template-sha256 "$JOB_TEMPLATE_SHA256" \
+    --expected-phase-a-manifest-path "$PHASE_A_MANIFEST" \
+    --expected-phase-a-manifest-sha256 "$EXPECTED_PHASE_A_MANIFEST_SHA256" \
+    --expected-canonical-training-lineage-path "$CANONICAL_TRAINING_LINEAGE" \
+    --expected-canonical-training-lineage-sha256 "$EXPECTED_CANONICAL_TRAINING_LINEAGE_SHA256" \
+    --expected-checkpoint-path "$CHECKPOINT" \
+    --expected-original-checkpoint-path "$ORIGINAL_CHECKPOINT" \
+    --expected-checkpoint-sha256 "$EXPECTED_INIT_SHA" \
+    --expected-ablation-fingerprint-sha256 "$EXPECTED_ABLATION_FP_SHA" \
+    --expected-asset-reseal-report-sha256 "$EXPECTED_ASSET_RECEIPT_SHA"
+  echo "Final-code A-final FSDP2 init smoke v3 PASS: $(cat _SUCCESS)"

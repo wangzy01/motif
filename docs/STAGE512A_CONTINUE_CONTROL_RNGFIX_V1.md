@@ -12,6 +12,11 @@ Stage512a and continue for another 256M exposures with Stage512a data, weighted
 mix, caption semantics and adaptive geometry.  It answers “what if we had kept
 training the A recipe?” better than any other single arm.
 
+The fixed result-table and manuscript label is **“A-recipe continuation
+(RNG-corrected; new plan realization)”**.  It must not be shortened to a strict
+control, and the historical bug must not be described as an effective batch size
+of 32: it correlated posterior epsilon across ranks, not examples or gradients.
+
 It is **not** a strict single-variable or pure A/B control.  The new arm fixes a
 real stochastic correctness defect shared by historical A and B: VAE posterior
 epsilon was slot-aligned across ranks instead of rank-specific.  Historical A
@@ -21,6 +26,11 @@ RNG state.  Rank-specific VAE sampling plus exact RNG checkpoint/resume is
 therefore necessary, but it is also an explicit scientific variable relative to
 the historical runs.  Results must be described as a **practical
 counterfactual/control**, never as a clean single-variable ablation.
+
+The repair is material rather than cosmetic.  The real FLUX.2 dose probe reports
+posterior-std RMS 0.738–0.824 and model-space sample-minus-mode/mode RMS 0.52–0.63
+(`vae_rank_rng_probe.json`, receipt SHA-256
+`56326610f0305d87b0b9181fcc5479f4ac60a01bba1af613f4fedc4ffeef5efa`).
 
 The fresh plan is another explicit stochastic delta: its seed changes the
 `(step,rank,slot)->row` permutation, and `OfflineExactDataset._slot_seed` hashes
@@ -151,8 +161,11 @@ A-final init branch.
 ## Checkpoints and evaluation
 
 `last.pt` is full-state every 1,500 steps.  `step_30000.pt`, `step_60000.pt`,
-`step_90000.pt` and `step_120000.pt` are weights+EMA and must remain permanently;
-`keep_every=30000`, `keep_max=4`, and 30,000 is divisible by 1,500.  Their GenEval
+`step_90000.pt` and `step_120000.pt` are permanent read-only hard links to the
+corresponding full `mot_full_training_v2` payloads, retaining raw weights, EMA,
+AdamW, scheduler, stage-local step and all-rank RNG; each is independently
+resumable.  `keep_every=30000`, `keep_max=4`, and 30,000 is divisible by 1,500.
+Their GenEval
 checkpoint identities must be minted from these new exact paths and content
 hashes.  Historical A/B GenEval identities must never be reused.  CFG4 and CFG8
 evaluation is required downstream but does not block first launch.
