@@ -1,0 +1,106 @@
+# Final zero-GPU runtime prompt-realization gate.  Resolve every placeholder only
+# after the clean release commit is frozen.  This job reads three caption rows and
+# no image payload; it is not a training, evaluation, or preprocessing job.
+name: evan-s512a-control-runtime-prompt-smoke-v1-w1
+description: "Zero-GPU production OfflineExactDataset prompt realization: fixed Anime/TextAtlas/GPIC coordinates, two fresh constructions, strict sealed receipt."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 96
+maxRetries: 0
+environments:
+  RELEASE_REPO: "__CLEAN_IMMUTABLE_RELEASE_REPO_PATH__"
+  EXPECTED_COMMIT: "__FULL_40_HEX_FINAL_COMMIT__"
+  RESULT_DIR: "__FRESH_CREATE_ONCE_FSX_RESULT_DIR__"
+  EXPECTED_CONFIG_SHA256: "__SHA256_CONFIG__"
+  EXPECTED_POLICY_SHA256: "__SHA256_POLICY__"
+  EXPECTED_RUNNER_SHA256: "__SHA256_RUNNER__"
+  EXPECTED_VALIDATOR_SHA256: "__SHA256_VALIDATOR__"
+  EXPECTED_TEST_SHA256: "__SHA256_NEGATIVE_TEST__"
+command: |
+  set -euo pipefail
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  REPO=${RELEASE_REPO:-}
+  CFG_REL=configs/stage512a_continue_control_rngfix_v1.yaml
+  POLICY_REL=configs/stage512a_control_runtime_prompt_policy_v1.json
+  RUNNER_REL=scripts/stage512a_control_runtime_prompt_smoke_v1.py
+  VALIDATOR_REL=scripts/validate_stage512a_control_runtime_prompt_smoke_v1.py
+  TEST_REL=scripts/test_stage512a_control_runtime_prompt_smoke_v1.py
+
+  require_value () {
+    local name=$1 value=$2
+    [ -n "$value" ] || { echo "FATAL: $name is unset"; exit 43; }
+    case "$value" in __*|*__*) echo "FATAL: $name is still a placeholder"; exit 43;; esac
+  }
+  require_value RELEASE_REPO "$REPO"
+  require_value EXPECTED_COMMIT "${EXPECTED_COMMIT:-}"
+  require_value RESULT_DIR "${RESULT_DIR:-}"
+  require_value EXPECTED_CONFIG_SHA256 "${EXPECTED_CONFIG_SHA256:-}"
+  require_value EXPECTED_POLICY_SHA256 "${EXPECTED_POLICY_SHA256:-}"
+  require_value EXPECTED_RUNNER_SHA256 "${EXPECTED_RUNNER_SHA256:-}"
+  require_value EXPECTED_VALIDATOR_SHA256 "${EXPECTED_VALIDATOR_SHA256:-}"
+  require_value EXPECTED_TEST_SHA256 "${EXPECTED_TEST_SHA256:-}"
+  printf '%s\n' "$EXPECTED_COMMIT" | grep -Eq '^[0-9a-f]{40}$' \
+    || { echo "FATAL: malformed EXPECTED_COMMIT"; exit 43; }
+  for value in "$EXPECTED_CONFIG_SHA256" "$EXPECTED_POLICY_SHA256" \
+    "$EXPECTED_RUNNER_SHA256" "$EXPECTED_VALIDATOR_SHA256" "$EXPECTED_TEST_SHA256"; do
+    printf '%s\n' "$value" | grep -Eq '^[0-9a-f]{64}$' \
+      || { echo "FATAL: malformed expected SHA: $value"; exit 43; }
+  done
+  [ -x "$PY" ] || { echo "FATAL: Python runtime missing"; exit 43; }
+  cd "$REPO"
+  [ "$(pwd -P)" = "$REPO" ] || { echo "FATAL: RELEASE_REPO is not canonical"; exit 43; }
+  bash scripts/jcc_preflight.sh "$EXPECTED_COMMIT" "$REPO"
+  [ "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT" ] || exit 43
+  [ -z "$(git status --porcelain)" ] || { git status --short; exit 43; }
+
+  check_sha () {
+    local expected=$1 path=$2 got
+    got=$(sha256sum "$path" | awk '{print $1}')
+    [ "$got" = "$expected" ] \
+      || { echo "FATAL: SHA drift $path: $got != $expected"; exit 44; }
+  }
+  check_sha "$EXPECTED_CONFIG_SHA256" "$CFG_REL"
+  check_sha "$EXPECTED_POLICY_SHA256" "$POLICY_REL"
+  check_sha "$EXPECTED_RUNNER_SHA256" "$RUNNER_REL"
+  check_sha "$EXPECTED_VALIDATOR_SHA256" "$VALIDATOR_REL"
+  check_sha "$EXPECTED_TEST_SHA256" "$TEST_REL"
+  [ ! -e "$RESULT_DIR" ] || { echo "FATAL: RESULT_DIR already exists"; exit 45; }
+  [ -d "$(dirname "$RESULT_DIR")" ] || { echo "FATAL: RESULT_DIR parent missing"; exit 45; }
+
+  export PYTHONPATH="$REPO"
+  export PYTHONPYCACHEPREFIX=/local/evan/cache/pycache/s512a-control-runtime-prompt-v1
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch
+  export OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export CUDA_VISIBLE_DEVICES=""
+  export LOCAL_RANK=0 LOCAL_WORLD_SIZE=1
+  export OFFLINE_ARB_LOCAL_ROOT=/local/evan/offline_arb_prompt_smoke_v1
+  unset OFFLINE_ARB_IO_TELEMETRY_DIR PYTHONOPTIMIZE
+  mkdir -p "$PYTHONPYCACHEPREFIX" "$OFFLINE_ARB_LOCAL_ROOT"
+  [ "$($PY -c 'import sys; print(sys.flags.optimize)')" = 0 ] \
+    || { echo "FATAL: optimized Python is forbidden"; exit 64; }
+
+  "$PY" "$TEST_REL"
+  timeout 3600 "$PY" "$RUNNER_REL" \
+    --repo "$REPO" \
+    --config "$REPO/$CFG_REL" \
+    --policy "$REPO/$POLICY_REL" \
+    --output-dir "$RESULT_DIR" \
+    --expected-commit "$EXPECTED_COMMIT" \
+    --expected-config-sha256 "$EXPECTED_CONFIG_SHA256" \
+    --expected-policy-sha256 "$EXPECTED_POLICY_SHA256" \
+    --expected-runner-sha256 "$EXPECTED_RUNNER_SHA256" \
+    --expected-validator-sha256 "$EXPECTED_VALIDATOR_SHA256"
+  "$PY" "$VALIDATOR_REL" \
+    --artifact-dir "$RESULT_DIR" \
+    --repo "$REPO" \
+    --config "$REPO/$CFG_REL" \
+    --policy "$REPO/$POLICY_REL" \
+    --expected-commit "$EXPECTED_COMMIT" \
+    --expected-config-sha256 "$EXPECTED_CONFIG_SHA256" \
+    --expected-policy-sha256 "$EXPECTED_POLICY_SHA256" \
+    --expected-runner-sha256 "$EXPECTED_RUNNER_SHA256" \
+    --expected-validator-sha256 "$EXPECTED_VALIDATOR_SHA256"
+  echo STAGE512A_CONTROL_RUNTIME_PROMPT_JCC_PASS

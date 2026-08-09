@@ -1,0 +1,274 @@
+{
+  "binders": {
+    "anime": {
+      "closure_symbol": "CLOSURE",
+      "function": "bind_stage512a_control_anime_native_upsample_exceptions",
+      "mapping_symbol": "STAGE512A_CONTROL_ANIME_NATIVE_UPSAMPLE_EXCEPTIONS",
+      "module": "training.dataline_offline.anime_native_upsample_exceptions_control_rngfix_v1"
+    },
+    "caption": {
+      "function": "bind_caption_exceptions",
+      "module": "training.dataline_offline.caption_exceptions_v1"
+    },
+    "image": {
+      "function": "bind_image_exceptions",
+      "module": "training.dataline_offline.image_exceptions_v1"
+    },
+    "loader_selector": {
+      "function": "_bind_anime_native_upsample_registry",
+      "module": "training.dataline_offline.offline_dataset"
+    }
+  },
+  "catalog": {
+    "catalog_hash": "370b1679e8c5670338a03ba4c6972cdbf69fa5068fc35108bf646b2d64642331",
+    "files": {
+      "anime": {
+        "bytes": 879710543,
+        "name": "anime.parquet",
+        "rows": 16294879,
+        "sha256": "8801dc7dc157c277dd16d148bbdc44ab8a735d5740aed3dc42807ac313590f4b"
+      },
+      "gpic": {
+        "bytes": 486838435,
+        "name": "gpic.parquet",
+        "rows": 4239912,
+        "sha256": "3db6169f78c501628c722207207974ff2d821ac0ede2dff5e135965e84bbd296"
+      },
+      "monet_real": {
+        "bytes": 1498061211,
+        "name": "monet_real.parquet",
+        "rows": 31993928,
+        "sha256": "7339de2a726925f0894111e304d3b3e53aa86faed78a70b7a8d91d5d9772b63e"
+      },
+      "synthetic": {
+        "bytes": 502604270,
+        "name": "synthetic.parquet",
+        "rows": 13802182,
+        "sha256": "d8e39b43c77241f46068f4c3c4c29d9efa13b82b08052c4c46e429617ae0a0f5"
+      },
+      "textatlas": {
+        "bytes": 155034943,
+        "name": "textatlas.parquet",
+        "rows": 4036998,
+        "sha256": "a6002322af5d88f4545a514290ee0327f16d339ea32eb1f72d7133357d7f71c1"
+      }
+    },
+    "header_sha256": "51a5f0904987a751b54842633d2968ea7f6485307850858d9472319c15748d1d",
+    "root": "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512a_v1",
+    "row_count": 70367899
+  },
+  "control": {
+    "c_sha256": "e9ebcb74e03a33b1541b592f608e6e2433c7254108b209a75b54cd59f49eddae",
+    "d_sha256": "0ee380eba2863b3b78efa4d21306ef14f98c874d328edc9d934868e139ccc222",
+    "invariant_fields": [
+      "stage",
+      "image_size",
+      "eligibility",
+      "requires_nl",
+      "anime_nl_filter_applied",
+      "world_size",
+      "per_rank_bs",
+      "total_steps",
+      "total_exposures",
+      "G",
+      "global_batch_size",
+      "block_steps",
+      "num_blocks",
+      "domains",
+      "domain_mix",
+      "domain_totals",
+      "D",
+      "S",
+      "C",
+      "N",
+      "N_total",
+      "R_max",
+      "buckets",
+      "bucket_steps",
+      "square_bucket_idx",
+      "square_only_domains",
+      "catalog_size",
+      "cell_row_offset",
+      "row_scheme",
+      "row_id_scheme",
+      "item_row_mapping",
+      "catalog_hash",
+      "upstream_catalog_hash",
+      "assignment_hash",
+      "upstream_assignment_hash",
+      "weighted_contract",
+      "weighted_contract_sha256",
+      "plan_format",
+      "planner_algo_version",
+      "algorithm_version",
+      "algorithm_versions",
+      "block_datasets",
+      "resume_contract",
+      "per_step_domain_repair_moves"
+    ],
+    "old_plan_hash": "7295ca937d5002a0cf5e207c1d466c5992352e395adc9ae1c33f3cb616f675db",
+    "old_plan_header_sha256": "dc994b05147e33ee7515a986b3edb48e42c777b9257bc663dfa78c35a77a892d",
+    "old_plan_root": "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_plan_stage512a_w64_256m_weighted_v1_20260722",
+    "s_sha256": "8ea5aeee31c1e1cdcb6cc86da98b7036ab974721c7fdba2aa7d1de14fffede8b"
+  },
+  "expected_hits": {
+    "anime": {
+      "11163647": {
+        "bucket_idx": 182,
+        "coordinates": [
+          {
+            "rank": 35,
+            "slot": 1,
+            "step": 11486
+          },
+          {
+            "rank": 7,
+            "slot": 2,
+            "step": 50429
+          },
+          {
+            "rank": 46,
+            "slot": 0,
+            "step": 60035
+          },
+          {
+            "rank": 16,
+            "slot": 1,
+            "step": 95244
+          },
+          {
+            "rank": 33,
+            "slot": 0,
+            "step": 119964
+          },
+          {
+            "rank": 58,
+            "slot": 1,
+            "step": 121904
+          }
+        ],
+        "uid": "anime:a2Vtb25vX2NodW5rXzAwMDEyJDE4NTMxMTQzNjgkMzMxNzA"
+      }
+    },
+    "captionless_monet": {
+      "19760606": "monet:058_6f9a1ddf56d9e468",
+      "22783601": "monet:023_a11e3e8b8dc53b6a",
+      "29778338": "monet:023_6af995e4741f26cd",
+      "29779948": "monet:023_df29c87ed5939c37",
+      "30281293": "monet:058_9ca806c37710fd48",
+      "35574104": "monet:056_dbaeba5eada7a499"
+    },
+    "textatlas": {
+      "68973396": {
+        "bucket_idx": 182,
+        "coordinates": [
+          {
+            "rank": 20,
+            "slot": 31,
+            "step": 34504
+          },
+          {
+            "rank": 41,
+            "slot": 25,
+            "step": 51961
+          },
+          {
+            "rank": 27,
+            "slot": 31,
+            "step": 79902
+          }
+        ],
+        "uid": "PPT2Structured:986e2d6790064c0d9db822e405cfd804.jpg"
+      },
+      "69010633": {
+        "bucket_idx": 182,
+        "coordinates": [
+          {
+            "rank": 29,
+            "slot": 29,
+            "step": 36075
+          },
+          {
+            "rank": 12,
+            "slot": 30,
+            "step": 76084
+          },
+          {
+            "rank": 39,
+            "slot": 28,
+            "step": 105118
+          }
+        ],
+        "uid": "PPT2Structured:fbc3c5a38a12459b92ed77870494e609.jpg"
+      },
+      "70063978": {
+        "bucket_idx": 182,
+        "coordinates": [
+          {
+            "rank": 9,
+            "slot": 30,
+            "step": 32950
+          },
+          {
+            "rank": 42,
+            "slot": 27,
+            "step": 77400
+          },
+          {
+            "rank": 17,
+            "slot": 25,
+            "step": 98443
+          }
+        ],
+        "uid": "TextVisionBlend:716f0b1cc7134b84bd6a098a55a70425.jpg"
+      }
+    }
+  },
+  "legacy_bridge": {
+    "canonical_receipt_sha256": "5178207100c8af20230489dac88b9118665c93abb33ab5c97b6ccc532b2ea6ca",
+    "closure_report_sha256": "cb92872fc8f13cae10bfafaeb3238c9cc0159bf0c31a096e85ee9b188eb53104",
+    "root": "/fsx/evan/audits/stage512a_continue_control_rngfix_v1/plan_closure_v1_20260809",
+    "validator_function": "validate_stage512a_control_registry_closure",
+    "validator_module": "training.dataline_offline.stage512a_control_registry_closure_v1"
+  },
+  "plan": {
+    "block_manifest_sha256": "6fd84c224493daefc990bfb661966b748433ee0cb631d1cf4bb6a3b8809ff78c",
+    "block_steps": 1024,
+    "checksums_sha256": "aa8283436369f3ddc2f2c7648c28f56cb8b8619b2e87b660f7b2ca29847fc8f0",
+    "header_sha256": "5fbe7ca546d3e77ef37d95bf52c7ded2f9741d0b4377fbadb8b059e9b9a1dce0",
+    "num_blocks": 123,
+    "per_rank_bs": 32,
+    "plan_hash": "fbb5fcbd91d80daff8dfe89693f38eb3fa6ddeb657d01198df7fcac9cdcd039c",
+    "plan_id": "stage512a_offline_exact_v2_continue_control_rngfix_v1_w64_256m_seed20260710",
+    "real_band_exposures": [
+      24422401,
+      36633599,
+      20352002,
+      54271998
+    ],
+    "root": "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_plan_stage512a_continue_control_rngfix_v1_w64_256m_seed20260710_20260809",
+    "total_exposures": 256000000,
+    "total_steps": 125000,
+    "world_size": 64
+  },
+  "publication": {
+    "root": "/fsx/evan/audits/stage512a_continue_control_rngfix_v1/registry_closure_v2_20260809"
+  },
+  "repo_root": "/fsx/evan/mot_code_s512a_continue_control_rngfix_v1",
+  "schema": "stage512a_continue_control_registry_closure_policy_v2",
+  "source_files": [
+    "configs/stage512a_continue_control_registry_closure_v2_policy.json",
+    "provenance/jcc_jobs/20260809_stage512a_control_registry_closure_v2.yaml",
+    "scripts/offline_arb/audit_stage512a_control_registry_closure_v2.py",
+    "scripts/offline_arb/immutable_review_evidence.py",
+    "training/dataline_offline/anime_native_upsample_exceptions_control_rngfix_v1.py",
+    "training/dataline_offline/caption_exceptions_v1.py",
+    "training/dataline_offline/image_exceptions_v1.py",
+    "training/dataline_offline/offline_dataset.py",
+    "training/dataline_offline/stage512a_control_registry_closure_v1.py"
+  ],
+  "weighted_contract": {
+    "path": "/fsx/evan/mot_code/stage512a_weighted_formal_control_20260722v1/weighted_contract_stage512a_v1.json",
+    "sha256": "c228f8b8400c4f96033431816b650d6e7093b3bf8e164018d22e694c60b96c38"
+  }
+}

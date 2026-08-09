@@ -1,0 +1,53 @@
+name: evan-s512a-ctrl-registry-closure-20260809-v2
+description: "Post-wiring Stage512a-control registry closure: two deterministic full 256M scans, exact runtime bind/dispatch, S/C/D equality, and complete MONET/GPIC served-band catalog join. CPU only, create-once sealed output, no retries."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 256
+maxRetries: 0
+command: |
+  set -euo pipefail
+  unset PYTHONOPTIMIZE
+  export CUDA_VISIBLE_DEVICES="" LC_ALL=C PYTHONHASHSEED=0 PYTHONUNBUFFERED=1
+  export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export OMP_NUM_THREADS=4 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+  export NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  REPO=/fsx/evan/mot_code_s512a_continue_control_rngfix_v1
+  SCRIPT=$REPO/scripts/offline_arb/audit_stage512a_control_registry_closure_v2.py
+  POLICY=$REPO/configs/stage512a_continue_control_registry_closure_v2_policy.json
+  PUBLISHED=/fsx/evan/audits/stage512a_continue_control_rngfix_v1/registry_closure_v2_20260809
+  ATTEMPT=/local/evan/stage512a_control_registry_closure_v2_${JCC_JOB_ID:-manual}
+
+  HOST=$(hostname)
+  NODE_RANK=${HOST##*-}
+  case "$NODE_RANK" in ''|*[!0-9]*) echo "FATAL: malformed node rank"; exit 42;; esac
+  test "$NODE_RANK" = 0 || { echo "FATAL: closure rank is not zero"; exit 42; }
+  test -x "$PY" && test -f "$SCRIPT" && test -f "$POLICY"
+  test ! -e "$PUBLISHED" || { echo "FATAL: create-once v2 output already exists"; exit 45; }
+  mkdir "$ATTEMPT"
+  chmod 700 "$ATTEMPT"
+  export PYTHONPATH="$REPO"
+  export PYTHONPYCACHEPREFIX="$ATTEMPT/pycache"
+  mkdir "$PYTHONPYCACHEPREFIX"
+  cd "$REPO"
+
+  "$PY" - <<'PYEOF'
+  import sys
+  if sys.flags.optimize != 0:
+      raise SystemExit("FATAL: optimized Python is forbidden")
+  print("PYTHON_OPTIMIZE_GATE_PASS")
+  PYEOF
+  "$PY" "$SCRIPT" check-policy --policy "$POLICY"
+  "$PY" "$SCRIPT" scan --policy "$POLICY" --out "$ATTEMPT/scan_a.json"
+  "$PY" "$SCRIPT" scan --policy "$POLICY" --out "$ATTEMPT/scan_b.json"
+  cmp "$ATTEMPT/scan_a.json" "$ATTEMPT/scan_b.json"
+  "$PY" "$SCRIPT" publish \
+    --policy "$POLICY" \
+    --left "$ATTEMPT/scan_a.json" \
+    --right "$ATTEMPT/scan_b.json"
+  "$PY" "$SCRIPT" verify-root --policy "$POLICY"
+  sha256sum "$PUBLISHED/REGISTRY_CLOSURE.json" "$PUBLISHED/_SUCCESS"
+  echo STAGE512A_CONTROL_REGISTRY_CLOSURE_V2_JOB_PASS

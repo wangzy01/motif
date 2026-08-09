@@ -70,6 +70,11 @@ def main():
 
     t0 = time.perf_counter()
     model = MoTT2IModel(config=cfg).to(device)
+    model.configure_training_rng(global_rank=0, device=device)
+    # Historical protocol used torch.manual_seed(args.seed), hence the default
+    # CUDA generator sampled posterior epsilon from exactly args.seed.  Preserve
+    # that identity while switching to an explicit device-matched generator.
+    model.vae_generator.manual_seed(args.seed)
     model.eval()
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     state = ck["trainable_state"]

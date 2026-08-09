@@ -1,0 +1,180 @@
+name: evan-s512a-ctrl-plan-build-20260809-v1
+description: "Create-once fresh-seed Stage512a control plan. Same frozen A catalog/mix/adaptive geometry/weighted contract as the 20260722 formal plan; only plan_id and seed change. Builds twice, validates every block and runtime-reader checksum before atomic publication. Failure evidence is retained under a per-job attempt directory; maxRetries=0."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+maxRetries: 0
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 256
+environments: {}
+command: |
+  set -euo pipefail
+  HOST=$(hostname)
+  NODE_RANK=${HOST##*-}
+  case "$NODE_RANK" in ''|*[!0-9]*) NODE_RANK=0 ;; esac
+  [ "$NODE_RANK" = 0 ] || { echo "FATAL: rank!=0"; exit 42; }
+
+  export CUDA_VISIBLE_DEVICES="" LC_ALL=C PYTHONHASHSEED=0 PYTHONUNBUFFERED=1
+  export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export OMP_NUM_THREADS=8 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  REPO=/fsx/evan/mot_code_s512b_impl
+  EXPECTED_COMMIT=82a0d903970701eec300192e9911efc5589e4263
+  CONTROL=/fsx/evan/mot_code/stage512a_weighted_formal_control_20260722v1
+  CONTRACT=$CONTROL/weighted_contract_stage512a_v1.json
+  OLD_PI=$CONTROL/planner_input_w64_256m_weighted_v1.json
+  OUTBASE=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  CATALOG=$OUTBASE/offline_arb_catalog_stage512a_v1
+  NMATRIX=$OUTBASE/offline_arb_bucketstats_stage512a_v1/N_matrix.parquet
+  SAMPLING=/fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json
+  PRIORITY=$OUTBASE/offline_arb_anime_priority_stage512a_weighted_v1_20260722
+  PLAN=$OUTBASE/offline_arb_plan_stage512a_continue_control_rngfix_v1_w64_256m_seed20260710_20260809
+  PLAN_ID=stage512a_offline_exact_v2_continue_control_rngfix_v1_w64_256m_seed20260710
+  JOBTAG=${HOST%-*}
+  ATTEMPT=$OUTBASE/.stage512a_continue_control_rngfix_v1_plan_attempt.$JOBTAG
+
+  test -x "$PY" && test -d "$REPO/.git" || { echo "FATAL: env"; exit 43; }
+  test ! -e "$PLAN" && test ! -L "$PLAN" || { echo "FATAL: canonical plan exists"; exit 45; }
+  test ! -e "$PLAN.work" && test ! -L "$PLAN.work" || { echo "FATAL: canonical plan staging exists"; exit 45; }
+  test ! -e "$ATTEMPT" && test ! -L "$ATTEMPT" || { echo "FATAL: attempt exists"; exit 45; }
+  mkdir -p "$ATTEMPT"
+  exec > >(tee -a "$ATTEMPT/job.log") 2>&1
+  echo "ATTEMPT=$ATTEMPT"
+
+  export PYTHONPATH="$REPO"
+  export PYTHONPYCACHEPREFIX="/local/evan/pycache/${JCC_JOB_ID:-job}/$HOST"
+  mkdir -p "$PYTHONPYCACHEPREFIX"
+  cd "$REPO"
+  bash scripts/jcc_preflight.sh "$EXPECTED_COMMIT" "$REPO"
+
+  check_sha() {
+    local expected=$1 path=$2
+    test -f "$path" && test ! -L "$path" || { echo "FATAL: unsafe/missing $path"; exit 44; }
+    local actual
+    actual=$(sha256sum "$path" | awk '{print $1}')
+    test "$actual" = "$expected" || { echo "FATAL: sha drift $path $actual != $expected"; exit 44; }
+  }
+  check_sha c228f8b8400c4f96033431816b650d6e7093b3bf8e164018d22e694c60b96c38 "$CONTRACT"
+  check_sha cf36d6402e43010fd7b5f566fcf597b02704d4a0c68a42a61ebb6a01534a0a9b "$OLD_PI"
+  check_sha d19db7c44ce4dd1db5ffedb5206c8ad3c943d43379f68e5601fdea2622c3cbdf "$NMATRIX"
+  check_sha 51a5f0904987a751b54842633d2968ea7f6485307850858d9472319c15748d1d "$CATALOG/header.json"
+  check_sha 07a0b46fa9ebb840ecf7f97cc7fccc0ec68e44c47368ae13c450bcfe81a4fd48 "$SAMPLING"
+  check_sha 93e23f11ae58acdef4830f6c24d1824e52ec686f52db0a7a8361127e68e4c536 "$PRIORITY/header.json"
+  check_sha 0a86f7195a8c87975a37414010c1ead52e6c626d05b115adeeac862f93f5ed56 "$PRIORITY/anime_priority.parquet"
+  check_sha 611635fc13b04c6d62c20875eff541736afbe6e35cc17c1f81caafb7f823a380 "$REPO/configs/stage512a_20260722_weighted_w64_v1.yaml"
+  check_sha 46781095df12eeaa358657a3546b3c535ac1d2dde4266c67bf81cce3b0dabd3e "$REPO/training/dataline_offline/weighted_plan_v1.py"
+  check_sha 6afaec30972d40fd34a6f8430c6af329be381098b1e1921b0864afea12d9d6b6 "$REPO/training/dataline_offline/weighted_streams_v1.py"
+  check_sha 7a155e3f15ec61f416086a07fd16e8f28940bcbad1354ac44bcc65ed346fb694 "$REPO/training/dataline_offline/planner_v1.py"
+  check_sha 6dc2374948721670aa5023dd2f505ffe38b6a022c2175bab186546daba056345 "$REPO/training/dataline_offline/weighted_plan_reader_v1.py"
+  check_sha 6079226c6129d29efcfe67f28aa3a51a1faf9f0b45655b270078e8e4bd2eb48b "$REPO/scripts/offline_arb/build_weighted_plan_v1.py"
+  check_sha 49fd29a9370f296084e1bada98123e05abbe30dcd652ed18a5805d9fdd615a6a "$REPO/scripts/offline_arb/make_planner_input.py"
+  check_sha 334d2fdd6fa3406259ddc6480bbbb14c84b554c59e4d9650aa1ff571d84e80c2 "$REPO/scripts/offline_arb/validate_plan.py"
+
+  "$PY" scripts/offline_arb/test_stage512a_planner_v2.py
+
+  PI=$ATTEMPT/planner_input.json
+  PRIMARY=$ATTEMPT/plan
+  VALIDATE=$ATTEMPT/validate_report.json
+  LOCAL_ROOT=$(mktemp -d /local/evan/s512a-control-plan.XXXXXX)
+  REBUILD=$LOCAL_ROOT/rebuild
+
+  "$PY" scripts/offline_arb/make_planner_input.py \
+    --n-matrix "$NMATRIX" \
+    --config "$REPO/configs/stage512a_20260722_weighted_w64_v1.yaml" \
+    --stage 512a --format-version 2 \
+    --total-steps 125000 --world-size 64 --per-rank-bs 32 \
+    --seed 20260710 --plan-id "$PLAN_ID" \
+    --catalog-header "$CATALOG/header.json" \
+    --out "$PI"
+
+  "$PY" - "$OLD_PI" "$PI" "$PLAN_ID" <<'PYEOF'
+  import copy, hashlib, json, pathlib, sys
+  old_path, new_path, plan_id = map(pathlib.Path, sys.argv[1:])
+  old = json.loads(old_path.read_text())
+  new = json.loads(new_path.read_text())
+  assert new["plan_id"] == str(plan_id)
+  assert new["seed"] == 20260710
+  old_cmp, new_cmp = copy.deepcopy(old), copy.deepcopy(new)
+  for obj in (old_cmp, new_cmp):
+      obj.pop("plan_id")
+      obj.pop("seed")
+  assert new_cmp == old_cmp, "fresh planner_input drifted outside plan_id/seed"
+  print("A_CONTROL_PLANNER_INPUT_DELTA_EXACT_PASS", hashlib.sha256(new_path.read_bytes()).hexdigest())
+  PYEOF
+
+  timeout --signal=TERM --kill-after=600s 36000s "$PY" scripts/offline_arb/build_weighted_plan_v1.py \
+    --planner-input "$PI" --weighted-contract "$CONTRACT" --out "$PRIMARY"
+  timeout --signal=TERM --kill-after=600s 36000s "$PY" scripts/offline_arb/build_weighted_plan_v1.py \
+    --planner-input "$PI" --weighted-contract "$CONTRACT" --out "$REBUILD"
+
+  cmp "$PRIMARY/header.json" "$REBUILD/header.json"
+  cmp "$PRIMARY/checksums.json" "$REBUILD/checksums.json"
+  timeout --signal=TERM --kill-after=300s 14400s "$PY" scripts/offline_arb/validate_plan.py \
+    --input "$PI" --plan "$PRIMARY" --rebuild-plan "$REBUILD" \
+    --rebuild-mode full --report "$VALIDATE"
+
+  "$PY" - "$PRIMARY" "$REBUILD" "$CONTRACT" <<'PYEOF'
+  import json, pathlib, sys
+  from training.dataline_offline.weighted_plan_reader_v1 import WeightedOfflinePlan
+  a, b, contract = map(pathlib.Path, sys.argv[1:])
+  contract_sha = "c228f8b8400c4f96033431816b650d6e7093b3bf8e164018d22e694c60b96c38"
+  expected_hash = None
+  for root in (a, b):
+      header = json.loads((root / "header.json").read_text())
+      expected_hash = expected_hash or header["plan_hash"]
+      assert header["plan_hash"] == expected_hash
+      assert header["plan_id"] == "stage512a_offline_exact_v2_continue_control_rngfix_v1_w64_256m_seed20260710"
+      assert (header["seed"], header["world_size"], header["per_rank_bs"]) == (20260710, 64, 32)
+      assert (header["total_steps"], header["total_exposures"]) == (125000, 256000000)
+      reader = WeightedOfflinePlan(root, world_size=64, per_rank_bs=32,
+          expected_plan_hash=expected_hash,
+          expected_contract_sha256=contract_sha, verify_checksums=True)
+      reader.verify_all_checksums()
+      for step in (0, 1, 2999, 3000, 59999, 60000, 119999, 120000, 124998, 124999):
+          for rank in (0, 31, 63):
+              bucket, rows, bands = reader.batch(step, rank)
+              assert len(rows) == len(bands) == 32 and len(bucket) == 2
+  print("A_CONTROL_WEIGHTED_RUNTIME_READER_PASS", expected_hash)
+  PYEOF
+
+  "$PY" - "$PRIMARY" "$PI" "$VALIDATE" "$ATTEMPT/PLAN_RECEIPT.json" "$PLAN" "$EXPECTED_COMMIT" <<'PYEOF'
+  import hashlib, json, os, pathlib, stat, sys
+  root, pi, validation, out, canonical = map(pathlib.Path, sys.argv[1:6])
+  commit = sys.argv[6]
+  def sha(p):
+      h=hashlib.sha256()
+      with p.open("rb") as f:
+          for chunk in iter(lambda:f.read(8<<20), b""): h.update(chunk)
+      return h.hexdigest()
+  header=json.loads((root/"header.json").read_text())
+  checks=json.loads((root/"checksums.json").read_text())
+  report=json.loads(validation.read_text())
+  assert report["overall"] == "PASS"
+  files=[root/"header.json",root/"checksums.json",*sorted((root/"blocks").iterdir())]
+  payload={
+    "schema":"stage512a_continue_control_plan_receipt_v1","status":"PASS",
+    "canonical_plan_root":str(canonical),"attempt_plan_root":str(root),
+    "source_repo":"/fsx/evan/mot_code_s512b_impl","source_commit":commit,
+    "plan_id":header["plan_id"],"plan_hash":header["plan_hash"],
+    "header_sha256":sha(root/"header.json"),"checksums_sha256":sha(root/"checksums.json"),
+    "planner_input":{"path":str(pi),"sha256":sha(pi)},
+    "weighted_contract_sha256":header["weighted_contract_sha256"],
+    "producer_sources":header["producer_sources"],
+    "world_size":header["world_size"],"per_rank_bs":header["per_rank_bs"],
+    "total_steps":header["total_steps"],"total_exposures":header["total_exposures"],
+    "num_blocks":header["num_blocks"],"block_manifest_sha256":header["hashes"]["blocks_manifest_sha256"],
+    "plan_file_count":len(files),"plan_bytes":sum(p.stat().st_size for p in files),
+    "validation_report":{"path":str(validation),"sha256":sha(validation),"overall":report["overall"]},
+    "deterministic_full_rebuild":True,"runtime_reader_all_checksums":True,
+  }
+  out.write_text(json.dumps(payload, indent=2, sort_keys=True)+"\n")
+  os.chmod(out, 0o444)
+  print(json.dumps(payload, sort_keys=True))
+  PYEOF
+
+  chmod 444 "$PI" "$VALIDATE" "$ATTEMPT/job.log"
+  sync
+  test ! -e "$PLAN" && test ! -L "$PLAN" || { echo "FATAL: canonical plan appeared"; exit 45; }
+  mv -T "$PRIMARY" "$PLAN"
+  test "$(stat -c %a "$PLAN")" = 555
+  echo "STAGE512A_CONTROL_PLAN_PUBLISHED plan=$PLAN receipt=$ATTEMPT/PLAN_RECEIPT.json"

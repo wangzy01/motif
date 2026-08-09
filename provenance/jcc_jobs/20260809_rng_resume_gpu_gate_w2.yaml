@@ -1,0 +1,579 @@
+# Formal two-GPU RNG/resume hard gate.  This is an integration test, not a
+# training, pilot, or quality run.  Fill every placeholder only after the RNG
+# production files are frozen and the reviewed gate is committed.
+name: evan-rng-resume-gpu-gate-w2-20260809-freeze4-final
+description: "Two-GPU hard gate: real FLUX.2 CUDA posterior rank epsilon, FSDP2/DCP exact next-update restart, v2 per-rank RNG closure, and synchronized corruption failures. No formal training."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 2
+cpuPerWorker: 16
+memGBPerWorker: 120
+maxRetries: 0
+environments:
+  RELEASE_REPO: "__CLEAN_IMMUTABLE_RELEASE_REPO_PATH__"
+  EXPECTED_COMMIT: "__FULL_40_HEX_FINAL_COMMIT__"
+  TESTED_CONFIG: "__REPO_RELATIVE_FINAL_CONFIG_PATH__"
+  EXPECTED_CONFIG_SHA256: "__SHA256_TESTED_CONFIG__"
+  RESULT_DIR: "__FRESH_CREATE_ONCE_FSX_RESULT_DIR__"
+  FLUX2_VAE_PATH: "/fsx/models/FLUX.2-klein-4B/vae"
+  TRAINING_LINEAGE_PATH: "__IMMUTABLE_PHASE_A_CANONICAL_TRAINING_LINEAGE_JSON__"
+  PHASE_A_MANIFEST_PATH: "__IMMUTABLE_PHASE_A_MANIFEST_JSON__"
+  EXPECTED_PHASE_A_MANIFEST_SHA256: "__SHA256_PHASE_A_MANIFEST__"
+  MOT_EXPECTED_RUN_LINEAGE_SHA256: "__64_HEX_FORMAL_RUN_LINEAGE_SHA256__"
+  EXPECTED_FIXED_SIGMA_EVAL_SHA256: "__SHA256_evaluation_runners_fixed_sigma_eval_py__"
+  EXPECTED_MODEL_MOT_SHA256: "__SHA256_networks_model_mot_py__"
+  EXPECTED_VAE_SHA256: "__SHA256_networks_vae_py__"
+  EXPECTED_RNG_STATE_SHA256: "__SHA256_training_rng_state_py__"
+  EXPECTED_CHECKPOINT_SHA256: "__SHA256_training_checkpoint_py__"
+  EXPECTED_FORMAL_BOOT_SHA256: "__SHA256_training_formal_boot_py__"
+  EXPECTED_TRAIN_SHA256: "__SHA256_train_py__"
+  EXPECTED_GATE_SHA256: "__SHA256_scripts_test_rng_resume_gpu_gate_v1_py__"
+  EXPECTED_CPU_TEST_SHA256: "__SHA256_scripts_test_rngfix_cpu_v1_py__"
+  EXPECTED_DIST_CPU_TEST_SHA256: "__SHA256_scripts_test_rngfix_dist_cpu_v1_py__"
+command: |
+  set -euo pipefail
+  REPO=${RELEASE_REPO:-}
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  [ -n "$REPO" ] || { echo "FATAL: RELEASE_REPO unset"; exit 43; }
+  case "$REPO" in *__*) echo "FATAL: RELEASE_REPO still placeholder"; exit 43;; esac
+  test -x "$PY" || { echo "FATAL: missing interpreter"; exit 43; }
+  git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || { echo "FATAL: repo is not a Git worktree"; exit 43; }
+  cd "$REPO"
+  export PYTHONPATH="$REPO"
+  export HF_HOME=/local/evan/cache/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export TORCH_HOME=/local/evan/cache/torch TRITON_CACHE_DIR=/local/evan/cache/triton
+  export OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONHASHSEED=0
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=WARN
+  export CUBLAS_WORKSPACE_CONFIG=:4096:8
+  unset PYTHONOPTIMIZE
+  [ "$($PY -c 'import sys; print(sys.flags.optimize)')" = 0 ] \
+    || { echo "FATAL: optimized Python is forbidden"; exit 64; }
+
+  require_value () {
+    local name=$1 value=$2
+    [ -n "$value" ] || { echo "FATAL: $name unset"; exit 43; }
+    case "$value" in *__*PLACEHOLDER*__*|__*) echo "FATAL: $name still placeholder"; exit 43;; esac
+  }
+  require_value EXPECTED_COMMIT "${EXPECTED_COMMIT:-}"
+  require_value TESTED_CONFIG "${TESTED_CONFIG:-}"
+  require_value EXPECTED_CONFIG_SHA256 "${EXPECTED_CONFIG_SHA256:-}"
+  require_value RESULT_DIR "${RESULT_DIR:-}"
+  require_value TRAINING_LINEAGE_PATH "${TRAINING_LINEAGE_PATH:-}"
+  require_value PHASE_A_MANIFEST_PATH "${PHASE_A_MANIFEST_PATH:-}"
+  require_value EXPECTED_PHASE_A_MANIFEST_SHA256 "${EXPECTED_PHASE_A_MANIFEST_SHA256:-}"
+  require_value MOT_EXPECTED_RUN_LINEAGE_SHA256 "${MOT_EXPECTED_RUN_LINEAGE_SHA256:-}"
+  require_value EXPECTED_FIXED_SIGMA_EVAL_SHA256 "${EXPECTED_FIXED_SIGMA_EVAL_SHA256:-}"
+  require_value EXPECTED_MODEL_MOT_SHA256 "${EXPECTED_MODEL_MOT_SHA256:-}"
+  require_value EXPECTED_VAE_SHA256 "${EXPECTED_VAE_SHA256:-}"
+  require_value EXPECTED_RNG_STATE_SHA256 "${EXPECTED_RNG_STATE_SHA256:-}"
+  require_value EXPECTED_CHECKPOINT_SHA256 "${EXPECTED_CHECKPOINT_SHA256:-}"
+  require_value EXPECTED_FORMAL_BOOT_SHA256 "${EXPECTED_FORMAL_BOOT_SHA256:-}"
+  require_value EXPECTED_TRAIN_SHA256 "${EXPECTED_TRAIN_SHA256:-}"
+  require_value EXPECTED_GATE_SHA256 "${EXPECTED_GATE_SHA256:-}"
+  require_value EXPECTED_CPU_TEST_SHA256 "${EXPECTED_CPU_TEST_SHA256:-}"
+  require_value EXPECTED_DIST_CPU_TEST_SHA256 "${EXPECTED_DIST_CPU_TEST_SHA256:-}"
+  printf '%s\n' "$EXPECTED_COMMIT" | grep -Eq '^[0-9a-f]{40}$' \
+    || { echo "FATAL: EXPECTED_COMMIT must be 40 lowercase hex"; exit 43; }
+  printf '%s\n' "$MOT_EXPECTED_RUN_LINEAGE_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+    || { echo "FATAL: MOT_EXPECTED_RUN_LINEAGE_SHA256 must be 64 lowercase hex"; exit 43; }
+  for value in \
+    "$EXPECTED_CONFIG_SHA256" "$EXPECTED_PHASE_A_MANIFEST_SHA256" \
+    "$EXPECTED_FIXED_SIGMA_EVAL_SHA256" \
+    "$EXPECTED_MODEL_MOT_SHA256" "$EXPECTED_VAE_SHA256" \
+    "$EXPECTED_RNG_STATE_SHA256" "$EXPECTED_CHECKPOINT_SHA256" \
+    "$EXPECTED_FORMAL_BOOT_SHA256" "$EXPECTED_TRAIN_SHA256" \
+    "$EXPECTED_GATE_SHA256" "$EXPECTED_CPU_TEST_SHA256" \
+    "$EXPECTED_DIST_CPU_TEST_SHA256"; do
+    printf '%s\n' "$value" | grep -Eq '^[0-9a-f]{64}$' \
+      || { echo "FATAL: expected SHA must be 64 lowercase hex: $value"; exit 43; }
+  done
+  bash scripts/jcc_preflight.sh "$EXPECTED_COMMIT" "$REPO"
+  [ "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT" ] \
+    || { echo "FATAL: release HEAD mismatch after preflight"; exit 43; }
+  [ -z "$(git status --porcelain)" ] \
+    || { echo "FATAL: release worktree is dirty after preflight"; git status --short; exit 43; }
+  REPO_REAL=$(pwd -P)
+  RELEASE_REPO_REAL=$($PY -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$RELEASE_REPO")
+  [ "$REPO_REAL" = "$RELEASE_REPO_REAL" ] \
+    || { echo "FATAL: release repo resolution mismatch"; exit 43; }
+  case "$TESTED_CONFIG" in
+    /*|.|..|../*|*/../*|*/..) echo "FATAL: TESTED_CONFIG must be a canonical repo-relative path"; exit 43;;
+  esac
+  test -f "$TESTED_CONFIG" && test ! -L "$TESTED_CONFIG" \
+    || { echo "FATAL: tested config missing/non-regular/symlink"; exit 43; }
+  git ls-files --error-unmatch "$TESTED_CONFIG" >/dev/null \
+    || { echo "FATAL: tested config is not committed"; exit 43; }
+  CONFIG_REAL=$(realpath -e "$TESTED_CONFIG")
+  case "$CONFIG_REAL" in "$REPO_REAL"/*) :;; *) echo "FATAL: tested config escapes release repo"; exit 43;; esac
+  test -f "$TRAINING_LINEAGE_PATH" && test ! -L "$TRAINING_LINEAGE_PATH" \
+    || { echo "FATAL: canonical training lineage missing/non-regular/symlink"; exit 43; }
+  test -f "$PHASE_A_MANIFEST_PATH" && test ! -L "$PHASE_A_MANIFEST_PATH" \
+    || { echo "FATAL: Phase-A manifest missing/non-regular/symlink"; exit 43; }
+  "$PY" -c 'import pathlib,stat,sys; p=pathlib.Path(sys.argv[1]); assert stat.S_IMODE(p.stat().st_mode) & 0o222 == 0' \
+    "$TRAINING_LINEAGE_PATH" || { echo "FATAL: canonical training lineage is writable"; exit 43; }
+  "$PY" -c 'import pathlib,stat,sys; p=pathlib.Path(sys.argv[1]); assert stat.S_IMODE(p.stat().st_mode) & 0o222 == 0' \
+    "$PHASE_A_MANIFEST_PATH" || { echo "FATAL: Phase-A manifest is writable"; exit 43; }
+
+  check_sha () {
+    local expected=$1 path=$2 got
+    got=$(sha256sum "$path" | awk '{print $1}')
+    [ "$got" = "$expected" ] || {
+      echo "FATAL: sha drift $path: $got != $expected"; exit 44; }
+    echo "sha verified $path $got"
+  }
+  check_sha "$EXPECTED_FIXED_SIGMA_EVAL_SHA256" evaluation/runners/fixed_sigma_eval.py
+  check_sha "$EXPECTED_MODEL_MOT_SHA256" networks/model_mot.py
+  check_sha "$EXPECTED_VAE_SHA256" networks/vae.py
+  check_sha "$EXPECTED_RNG_STATE_SHA256" training/rng_state.py
+  check_sha "$EXPECTED_CHECKPOINT_SHA256" training/checkpoint.py
+  check_sha "$EXPECTED_FORMAL_BOOT_SHA256" training/formal_boot.py
+  check_sha "$EXPECTED_TRAIN_SHA256" train.py
+  check_sha "$EXPECTED_GATE_SHA256" scripts/test_rng_resume_gpu_gate_v1.py
+  check_sha "$EXPECTED_CPU_TEST_SHA256" scripts/test_rngfix_cpu_v1.py
+  check_sha "$EXPECTED_DIST_CPU_TEST_SHA256" scripts/test_rngfix_dist_cpu_v1.py
+  check_sha "$EXPECTED_CONFIG_SHA256" "$TESTED_CONFIG"
+  check_sha "$MOT_EXPECTED_RUN_LINEAGE_SHA256" "$TRAINING_LINEAGE_PATH"
+  check_sha "$EXPECTED_PHASE_A_MANIFEST_SHA256" "$PHASE_A_MANIFEST_PATH"
+  test -d "$FLUX2_VAE_PATH" || { echo "FATAL: FLUX.2 VAE missing"; exit 43; }
+
+  # A retry must use a new result directory.  No resume semantics are hidden at
+  # the job level; the only restart is the explicit phase boundary below.
+  mkdir "$RESULT_DIR" || { echo "FATAL: RESULT_DIR exists; choose a fresh path"; exit 45; }
+  {
+    echo "expected_commit=$EXPECTED_COMMIT"
+    echo "release_repo=$REPO_REAL"
+    echo "tested_config=$TESTED_CONFIG"
+    echo "tested_config_sha256=$EXPECTED_CONFIG_SHA256"
+    echo "canonical_training_lineage_path=$TRAINING_LINEAGE_PATH"
+    echo "canonical_training_lineage_sha256=$MOT_EXPECTED_RUN_LINEAGE_SHA256"
+    echo "phase_a_manifest_path=$PHASE_A_MANIFEST_PATH"
+    echo "phase_a_manifest_sha256=$EXPECTED_PHASE_A_MANIFEST_SHA256"
+    echo "job_name=evan-rng-resume-gpu-gate-w2-20260809-freeze4-final"
+    echo "formal_run_lineage_sha256=$MOT_EXPECTED_RUN_LINEAGE_SHA256"
+    echo "host=$(hostname)"
+    nvidia-smi -L
+    sha256sum evaluation/runners/fixed_sigma_eval.py networks/model_mot.py networks/vae.py training/rng_state.py \
+      training/checkpoint.py training/formal_boot.py train.py scripts/test_rng_resume_gpu_gate_v1.py \
+      scripts/test_rngfix_cpu_v1.py scripts/test_rngfix_dist_cpu_v1.py
+    sha256sum "$TESTED_CONFIG"
+    sha256sum "$TRAINING_LINEAGE_PATH"
+    sha256sum "$PHASE_A_MANIFEST_PATH"
+  } | tee "$RESULT_DIR/runtime_manifest.txt"
+
+  "$PY" scripts/test_rngfix_cpu_v1.py 2>&1 | tee "$RESULT_DIR/cpu.log"
+  "$PY" scripts/test_rngfix_dist_cpu_v1.py 2>&1 | tee "$RESULT_DIR/dist_cpu.log"
+
+  run_phase () {
+    local phase=$1
+    echo "===== GPU hard-gate phase: $phase ====="
+    timeout 1200 "$PY" -m torch.distributed.run --standalone --nproc-per-node=2 \
+      scripts/test_rng_resume_gpu_gate_v1.py \
+      --phase "$phase" \
+      --artifact-dir "$RESULT_DIR" \
+      --vae-path "$FLUX2_VAE_PATH" \
+      --vae-dtype bfloat16 \
+      --image-size 64 \
+      2>&1 | tee "$RESULT_DIR/$phase.log"
+  }
+
+  # Each call is a new OS process group.  The exit after save-reference is the
+  # crash/restart boundary whose next update resume-compare must reproduce.
+  run_phase flux2-vae
+  run_phase save-reference
+  run_phase resume-compare
+  run_phase corruption
+
+  "$PY" -c '
+  import hashlib, json, math, os, pathlib, sys
+
+  root = pathlib.Path(sys.argv[1])
+  phase_files = {
+      "flux2-vae": "flux2_vae_receipt.json",
+      "save-reference": "save_reference_receipt.json",
+      "resume-compare": "resume_compare_receipt.json",
+      "corruption": "corruption_receipt.json",
+  }
+  production = {
+      "evaluation/runners/fixed_sigma_eval.py": os.environ["EXPECTED_FIXED_SIGMA_EVAL_SHA256"],
+      "networks/model_mot.py": os.environ["EXPECTED_MODEL_MOT_SHA256"],
+      "networks/vae.py": os.environ["EXPECTED_VAE_SHA256"],
+      "train.py": os.environ["EXPECTED_TRAIN_SHA256"],
+      "training/checkpoint.py": os.environ["EXPECTED_CHECKPOINT_SHA256"],
+      "training/formal_boot.py": os.environ["EXPECTED_FORMAL_BOOT_SHA256"],
+      "training/rng_state.py": os.environ["EXPECTED_RNG_STATE_SHA256"],
+  }
+  gate_tests = {
+      "scripts/test_rng_resume_gpu_gate_v1.py": os.environ["EXPECTED_GATE_SHA256"],
+      "scripts/test_rngfix_cpu_v1.py": os.environ["EXPECTED_CPU_TEST_SHA256"],
+      "scripts/test_rngfix_dist_cpu_v1.py": os.environ["EXPECTED_DIST_CPU_TEST_SHA256"],
+  }
+  def file_sha(path):
+      return hashlib.sha256(path.read_bytes()).hexdigest()
+  def map_sha(value):
+      canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+      return hashlib.sha256(canonical).hexdigest()
+  def atomic_json(path, value):
+      temporary = path.with_name(path.name + ".tmp")
+      data = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+      with temporary.open("xb") as handle:
+          handle.write(data)
+          handle.flush()
+          os.fsync(handle.fileno())
+      os.replace(temporary, path)
+      directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+      try:
+          os.fsync(directory_fd)
+      finally:
+          os.close(directory_fd)
+
+  receipts = {phase: json.loads((root / name).read_text()) for phase, name in phase_files.items()}
+  expected_phase_keys = {"schema", "status", "verdict", "pass", "phase", "provenance"}
+  for phase, payload in receipts.items():
+      assert expected_phase_keys <= set(payload), (phase, sorted(payload))
+      assert payload["schema"] == "mot_rng_gpu_gate_phase_receipt_v1", (phase, payload["schema"])
+      assert payload["phase"] == phase, (phase, payload["phase"])
+      assert payload["status"] == payload["verdict"] == "PASS", (phase, payload)
+      assert payload["pass"] is True, (phase, payload)
+      prov = payload["provenance"]
+      assert prov["git_head"] == os.environ["EXPECTED_COMMIT"], (phase, prov["git_head"])
+      assert prov["git_status_porcelain"] == "", (phase, prov["git_status_porcelain"])
+      assert prov["production_sha256"] == production, (phase, prov["production_sha256"], production)
+      assert prov["test_sha256"] == os.environ["EXPECTED_GATE_SHA256"], (phase, prov["test_sha256"])
+      assert prov["expected_run_lineage_sha256"] == os.environ["MOT_EXPECTED_RUN_LINEAGE_SHA256"], (phase, prov["expected_run_lineage_sha256"])
+      assert prov["world_size"] == 2, (phase, prov["world_size"])
+      assert len(prov["gpu_names"]) == 2, (phase, prov["gpu_names"])
+
+  flux = receipts["flux2-vae"]
+  expected_flux_coverage = {
+      "real_flux2_vae": True,
+      "online_pixels_posterior": True,
+      "cached_moments_posterior": True,
+      "exact_local_cuda_generator_device": True,
+      "rank_unique_epsilon": True,
+      "rank_unique_latent": True,
+      "exact_replay": True,
+      "generator_consumption": True,
+      "posterior_dose_diagnostics": True,
+  }
+  assert flux["coverage"] == expected_flux_coverage, flux["coverage"]
+  assert flux["vae_path"] == os.environ["FLUX2_VAE_PATH"], flux["vae_path"]
+  assert [item["rank"] for item in flux["per_rank"]] == [0, 1], flux["per_rank"]
+  assert len({item["epsilon_hash"] for item in flux["per_rank"]}) == 2
+  assert len({item["moments_model_latent_hash"] for item in flux["per_rank"]}) == 2
+  assert all(
+      item["generator_state_before_hash"] != item["generator_state_after_hash"]
+      and item["moments_generator_state_before_hash"] != item["moments_generator_state_after_hash"]
+      for item in flux["per_rank"]
+  )
+  dose = flux["diagnostics"]["posterior_dose"]
+  assert dose["diagnostic_only"] is True
+  assert set(dose) == {"diagnostic_only", "pixels_rank0", "cached_moments_rank0", "cached_moments_rank1"}
+  for path in ("pixels_rank0", "cached_moments_rank0", "cached_moments_rank1"):
+      values = dose[path]
+      ratio_keys = sorted(key for key in values if key.endswith("_rms"))
+      assert ratio_keys, (path, values)
+      assert all(math.isfinite(float(values[key])) and float(values[key]) > 0 for key in ratio_keys), (path, values)
+
+  restart_fields = [
+      "per_rank.batch", "per_rank.latent", "per_rank.cfg", "per_rank.sigma",
+      "per_rank.diffusion_noise", "per_rank.loss", "grad", "raw", "ema",
+      "optimizer", "scheduler", "lr",
+  ]
+  resume = receipts["resume-compare"]
+  assert resume["exact_fields"] == restart_fields, resume["exact_fields"]
+  assert resume["retention_after_resume_repair"]["step_1_present"] is True
+  assert resume["full_retention"]["full_snapshots_never_roll"] is True
+  assert resume["full_retention"]["retained_global_steps"] == [1, 2, 3, 4]
+  assert resume["full_retention"]["step_1_byte_exact_through_step_4"] is True
+  capacity = resume["full_retention"]["capacity_failure"]
+  assert capacity["case"] == "fifth_full_milestone_capacity_failure"
+  assert capacity["all_rank_identical_failure"] is True
+  assert capacity["step_5_published"] is False
+  assert capacity["retained_anchor_modes"] == {f"step_{step}.pt": "0o444" for step in range(1, 5)}
+  assert capacity["retained_anchor_sha256"] == {
+      f"step_{step}.pt": file_sha(root / f"step_{step}.pt") for step in range(1, 5)
+  }
+  assert file_sha(root / "last.pt") == file_sha(root / "step_4.pt")
+  assert resume["terminal_duplicate_guard"] == {
+      "none_previous_writes": True,
+      "earlier_previous_writes": True,
+      "same_terminal_step_skips": True,
+  }
+
+  save = receipts["save-reference"]
+  save_retention = save["retention_before_crash"]
+  assert save["checkpoint_sha256"] == file_sha(root / "step_1.pt")
+  assert save_retention["format"] == "full"
+  assert save_retention["checkpoint_keep_every"] == 1
+  assert save_retention["checkpoint_keep_max"] == 4
+  assert save_retention["rank0_torch_save_calls"] == 1
+  assert save_retention["rank1_torch_save_calls"] == 0
+  assert save_retention["step_1_deleted_after_validation"] is True
+  assert save_retention["predictable_tmp_symlink_canary_untouched"] is True
+  required_io = {
+      "rank0_only_serialization": True,
+      "random_exclusive_temporary": True,
+      "exclusive_no_follow_temporary_open": True,
+      "atomic_replace": True,
+      "temporary_file_fsync_before_replace": True,
+      "published_file_fsync_after_replace": True,
+      "full_hardlink_0444": True,
+      "directory_fsync_after_hardlink": True,
+      "temporary_removed": True,
+      "torch_save_calls": 1,
+  }
+  assert save_retention["durable_atomic_publication"] == required_io
+  assert resume["full_retention"]["durable_atomic_publication_by_step"] == {
+      str(step): required_io for step in range(2, 5)
+  }
+
+  negative_cases = [
+      "missing_lineage", "wrong_lineage", "missing_rng_schema",
+      "wrong_checkpoint_schema", "world_size", "missing_stream",
+      "duplicate_stream", "rank1_only_opaque_corruption",
+      "all_rank_environment_lineage_missing", "all_rank_environment_lineage_wrong",
+      "rank1_only_checkpoint_lineage_mismatch",
+      "rank1_only_environment_lineage_mismatch",
+  ]
+  corruption = receipts["corruption"]
+  assert corruption["case_count"] == 12, corruption["case_count"]
+  assert [item["case"] for item in corruption["cases"]] == negative_cases, corruption["cases"]
+  assert all(item["all_rank_error"] for item in corruption["cases"])
+  assert corruption["all_rank_identical_failure"] is True
+  assert corruption["no_rng_mutation"] is True and corruption["no_model_mutation"] is True
+  assert [item["case"] for item in corruption["retention_failure_cases"]] == ["missing_prior_full_anchor"]
+  assert all(item["all_rank_error"] for item in corruption["retention_failure_cases"])
+  boot_visibility = corruption["boot_branch_visibility"]
+  assert boot_visibility["positive"] == {"continue": "continue", "fresh": "fresh", "none": "none"}
+  assert boot_visibility["negative_case_count"] == 2
+  assert [item["case"] for item in boot_visibility["negative_cases"]] == [
+      "rank_visibility_split_pre_load", "all_rank_expected_fresh_but_continue_pre_load"
+  ]
+  assert all(item["all_rank_error"] for item in boot_visibility["negative_cases"])
+  assert all(item["pre_load"] is True for item in boot_visibility["negative_cases"])
+  assert boot_visibility["all_rank_identical_pre_load_failure"] is True
+
+  member_receipts = {
+      name: file_sha(root / name) for name in sorted(phase_files.values())
+  }
+  phase_summary = {
+      phase: {
+          "file": name,
+          "receipt_sha256": member_receipts[name],
+          "status": "PASS",
+          "verdict": "PASS",
+      }
+      for phase, name in phase_files.items()
+  }
+  result = {
+      "schema": "mot_rng_resume_gpu_gate_result_receipt_v1",
+      "status": "PASS",
+      "verdict": "PASS",
+      "release": {
+          "repo": os.environ["RELEASE_REPO"],
+          "resolved_repo": str(pathlib.Path(os.environ["RELEASE_REPO"]).resolve()),
+          "commit": os.environ["EXPECTED_COMMIT"],
+          "clean_worktree": True,
+          "config": {
+              "path": os.environ["TESTED_CONFIG"],
+              "sha256": os.environ["EXPECTED_CONFIG_SHA256"],
+          },
+      },
+      "training_lineage": {
+          "path": os.environ["TRAINING_LINEAGE_PATH"],
+          "sha256": os.environ["MOT_EXPECTED_RUN_LINEAGE_SHA256"],
+          "scope": "canonical_phase_a",
+          "final_training_lineage_claimed": True,
+          "gpu_evidence_in_lineage": False,
+          "phase_a_manifest_path": os.environ["PHASE_A_MANIFEST_PATH"],
+          "phase_a_manifest_sha256": os.environ["EXPECTED_PHASE_A_MANIFEST_SHA256"],
+      },
+      "sources": {
+          "production_sha256": production,
+          "production_aggregate_sha256": map_sha(production),
+          "gate_test_sha256": gate_tests,
+          "gate_test_aggregate_sha256": map_sha(gate_tests),
+      },
+      "execution": {
+          "world_size": 2,
+          "gpu_count": 2,
+          "gpu_names": flux["provenance"]["gpu_names"],
+          "real_flux2_vae_path": flux["vae_path"],
+          "phase_count": 4,
+          "phase_summary": phase_summary,
+          "cpu_tests": {
+              "scripts/test_rngfix_cpu_v1.py": {"status": "PASS", "log": "cpu.log"},
+              "scripts/test_rngfix_dist_cpu_v1.py": {"status": "PASS", "log": "dist_cpu.log"},
+          },
+      },
+      "coverage": {
+          "flux2_vae": expected_flux_coverage,
+          "restart_exact_fields": restart_fields,
+          "negative_resume_validation": {
+              "case_count": 12,
+              "cases": negative_cases,
+              "all_rank_identical_failure": True,
+              "no_rng_mutation": True,
+              "no_model_mutation": True,
+          },
+          "full_retention": {
+              "current_anchor_repair": True,
+              "prior_anchor_missing_fails_all_ranks": True,
+              "retained_global_steps": [1, 2, 3, 4],
+              "never_rolls_full_anchor": True,
+              "fifth_full_milestone_fails_closed": True,
+              "all_anchors_read_only": True,
+              "predictable_tmp_symlink_canary_untouched": True,
+              "rank0_only_serialization": True,
+              "durable_atomic_publication": True,
+          },
+          "boot_branch_visibility": {
+              "positive": boot_visibility["positive"],
+              "negative_case_count": 2,
+              "negative_cases": [item["case"] for item in boot_visibility["negative_cases"]],
+              "all_rank_identical_pre_load_failure": True,
+              "no_rng_mutation": True,
+              "no_model_mutation": True,
+          },
+          "terminal_duplicate_guard": resume["terminal_duplicate_guard"],
+      },
+      "member_receipt_hashes": member_receipts,
+  }
+  atomic_json(root / "RESULT_RECEIPT.json", result)
+  print("PASS strict receipt postchecks and RESULT_RECEIPT.json", tuple(phase_files))
+  ' "$RESULT_DIR"
+
+  # Seal a closed, deterministic evidence set.  Corrupt checkpoints are retained
+  # because they are tiny and make the negative cases independently inspectable.
+  members=(
+    runtime_manifest.txt cpu.log dist_cpu.log
+    flux2-vae.log save-reference.log resume-compare.log corruption.log
+    flux2_vae_receipt.json save_reference_receipt.json
+    resume_compare_receipt.json corruption_receipt.json
+    RESULT_RECEIPT.json last.pt step_1.pt step_2.pt step_3.pt step_4.pt
+    expected_next_update.pt
+    corrupt_missing_rng_schema.pt corrupt_wrong_checkpoint_schema.pt
+    corrupt_world_size.pt corrupt_missing_stream.pt corrupt_duplicate_stream.pt
+    corrupt_rank1_opaque.pt corrupt_missing_lineage.pt corrupt_wrong_lineage.pt
+  )
+  for member in "${members[@]}"; do
+    test -f "$RESULT_DIR/$member" && test ! -L "$RESULT_DIR/$member" \
+      || { echo "FATAL: missing/non-regular evidence member $member"; exit 46; }
+  done
+  EXPECTED_LIST=$(printf '%s\n' "${members[@]}" | LC_ALL=C sort)
+  ACTUAL_LIST=$(find "$RESULT_DIR" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+  [ "$EXPECTED_LIST" = "$ACTUAL_LIST" ] \
+    || { echo "FATAL: evidence member closure mismatch"; diff -u <(printf '%s\n' "$EXPECTED_LIST") <(printf '%s\n' "$ACTUAL_LIST") || true; exit 46; }
+  test -z "$(find "$RESULT_DIR" -mindepth 1 -maxdepth 1 ! -type f -print -quit)" \
+    || { echo "FATAL: evidence closure contains a non-file entry"; exit 46; }
+  "$PY" -c '
+  import hashlib, json, os, pathlib, sys
+  root = pathlib.Path(sys.argv[1])
+  names = sorted(sys.argv[2:])
+  result = json.loads((root / "RESULT_RECEIPT.json").read_text())
+  assert result["schema"] == "mot_rng_resume_gpu_gate_result_receipt_v1"
+  assert result["status"] == result["verdict"] == "PASS"
+  assert result["execution"]["world_size"] == 2
+  assert result["execution"]["phase_count"] == 4
+  assert set(result["execution"]["phase_summary"]) == {"flux2-vae", "save-reference", "resume-compare", "corruption"}
+  assert all(item["status"] == item["verdict"] == "PASS" for item in result["execution"]["phase_summary"].values())
+  negative = result["coverage"]["negative_resume_validation"]
+  assert negative["case_count"] == 12 and negative["all_rank_identical_failure"] is True
+  assert result["training_lineage"]["final_training_lineage_claimed"] is True
+  assert result["training_lineage"]["gpu_evidence_in_lineage"] is False
+  members = {}
+  for name in names:
+      path = root / name
+      members[name] = {
+          "bytes": path.stat().st_size,
+          "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+      }
+  out = {
+      "schema": "mot_rng_gpu_gate_manifest_v2",
+      "status": "PASS",
+      "verdict": "PASS",
+      "release": result["release"],
+      "training_lineage": result["training_lineage"],
+      "world_size": result["execution"]["world_size"],
+      "sources": result["sources"],
+      "phase_receipts": result["execution"]["phase_summary"],
+      "negative_resume_validation": negative,
+      "full_retention": result["coverage"]["full_retention"],
+      "boot_branch_visibility": result["coverage"]["boot_branch_visibility"],
+      "terminal_duplicate_guard": result["coverage"]["terminal_duplicate_guard"],
+      "result_receipt_sha256": members["RESULT_RECEIPT.json"]["sha256"],
+      "members": members,
+  }
+  path = root / "MANIFEST.json"
+  temporary = root / "MANIFEST.json.tmp"
+  data = (json.dumps(out, indent=2, sort_keys=True) + "\n").encode()
+  with temporary.open("xb") as handle:
+      handle.write(data)
+      handle.flush()
+      os.fsync(handle.fileno())
+  os.replace(temporary, path)
+  directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+  try:
+      os.fsync(directory_fd)
+  finally:
+      os.close(directory_fd)
+  ' "$RESULT_DIR" "${members[@]}"
+  SUM_MEMBERS=$(printf '%s\n' "${members[@]}" MANIFEST.json | LC_ALL=C sort)
+  (cd "$RESULT_DIR" && printf '%s\n' "$SUM_MEMBERS" | xargs sha256sum > SHA256SUMS && sha256sum -c SHA256SUMS)
+  MANIFEST_SHA=$(sha256sum "$RESULT_DIR/MANIFEST.json" | awk '{print $1}')
+  RESULT_RECEIPT_SHA=$(sha256sum "$RESULT_DIR/RESULT_RECEIPT.json" | awk '{print $1}')
+  SHA256SUMS_SHA=$(sha256sum "$RESULT_DIR/SHA256SUMS" | awk '{print $1}')
+  "$PY" -c '
+  import json, os, pathlib, sys
+  root = pathlib.Path(sys.argv[1])
+  payload = {
+      "schema": "mot_rng_gpu_gate_success_v2",
+      "status": "PASS",
+      "verdict": "PASS",
+      "manifest_sha256": sys.argv[2],
+      "result_receipt_sha256": sys.argv[3],
+      "sha256sums_sha256": sys.argv[4],
+  }
+  path = root / "_SUCCESS"
+  temporary = root / "_SUCCESS.tmp"
+  data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+  with temporary.open("xb") as handle:
+      handle.write(data)
+      handle.flush()
+      os.fsync(handle.fileno())
+  os.replace(temporary, path)
+  directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+  try:
+      os.fsync(directory_fd)
+  finally:
+      os.close(directory_fd)
+  ' "$RESULT_DIR" "$MANIFEST_SHA" "$RESULT_RECEIPT_SHA" "$SHA256SUMS_SHA"
+  FINAL_EXPECTED=$(printf '%s\n' "${members[@]}" MANIFEST.json SHA256SUMS _SUCCESS | LC_ALL=C sort)
+  FINAL_ACTUAL=$(find "$RESULT_DIR" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+  [ "$FINAL_EXPECTED" = "$FINAL_ACTUAL" ] || { echo "FATAL: sealed closure mismatch"; exit 46; }
+  "$PY" -c '
+  import hashlib, json, pathlib, sys
+  root = pathlib.Path(sys.argv[1])
+  digest = lambda name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+  success = json.loads((root / "_SUCCESS").read_text())
+  assert success["schema"] == "mot_rng_gpu_gate_success_v2"
+  assert success["status"] == success["verdict"] == "PASS"
+  assert success["manifest_sha256"] == digest("MANIFEST.json")
+  assert success["result_receipt_sha256"] == digest("RESULT_RECEIPT.json")
+  assert success["sha256sums_sha256"] == digest("SHA256SUMS")
+  manifest = json.loads((root / "MANIFEST.json").read_text())
+  assert manifest["status"] == manifest["verdict"] == "PASS"
+  assert manifest["result_receipt_sha256"] == success["result_receipt_sha256"]
+  print("PASS sealed receipt/manifest/success binding")
+  ' "$RESULT_DIR"
+  chmod 0444 "$RESULT_DIR"/*
+  chmod 0555 "$RESULT_DIR"
+  "$PY" -c '
+  import pathlib, stat, sys
+  root = pathlib.Path(sys.argv[1])
+  assert stat.S_IMODE(root.stat().st_mode) == 0o555
+  assert all(stat.S_IMODE(path.stat().st_mode) == 0o444 for path in root.iterdir())
+  print("PASS sealed modes dir=0555 files=0444")
+  ' "$RESULT_DIR"
+  echo "PASS rng/resume GPU hard gate: $RESULT_DIR"

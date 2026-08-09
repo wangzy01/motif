@@ -13,6 +13,8 @@ latent 归一化（channel-wise mean/std 或官方 scaling/shift）在 adapter �
 模型侧拿到的永远是"训练就绪"的 latent（方案0608：不要裸 latent 训练）。
 """
 
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 from einops import rearrange
@@ -39,7 +41,14 @@ class FakeVAE(nn.Module):
         self.eval()
 
     @torch.no_grad()
-    def encode(self, pixels: torch.Tensor) -> torch.Tensor:
+    def encode(
+        self,
+        pixels: torch.Tensor,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
+        # FakeVAE is deterministic; accept the argument so callers cannot
+        # accidentally omit the real VAE's explicit posterior generator.
+        del generator
         return self.enc(pixels)
 
     @torch.no_grad()
@@ -113,22 +122,64 @@ class Flux2VAE(nn.Module):
         x = x * std + mean
         return rearrange(x, "b (c ph pw) h w -> b c (h ph) (w pw)", ph=2, pw=2)
 
-    def moments_to_model_space(self, parameters: torch.Tensor, sample: bool | None = None) -> torch.Tensor:
+    @staticmethod
+    def _sample_posterior(
+        posterior,
+        *,
+        do_sample: bool,
+        generator: torch.Generator | None,
+        context: str,
+    ) -> torch.Tensor:
+        if not do_sample:
+            return posterior.mode()
+        if generator is None:
+            raise RuntimeError(
+                f"{context}: posterior sampling requires an explicit per-rank VAE generator"
+            )
+        posterior_device = torch.device(posterior.parameters.device)
+        generator_device = torch.device(generator.device)
+        if generator_device != posterior_device:
+            raise RuntimeError(
+                f"{context}: VAE generator must exactly match posterior device; "
+                f"generator={generator_device}, posterior={posterior_device}"
+            )
+        return posterior.sample(generator=generator)
+
+    def moments_to_model_space(
+        self,
+        parameters: torch.Tensor,
+        sample: bool | None = None,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
         """缓存数据线用：raw moments [B, 2*32, H/8, W/8]（mean‖logvar，batch_vae_flux.py 存的）
         -> model-space latent。每次可重采样 posterior。"""
         from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
         dist = DiagonalGaussianDistribution(parameters)
         do_sample = self.sample_posterior if sample is None else sample
-        raw = dist.sample() if do_sample else dist.mode()
+        raw = self._sample_posterior(
+            dist,
+            do_sample=do_sample,
+            generator=generator,
+            context="moments_to_model_space",
+        )
         return self.to_model_space(raw, self.ae)
 
     @torch.no_grad()
-    def encode(self, pixels: torch.Tensor) -> torch.Tensor:
+    def encode(
+        self,
+        pixels: torch.Tensor,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
         """pixels[B,3,H,W] in [-1,1] -> model-space latent [B,128,H/16,W/16]。"""
         ref = next(self.ae.parameters())
         px = pixels.to(device=ref.device, dtype=ref.dtype)
         posterior = self.ae.encode(px).latent_dist
-        raw = posterior.sample() if self.sample_posterior else posterior.mode()
+        raw = self._sample_posterior(
+            posterior,
+            do_sample=self.sample_posterior,
+            generator=generator,
+            context="encode",
+        )
         return self.to_model_space(raw, self.ae)
 
     @torch.no_grad()

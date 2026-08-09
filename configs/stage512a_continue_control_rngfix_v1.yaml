@@ -1,0 +1,203 @@
+# Stage512a continuation control with the rank-specific VAE-posterior RNG fix.
+#
+# Scientific control: continue from the terminal Stage512a full-state checkpoint
+# while preserving Stage512a's catalog, weighted domain mix, caption policy,
+# adaptive 30-bucket geometry, LR/noise shift/EMA, W64 x per-rank batch 32 and
+# 256M-exposure horizon.  The GPIC blob backend and 64 threads/node are byte-
+# identical transport/throughput changes.  This remains a practical counterfactual,
+# not a strict single-variable arm: the required fresh plan changes the exposure
+# permutation and its plan_id also keys caption-slot RNG; exact RNG recovery changes
+# post-crash trajectories relative to historical A/B; and VAE posterior RNG is fixed.
+#
+# The fresh plan identity below is sealed by the canonical build and full-plan
+# closure receipts.  The FORMAL preflight additionally binds those receipts and
+# the plan-specific exception registry before launch.
+
+model_cls: networks.model_mot.MoTT2IModel
+target_device: cuda
+
+model:
+  # Historical code defaulted this to false.  It is explicit here because the
+  # formal RNG contract requires world-size-unique stochastic streams.
+  rank_independent_seed: false
+  pretrained_path: /fsx/models/Qwen3-VL-2B-Instruct
+  tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct
+  patch_size: 1
+  time_gap: 2048
+  timestep_multiplier: 1.0
+  text_max_length: 512
+  cfg_dropout_prob: 0.1
+  text_rich_cfg_dropout_prob: 0.0
+  prompt_template:
+    enabled: true
+  gradient_checkpointing: true
+  sandwich_norm: true
+  noise_condition: true
+  long_skip:
+    enabled: false
+    mode: A_full
+  text_adapter:
+    enabled: true
+    num_layers: 2
+    bidirectional: false
+    rope: false
+    multi_layer_fusion:
+      enabled: true
+      num_layers: 12
+  und_lora:
+    enabled: false
+    num_layers: 8
+    rank: 32
+    alpha: 32
+    lr_scale: 0.3
+    target_modules: [q, k, v, o]
+  abs_sincos:
+    enabled: false
+
+vae:
+  name: flux2
+  pretrained_path: /fsx/models/FLUX.2-klein-4B/vae
+  dtype: bfloat16
+
+dataset:
+  store_cls: training.dataline_offline.offline_dataset.OfflineExactDataset
+  sampling_config: /fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json
+  stage: "512a"
+  image_size: 512
+  # Fresh-seed continuation plan.  Replaying the fully consumed 2026-07-22 plan
+  # would repeat the exact (step,rank,slot)->row stream and current code refuses
+  # that plan's stale producer-source binding anyway.
+  offline_plan_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_plan_stage512a_continue_control_rngfix_v1_w64_256m_seed20260710_20260809
+  offline_plan_hash: fbb5fcbd91d80daff8dfe89693f38eb3fa6ddeb657d01198df7fcac9cdcd039c
+  offline_weighted_contract_sha256: c228f8b8400c4f96033431816b650d6e7093b3bf8e164018d22e694c60b96c38
+  offline_catalog_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512a_v1
+  offline_anime_freq_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_animefreq_stage512a_v1
+  offline_caption_sidecar_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_caption_sidecar_stage512a_v1
+  caption_sidecar_workers: 16
+  caption_workers_anime: 8
+  caption_workers_monet_real: 8
+  caption_workers_gpic: 4
+  caption_workers_synthetic: 2
+  fetch_workers_anime: 8
+  fetch_workers_tar: 8
+  gpic_payload_in_memory: true
+  # Concurrency only: Stage512b's live probe found per-object/blob latency can
+  # starve the slowest rank.  Eight readers/rank retains the same rows/order/bytes.
+  gpic_threads_per_node: 64
+  gpic_source_consistency_mode: strict_path
+  # Immutable Stage512a-catalog view over the byte-identical shared GPIC payload.
+  # This is the A-specific dense row-id index, not Stage512b's re-keyed index.
+  gpic_payload_backend: offline_gpic_blob_v1
+  offline_gpic_blob_root: /fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_gpic_blob_stage512a_v1/stage512a-gpic-payload-reuse-v1
+  gpic_blob_manifest_sha256: c9365753356f942caca1ea622c788ae5d05db320ecfa5804595b25ac8af3a648
+  # 680 blobs: open each once and retain the FD (8 ranks x 680 < RLIMIT_NOFILE).
+  gpic_blob_fd_cache_size: 680
+
+  buffer_size: 4096
+  queue_size: 128
+  min_fill: 64
+  first_fill_policy: all_min
+  first_fill_timeout_s: 180
+  fetch_workers: 8
+  producer_native_io_serial: false
+  drain_mode: proportional
+  textatlas_local_root: /local/evan/textatlas5m
+  anime_nrows: 20000
+  anime_cache_dir: /local/evan/anime_img_cache
+  stats_cache: /fsx/evan/mot_code/data_analysis/outputs/monet_global_stats_rich_v1.json
+  tokenizer_path: /fsx/models/Qwen3-VL-2B-Instruct
+  use_latent_cache: false
+
+  crop_v_anchor:
+    anime: 0.15
+
+  multi_ar:
+    enabled: true
+    assignment_mode: offline_weighted_band_v1
+    bucket_mode: adaptive
+    target_area: 262144
+    divisor: 16
+    adaptive_no_upscale: true
+    adaptive_min_area_ratio: 0.75
+    adaptive_max_aspect: 4.0
+    bucket_buffer_size: 256
+    bucket_min_fill: 1
+    bucket_wait_timeout_s: 180
+    bucket_wait_native_s: 0
+    bucket_prob_floor: 0.005
+    warmup_exposure_images: 0
+    warmup_steps: 0
+    square_only_domains: [synthetic, textatlas]
+
+sigma_sampling:
+  dist: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  shift: 1.0
+
+optimizer:
+  name: torch.optim.AdamW
+  params:
+    lr: 1.732051e-4
+    weight_decay: 0.0
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+
+scheduler:
+  num_warmup_steps: 500
+  decay: constant
+
+trainer:
+  # Defense-in-depth: the formal worker fence must not become inactive if a
+  # launcher bug drops all of its MOT_* identity environment variables.
+  formal_launch_required: true
+  seed: 42
+  amp_dtype: bfloat16
+  batch_size: 32
+  max_steps: 125000
+  max_exposure_images: 256000000
+  gradient_clip_val: 1.0
+  log_every: 10
+  dataline_metrics_every: 50
+  # Operational recovery improvement, not a scientific variable.  30,000 is a
+  # multiple of 1,500, because periodic snapshots are emitted inside the ordinary
+  # checkpoint branch.
+  checkpoint_steps: 1500
+  # Permanently retain four independently resumable evaluation identities.
+  # Full-state hardlinks avoid a last.pt -> step_N crash window and permit the
+  # snapshot repair gate to prove inode identity after any restart.
+  checkpoint_keep_every: 30000
+  checkpoint_keep_max: 4
+  checkpoint_keep_format: full
+  # Create-once destination.  It MUST NOT exist on the first submission.  JCC
+  # retries reuse it only under the same stable RUN_ID.
+  checkpoint_dir: /fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_continue_control_rngfix_v1
+  resume: true
+  # Cross-run stage continuation: load A-final weights+EMA+Adam moments, discard
+  # its global_step/scheduler and start this stage at local step 0 with warmup.
+  init_from: /fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_continue_control_rngfix_v1_inputs/a_final_step125000.last.pt
+  init_load_optimizer: true
+  # A-final predates mot_rng_state_v1.  This waiver is permitted for init_from
+  # exactly once; any local last.pt resume must contain and restore the new schema.
+  init_from_rng_policy: legacy_missing_rng
+  skip_distributed_teardown: true
+  force_os_exit_after_train: true
+  gc_gen2_threshold: 200
+  gc_freeze_after_steps: 50
+  gc_refreeze_every: 10000
+  # Measurement only; no GC policy change.  Retain cross-rank data-wait evidence.
+  gc_pause_probe: true
+  debug_step_trace: false
+  debug_step_trace_dir: null
+  debug_trace_dump_interval: 0
+  batch_ready_barrier: false
+  batch_ready_barrier_dir: null
+  batch_ready_barrier_run_id: null
+  batch_ready_barrier_timeout_s: 300
+  ema:
+    enabled: true
+    decay: 0.9999
+  use_wandb: false
+  wandb_project: mot-pilot-v1
+  wandb_entity: null
+  wandb_mode: offline

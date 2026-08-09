@@ -42,6 +42,7 @@ import warnings
 from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
@@ -93,6 +94,10 @@ from training.dataline_offline.anime_native_upsample_exceptions_weighted_v1 impo
     AnimeNativeUpsampleMismatchError,
     apply_anime_native_upsample_exception,
     bind_anime_native_upsample_exceptions,
+)
+from training.dataline_offline.anime_native_upsample_exceptions_control_rngfix_v1 import (
+    CLOSURE as _S512A_CONTROL_UPSAMPLE_CLOSURE,
+    bind_stage512a_control_anime_native_upsample_exceptions,
 )
 from training.dataline_offline.anime_native_upsample_exceptions_weighted_512b_v1 import (
     EXPOSURE_COUNT as _S512B_UPSAMPLE_EXPOSURES,
@@ -646,6 +651,47 @@ def _safe_component(value: str) -> str:
     return cleaned[:96] or "plan"
 
 
+def _bind_anime_native_upsample_registry(
+    **binding: Any,
+) -> tuple[Mapping[int, Any], tuple[int, int, int, int] | None]:
+    """Select exactly one plan-bound Anime exception registry.
+
+    Every binder is evaluated eagerly.  This makes profile disjointness an
+    executable invariant: a future identity collision cannot be hidden by a
+    first-nonempty fallback.  ``None`` remains the released Stage512a weighted
+    closure ABI; the fresh control and Stage512b profiles carry their explicit
+    plan horizons into the shared apply path.
+    """
+
+    candidates = (
+        (
+            bind_anime_native_upsample_exceptions(**binding),
+            None,
+            "stage512a-weighted",
+        ),
+        (
+            bind_stage512a_control_anime_native_upsample_exceptions(**binding),
+            _S512A_CONTROL_UPSAMPLE_CLOSURE,
+            "stage512a-control-rngfix-v1",
+        ),
+        (
+            bind_stage512b_anime_native_upsample_exceptions(**binding),
+            _STAGE512B_UPSAMPLE_CLOSURE,
+            "stage512b-anchors-v1",
+        ),
+    )
+    active = tuple(candidate for candidate in candidates if candidate[0])
+    if len(active) > 1:
+        raise AnimeNativeUpsampleBindingError(
+            "anime native-upsample production signals select conflicting "
+            f"profiles: {[candidate[2] for candidate in active]!r}"
+        )
+    if not active:
+        return MappingProxyType({}), None
+    mapping, closure, _name = active[0]
+    return mapping, closure
+
+
 class _VirtualRowDecoder:
     """Decode §9.3 ``base[d] + cellbase[d][B] + local_idx`` row IDs."""
 
@@ -1111,13 +1157,6 @@ class OfflineExactDataset:
                 f"cannot bind frozen image exceptions: {exc}"
             ) from exc
         try:
-            # Both binds are fail-closed on identity and return the empty map for plans
-            # they do not recognise, so consulting the Stage512b registry when the 512a
-            # one declined is a disjoint union, not a fallback that can shadow anything.
-            # Two registries exist because the 512a module's closure checks pin ITS
-            # horizon (125,000) and exposure count; the run that made this necessary
-            # died at plan step 11,270 when the renumbered catalog left the reviewed
-            # exception unreachable (2026-08-05).
             _upsample_bind_kwargs = dict(
                 stage=self.stage,
                 eligibility=self.eligibility,
@@ -1130,21 +1169,12 @@ class OfflineExactDataset:
                     self._row_decoder.decode(row_id)[0]
                 ],
             )
-            self._anime_native_upsample_exceptions = (
-                bind_anime_native_upsample_exceptions(**_upsample_bind_kwargs)
+            (
+                self._anime_native_upsample_exceptions,
+                self._anime_upsample_closure,
+            ) = _bind_anime_native_upsample_registry(
+                **_upsample_bind_kwargs
             )
-            # apply() re-validates the definition against a (exposure_count, step_stop,
-            # world, batch) closure; each registry has its own. None = the 512a module's
-            # globals, preserving the released behaviour bit-for-bit.
-            self._anime_upsample_closure: tuple[int, int, int, int] | None = None
-            if not self._anime_native_upsample_exceptions:
-                self._anime_native_upsample_exceptions = (
-                    bind_stage512b_anime_native_upsample_exceptions(
-                        **_upsample_bind_kwargs
-                    )
-                )
-                if self._anime_native_upsample_exceptions:
-                    self._anime_upsample_closure = _STAGE512B_UPSAMPLE_CLOSURE
         except AnimeNativeUpsampleBindingError as exc:
             raise OfflineLoaderError(
                 f"cannot bind frozen anime native-upsample exceptions: {exc}"

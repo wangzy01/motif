@@ -24,8 +24,17 @@ EXPECTED = (
             "test_partial_binding_fails_closed",
         ),
     ),
+    (
+        "test_stage512a_control_registry_profiles_v1.py",
+        (
+            "test_control_identity_fail_closed",
+            "test_exact_control_bindings_and_selector",
+            "test_legacy_selector_closures_unchanged",
+            "test_sealed_closure_and_mutation_rejection",
+        ),
+    ),
 )
-EXPECTED_EXECUTIONS = 3
+EXPECTED_EXECUTIONS = 7
 
 
 def require(condition: bool, message: str) -> None:
@@ -56,7 +65,7 @@ def main() -> None:
     actual_files = tuple(sorted(path.name for path in TESTS_ROOT.iterdir()))
     require(
         actual_files == expected_files,
-        "curated tests directory exact-two closure drift",
+        "curated tests directory exact-three closure drift",
     )
     root_identity = stat_identity(TESTS_ROOT)
     module_identities: dict[str, tuple[int, int, int, int, int, int, int]] = {}

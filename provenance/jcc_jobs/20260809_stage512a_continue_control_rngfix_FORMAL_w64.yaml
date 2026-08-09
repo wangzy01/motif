@@ -1,0 +1,33 @@
+# TRACKED TEMPLATE ONLY — NEVER SUBMIT THIS FILE DIRECTLY.
+#
+# After the final clean commit, both final GPU gates, and the B120 stop handoff,
+# scripts/render_stage512a_control_formal_release.py creates a detached read-only
+# release worktree plus a create-once resolved YAML/manifest/lineage bundle.  The
+# placeholders below deliberately live outside the commit identity they resolve,
+# avoiding a self-referential EXPECTED_COMMIT.
+name: evan-s512a-cont-rngfix-formal-w64
+description: "Stage512a practical continuation control with rank-specific VAE posterior RNG, exact full-state resume, sealed fresh plan/registry/assets, four permanent full-state hardlink snapshots, generation-scoped W64 rendezvous, and a rank-0 lifetime FSx lease. 8 nodes x 8 H100; 125000 local steps x global batch 2048 = 256M exposures."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 8
+gpuPerWorker: 8
+cpuPerWorker: 80
+memGBPerWorker: 900
+maxRetries: 3
+environments:
+  # These seven values are injected exactly once into an untracked, sealed copy.
+  FORMAL_REPO: "__FORMAL_REPO__"
+  EXPECTED_COMMIT: "__EXPECTED_COMMIT__"
+  EXPECTED_CONFIG_SHA256: "__EXPECTED_CONFIG_SHA256__"
+  RESOLVED_SPEC_PATH: "__RESOLVED_SPEC_PATH__"
+  RELEASE_MANIFEST_PATH: "__RELEASE_MANIFEST_PATH__"
+  TRAINING_LINEAGE_PATH: "__TRAINING_LINEAGE_PATH__"
+  TRAINING_LINEAGE_SHA256: "__TRAINING_LINEAGE_SHA256__"
+
+  # Operator intent has no default. The first submission is fresh; a JCC retry
+  # may promote to effective continue only after exact prior lineage validation.
+  CKPT_DIR: "/fsx/evan/checkpoints/mot_pilot_v1_cleanup_crop/stage512a_continue_control_rngfix_v1"
+  RUN_ID: "stage512a_continue_control_rngfix_v1"
+  RUN_MODE: "fresh"
+  ARRIVAL_WAIT_S: "3600"
+command: |
+  exec bash scripts/stage512a_control_formal_launch.sh

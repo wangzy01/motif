@@ -1,0 +1,211 @@
+name: evan-s512a-ctrl-plan-closure-20260809-v1
+description: "Independent full-256M Stage512a control-plan closure: every block checksum and slot, exact A invariants, TextAtlas/Anime exception coordinates, captionless-MONET zero hits, and a sealed canonical post-publication receipt. CPU only; create-once output; no retries."
+image: 471112743779.dkr.ecr.us-west-2.amazonaws.com/autobuild:py312-torch211-cu129
+numWorkers: 1
+gpuPerWorker: 0
+cpuPerWorker: 32
+memGBPerWorker: 256
+maxRetries: 0
+command: |
+  set -euo pipefail
+  export CUDA_VISIBLE_DEVICES="" LC_ALL=C PYTHONHASHSEED=0 PYTHONUNBUFFERED=1
+  export PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+  export OMP_NUM_THREADS=4 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 ARROW_NUM_THREADS=1
+
+  PY=/fsx/evan/mot_code/venv-gpu/bin/python
+  REPO=/fsx/evan/mot_code_s512a_continue_control_rngfix_v1
+  SCRIPT=$REPO/scripts/offline_arb/audit_stage512a_control_plan_closure_v1.py
+  B=/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop
+  PLAN=$B/offline_arb_plan_stage512a_continue_control_rngfix_v1_w64_256m_seed20260710_20260809
+  OLD_PLAN=$B/offline_arb_plan_stage512a_w64_256m_weighted_v1_20260722
+  CATALOG=$B/offline_arb_catalog_stage512a_v1
+  CONTRACT=/fsx/evan/mot_code/stage512a_weighted_formal_control_20260722v1/weighted_contract_stage512a_v1.json
+  BUILD_ATTEMPT=$B/.stage512a_continue_control_rngfix_v1_plan_attempt.evan-s512a-ctrl-plan-build-20260809-v1-x68j
+  BUILD_SPEC=$REPO/provenance/jcc_jobs/20260809_stage512a_control_plan_build_v1.yaml
+  AUDIT_PARENT=/fsx/evan/audits/stage512a_continue_control_rngfix_v1
+  OUT=$AUDIT_PARENT/plan_closure_v1_20260809
+
+  SCRIPT_SHA=0ca861cfe5d8a6ee1608959795e0f5b949d92d78f2549b2fb2e34d355898a19f
+  IMG_SHA=027b36b7df91098f42441a371d4a46d312bc1e64ca4c4a0b0b1562070f7d8d5c
+  ANIME_SHA=5ec369edb6202d0bccbca0936b1b05d16928e2c63724a8dbf28c4e8fc08f97e9
+  CAPTION_SHA=c5e1f06ef079c815054d30ef932e73ac731264f00446f2284284cedee6d9dbaf
+  BUILD_SPEC_SHA=95bb216e847262ef1545e02cb48d9866af5676876e04a62e1d66d348774a8c66
+  HEADER_SHA=5fbe7ca546d3e77ef37d95bf52c7ded2f9741d0b4377fbadb8b059e9b9a1dce0
+  CHECKSUMS_SHA=aa8283436369f3ddc2f2c7648c28f56cb8b8619b2e87b660f7b2ca29847fc8f0
+  PLAN_HASH=fbb5fcbd91d80daff8dfe89693f38eb3fa6ddeb657d01198df7fcac9cdcd039c
+
+  HOST=$(hostname)
+  NODE_RANK=${HOST##*-}
+  case "$NODE_RANK" in ''|*[!0-9]*) echo "FATAL: malformed node rank"; exit 42;; esac
+  [ "$NODE_RANK" = 0 ] || { echo "FATAL: closure rank is not zero"; exit 42; }
+  test -x "$PY" && git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null
+  mkdir -p "$AUDIT_PARENT"
+  # The final path itself is the atomic exclusive claim. A failed job retains its
+  # evidence here and a later attempt must use a new version, never overwrite it.
+  mkdir "$OUT" || { echo "FATAL: create-once closure output already claimed: $OUT"; exit 45; }
+  chmod 700 "$OUT"
+
+  set +e
+  (
+    set -euo pipefail
+    export PYTHONPATH="$REPO"
+    export PYTHONPYCACHEPREFIX="/local/evan/pycache/${JCC_JOB_ID:-closure}/$HOST"
+    mkdir -p "$PYTHONPYCACHEPREFIX"
+    cd "$REPO"
+
+    check_sha() {
+      local expected=$1 path=$2
+      test -f "$path" && test ! -L "$path" || { echo "FATAL: unsafe/missing $path"; exit 44; }
+      local actual
+      actual=$(sha256sum "$path" | awk '{print $1}')
+      test "$actual" = "$expected" || { echo "FATAL: SHA drift $path: $actual != $expected"; exit 44; }
+    }
+    check_sha "$SCRIPT_SHA" "$SCRIPT"
+    check_sha "$IMG_SHA" training/dataline_offline/image_exceptions_v1.py
+    check_sha "$ANIME_SHA" training/dataline_offline/anime_native_upsample_exceptions_weighted_v1.py
+    check_sha "$CAPTION_SHA" training/dataline_offline/caption_exceptions_v1.py
+    check_sha "$BUILD_SPEC_SHA" "$BUILD_SPEC"
+    check_sha "$HEADER_SHA" "$PLAN/header.json"
+    check_sha "$CHECKSUMS_SHA" "$PLAN/checksums.json"
+    check_sha 51a5f0904987a751b54842633d2968ea7f6485307850858d9472319c15748d1d "$CATALOG/header.json"
+    check_sha c228f8b8400c4f96033431816b650d6e7093b3bf8e164018d22e694c60b96c38 "$CONTRACT"
+    check_sha 72ea4fdf042b21f72f7bb2940863bb86f4d5335cd77feb8f8dc1606e6f349c20 "$BUILD_ATTEMPT/PLAN_RECEIPT.json"
+    check_sha d1cd70c51bb9edf2564f95fb5fa17141d95ac783b3bcb4dd4a785bbf614a972b "$BUILD_ATTEMPT/planner_input.json"
+    check_sha 966649f082b5231664e5e8834e78493e3e1ea6e7a477ee2093d2926005d13244 "$BUILD_ATTEMPT/validate_report.json"
+
+    "$PY" "$SCRIPT" \
+      --plan-root "$PLAN" \
+      --old-plan-root "$OLD_PLAN" \
+      --catalog-root "$CATALOG" \
+      --contract "$CONTRACT" \
+      --out "$OUT/CLOSURE_REPORT.json"
+
+    "$PY" - "$PLAN" "$BUILD_ATTEMPT" "$BUILD_SPEC" "$OUT/CLOSURE_REPORT.json" \
+      "$OUT/CANONICAL_PLAN_RECEIPT.json" "$SCRIPT" <<'PYEOF'
+  import hashlib, json, os, pathlib, sys
+
+  plan, build, build_spec, closure_path, out, script = map(pathlib.Path, sys.argv[1:])
+  def sha(path):
+      h = hashlib.sha256()
+      with path.open("rb") as handle:
+          for chunk in iter(lambda: handle.read(8 << 20), b""):
+              h.update(chunk)
+      return h.hexdigest()
+
+  header = json.loads((plan / "header.json").read_text())
+  checksums = json.loads((plan / "checksums.json").read_text())
+  original = json.loads((build / "PLAN_RECEIPT.json").read_text())
+  validation = json.loads((build / "validate_report.json").read_text())
+  closure = json.loads(closure_path.read_text())
+  assert validation["overall"] == "PASS"
+  assert original["status"] == closure["status"] == "PASS"
+  assert header["plan_hash"] == closure["plan_hash"] == original["plan_hash"]
+  assert header["plan_hash"] == "fbb5fcbd91d80daff8dfe89693f38eb3fa6ddeb657d01198df7fcac9cdcd039c"
+  assert sha(plan / "header.json") == checksums["header"] == closure["header_sha256"]
+  assert sha(script) == closure["source_authorities"]["script_sha256"]
+  blocks = sorted((plan / "blocks").iterdir())
+  files = [plan / "header.json", plan / "checksums.json", *blocks]
+  assert len(blocks) == 123 and len(files) == closure["plan_file_count"] == 125
+  assert sum(path.stat().st_size for path in files) == closure["plan_bytes"]
+  assert all(path.is_file() and not path.is_symlink() for path in files)
+  text_counts = {
+      key: value["realized_exposure_count"]
+      for key, value in closure["textatlas_jpeg_repairs"].items()
+  }
+  anime_counts = {
+      key: value["realized_exposure_count"]
+      for key, value in closure["anime_native_upsample"].items()
+  }
+  monet_counts = {
+      key: value["realized_exposure_count"]
+      for key, value in closure["captionless_monet_zero_hit_rows"].items()
+  }
+  assert text_counts == {"68973396": 3, "69010633": 3, "70063978": 3}
+  assert anime_counts == {"11163647": 6}
+  assert set(monet_counts.values()) == {0} and len(monet_counts) == 6
+  payload = {
+      "schema": "stage512a_continue_control_plan_canonical_receipt_v1",
+      "status": "PASS",
+      "canonical_plan_root": str(plan),
+      "plan_id": header["plan_id"],
+      "plan_hash": header["plan_hash"],
+      "header_sha256": sha(plan / "header.json"),
+      "checksums_sha256": sha(plan / "checksums.json"),
+      "block_manifest_sha256": header["hashes"]["blocks_manifest_sha256"],
+      "plan_file_count": len(files),
+      "plan_bytes": sum(path.stat().st_size for path in files),
+      "world_size": header["world_size"],
+      "per_rank_bs": header["per_rank_bs"],
+      "total_steps": header["total_steps"],
+      "total_exposures": header["total_exposures"],
+      "kept_bucket_count": closure["kept_bucket_count"],
+      "realized_domain_exposures": closure["realized_domain_exposures"],
+      "weighted_contract_sha256": header["weighted_contract_sha256"],
+      "source_commit": original["source_commit"],
+      "producer_sources": header["producer_sources"],
+      "build_job": "evan-s512a-ctrl-plan-build-20260809-v1-x68j",
+      "build_spec": {"path": str(build_spec), "sha256": sha(build_spec)},
+      "original_build_receipt": {
+          "path": str(build / "PLAN_RECEIPT.json"),
+          "sha256": sha(build / "PLAN_RECEIPT.json"),
+          "note": "attempt_plan_root in the original pre-publication receipt was moved; this canonical receipt binds the published path",
+      },
+      "planner_input": {
+          "path": str(build / "planner_input.json"),
+          "sha256": sha(build / "planner_input.json"),
+      },
+      "full_rebuild_validation": {
+          "path": str(build / "validate_report.json"),
+          "sha256": sha(build / "validate_report.json"),
+          "overall": validation["overall"],
+      },
+      "full_256m_closure": {
+          "path": str(closure_path),
+          "sha256": sha(closure_path),
+          "textatlas_exposure_counts": text_counts,
+          "anime_exposure_counts": anime_counts,
+          "captionless_monet_exposure_counts": monet_counts,
+      },
+      "runtime_reader_all_checksums": original["runtime_reader_all_checksums"],
+      "deterministic_double_build": original["deterministic_full_rebuild"],
+      "fresh_plan_semantics": {
+          "seed": header["seed"],
+          "interpretation": "preregistered_fresh_seed_not_sequence_paired_to_stage512b",
+          "not_a_strict_rng_single_variable_arm": True,
+          "changed_lineages": [
+              "offline row permutation",
+              "plan_id-keyed caption-slot selection",
+              "plan-coordinate-keyed crop/augmentation realization",
+          ],
+      },
+  }
+  raw = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+  fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+  with os.fdopen(fd, "wb") as handle:
+      handle.write(raw); handle.flush(); os.fsync(handle.fileno())
+  print("STAGE512A_CONTROL_CANONICAL_PLAN_RECEIPT_PASS", sha(out), flush=True)
+  PYEOF
+
+    # Source files must remain exactly the ones that were scanned/imported.
+    check_sha "$SCRIPT_SHA" "$SCRIPT"
+    check_sha "$IMG_SHA" training/dataline_offline/image_exceptions_v1.py
+    check_sha "$ANIME_SHA" training/dataline_offline/anime_native_upsample_exceptions_weighted_v1.py
+    check_sha "$CAPTION_SHA" training/dataline_offline/caption_exceptions_v1.py
+    echo "STAGE512A_CONTROL_PLAN_CLOSURE_JOB_PASS"
+  ) 2>&1 | tee "$OUT/job.log"
+  PIPE_RC=${PIPESTATUS[0]}
+  set -e
+
+  if [ "$PIPE_RC" -ne 0 ]; then
+    printf 'FAILED rc=%s\n' "$PIPE_RC" > "$OUT/_FAILED"
+    chmod 444 "$OUT"/* 2>/dev/null || true
+    chmod 555 "$OUT"
+    exit "$PIPE_RC"
+  fi
+  RECEIPT_SHA=$(sha256sum "$OUT/CANONICAL_PLAN_RECEIPT.json" | awk '{print $1}')
+  printf '%s\n' "$RECEIPT_SHA" > "$OUT/_SUCCESS"
+  chmod 444 "$OUT"/*
+  chmod 555 "$OUT"
+  test "$(stat -Lc %a "$OUT")" = 555
+  test "$(cat "$OUT/_SUCCESS")" = "$(sha256sum "$OUT/CANONICAL_PLAN_RECEIPT.json" | awk '{print $1}')"
+  echo "SEALED_STAGE512A_CONTROL_PLAN_CLOSURE $OUT receipt=$RECEIPT_SHA"

@@ -39,6 +39,7 @@ from training.checkpoint import (  # noqa: F401  re-export 供 scripts/experimen
     init_from_checkpoint,
     load_checkpoint,
     save_checkpoint,
+    should_write_final_checkpoint,
 )
 from training.auto_resume_reconcile import (
     auto_resume_reconcile_enabled,
@@ -46,6 +47,19 @@ from training.auto_resume_reconcile import (
 )
 from training.config_schema import validate_config
 from training.diagnostics import BatchReadyBarrier, StepTraceDiagnostics
+from training.formal_boot import (
+    EXPECTED_BOOT_MODE_ENV,
+    EXPECTED_RUN_LINEAGE_ENV,
+    resolve_checkpoint_boot_branch,
+    resolve_expected_run_lineage_sha256,
+    verify_expected_boot_mode,
+)
+from training.rng_state import (
+    RNG_STATE_SCHEMA,
+    assert_live_rng_matches_synchronized,
+    restore_local_rng_state_synchronized,
+    verify_initial_vae_rng_uniqueness,
+)
 
 
 def get_class(name: str):
@@ -209,6 +223,20 @@ def main():
     t0 = time.perf_counter()
     model = get_class(config.model_cls)(config=config)
     model.to(device)
+    # Do not rank-offset the global manual_seed above: FSDP initialization must
+    # remain identical.  Only explicit training streams are rank-derived, and
+    # the VAE stream is created after .to() on the exact posterior device.
+    model.configure_training_rng(global_rank=rank, device=device)
+    vae_rng_unique = verify_initial_vae_rng_uniqueness(
+        model,
+        rank=rank,
+        is_dist=is_dist,
+    )
+    log(
+        "[rng] initialized streams "
+        f"vae_device={model.training_rng_device()} "
+        f"vae_unique={vae_rng_unique}/{world_size}"
+    )
     if is_dist:
         from torch.distributed.fsdp import MixedPrecisionPolicy
         mp_dtype = torch.bfloat16 if want_bf16 else torch.float32
@@ -415,14 +443,43 @@ def main():
     if use_ema:
         model.init_ema(float(ema_cfg.get("decay", 0.9999)))
 
+    # Resolve the immutable formal lineage before loading any local checkpoint.
+    # This catches a missing/malformed/rank-local environment binding before
+    # model/optimizer state can be mutated by a wrong but shape-compatible last.pt.
+    expected_boot_mode = os.environ.get(EXPECTED_BOOT_MODE_ENV)
+    expected_run_lineage = resolve_expected_run_lineage_sha256(is_dist=is_dist)
+    if is_dist:
+        expected_modes = [None] * world_size
+        dist.all_gather_object(expected_modes, expected_boot_mode)
+        if len(set(expected_modes)) != 1:
+            raise RuntimeError(
+                f"{EXPECTED_BOOT_MODE_ENV} differs across ranks: {expected_modes}"
+            )
+    if expected_boot_mode is not None and expected_run_lineage is None:
+        raise RuntimeError(
+            f"formal boot requires {EXPECTED_RUN_LINEAGE_ENV}"
+        )
+    selected_boot_branch = resolve_checkpoint_boot_branch(
+        ckpt_path,
+        resume=bool(config.trainer.get("resume", True)),
+        init_from=str(config.trainer.get("init_from") or "") or None,
+        expected_mode=expected_boot_mode,
+        is_dist=is_dist,
+    )
+
     global_step = 0
     resumed_from_checkpoint = False
-    if os.path.exists(ckpt_path) and bool(config.trainer.get("resume", True)):
+    pending_resume_rng_state = None
+    actual_boot_mode = "none"
+    if selected_boot_branch == "continue":
         # 同分辨率续训/崩溃恢复：完整恢复 model+optimizer+scheduler+global_step（逐字不变）。
-        global_step = load_checkpoint(ckpt_path, model, optimizer, scheduler, is_dist, config)
+        global_step, pending_resume_rng_state = load_checkpoint(
+            ckpt_path, model, optimizer, scheduler, is_dist, config
+        )
         resumed_from_checkpoint = True
+        actual_boot_mode = "continue"
         log(f"[train] resumed from {ckpt_path} at step {global_step}")
-    elif config.trainer.get("init_from"):
+    elif selected_boot_branch == "fresh":
         # 跨分辨率【阶段切换】（gated）：从上一阶段 final ckpt 载权重(+optimizer 动量)，重置 step=0、
         # 用本阶段自己的 scheduler 从头 re-warmup（设计 §6）。触发条件 = NOT(本地 last.pt 存在 AND resume)：
         #   ① 本地无 last.pt（首次启动新阶段，常态）；或 ② 本地有 last.pt 但 resume=false（显式弃进度、从上阶段重来）。
@@ -431,9 +488,29 @@ def main():
         load_opt = bool(config.trainer.get("init_load_optimizer", True))
         if os.path.exists(ckpt_path):                      # 仅 resume=false 才会走到这（②）：本地有进度却仍 init_from → 大声告警，防误弃
             log(f"[train] ⚠️ 本地存在 {ckpt_path} 但 resume=false：将从 init_from 重置 step=0，丢弃本地 last.pt 进度（如非本意请设 resume=true）")
-        init_from_checkpoint(init_path, model, optimizer, is_dist, config, load_optimizer=load_opt)
+        init_rng_policy = init_from_checkpoint(
+            init_path,
+            model,
+            optimizer,
+            is_dist,
+            config,
+            load_optimizer=load_opt,
+        )
         global_step = 0
+        actual_boot_mode = "fresh"
+        if init_rng_policy == "legacy_missing_rng":
+            log(
+                "[rng] init_from legacy_missing_rng accepted; source RNG not inherited; "
+                "new stage fresh lineage"
+            )
+        else:
+            log(f"[rng] init_from source_rng_policy={init_rng_policy}; source RNG not inherited")
         log(f"[train] init_from {init_path} (load_optimizer={load_opt}); step 重置为 0，scheduler 全新 re-warmup")
+
+    # A loaded last.pt is already durable at this exact step.  Periodic saves
+    # update this marker so a terminal step divisible by checkpoint_steps is
+    # not serialized again and detached from its permanent hard-link anchor.
+    last_checkpoint_step = global_step if resumed_from_checkpoint else None
 
     # FORMAL bounded auto-resume (explicit env gate): every rank has completed
     # checkpoint load before rank 0 validates metrics.  Rank 0 preserves the
@@ -520,10 +597,6 @@ def main():
             raise RuntimeError("auto-resume reconciliation failed") from reconcile_error
         if is_main:
             log(f"[auto-resume] reconciliation={json.dumps(reconcile_result, sort_keys=True)}")
-    # multi-AR（Phase2b）：把续训全局步注入 dataset → square warmup 按全局步判定（防 resume 重跑 warmup）。
-    # gated：仅 CompleteV1Dataset 有此方法且 multi_ar.enabled 时生效；其它 store/非 multi_ar 为 no-op。
-    if hasattr(dataset, "set_start_step"):
-        dataset.set_start_step(global_step)
     steps_at_launch = global_step               # gc_freeze_after_steps 按【本次进程启动后的步数】计（resume 兼容）
 
     # wandb（可选）：resume 之后 init，使 run_id 续接 / 步数对齐
@@ -725,6 +798,55 @@ def main():
             "gpic_allrank_health_snapshot_errors": float(matrix[:, -1].sum().item()),
         }
 
+    # ------------------------- RNG_COMMIT_POINT ------------------------- #
+    # Resume-only startup work above (metrics reconcile, WandB init, file
+    # setup) may consume global RNG.  Restore once, as the final action before
+    # dataset seek / first next(loader), then verify the requested formal boot
+    # branch.  Fresh init_from intentionally keeps its new stage-local lineage.
+    if resumed_from_checkpoint:
+        if pending_resume_rng_state is None:
+            raise RuntimeError("resume loaded no pending per-rank RNG state")
+        restore_local_rng_state_synchronized(
+            pending_resume_rng_state,
+            model,
+            is_dist=is_dist,
+        )
+        log(
+            f"[rng] restored checkpoint RNG schema={RNG_STATE_SCHEMA} "
+            f"rank={rank} world_size={world_size}"
+        )
+    elif pending_resume_rng_state is not None:
+        raise RuntimeError("fresh boot unexpectedly received resume RNG state")
+
+    if expected_boot_mode is not None:
+        if bool(config.model.get("rank_independent_seed", False)):
+            raise RuntimeError(
+                "formal boot forbids model.rank_independent_seed=true; "
+                "VAE posterior streams must be global-rank-specific"
+            )
+        marker = verify_expected_boot_mode(
+            expected_boot_mode,
+            actual=actual_boot_mode,
+            global_step=global_step,
+            init_from=str(config.trainer.get("init_from") or "") or None,
+            checkpoint_path=ckpt_path,
+        )
+        log(marker)
+
+    # multi-AR（Phase2b）：把续训全局步注入 dataset → square warmup 按全局步判定（防 resume 重跑 warmup）。
+    # gated：仅 CompleteV1Dataset 有此方法且 multi_ar.enabled 时生效；其它 store/非 multi_ar 为 no-op。
+    if hasattr(dataset, "set_start_step"):
+        dataset.set_start_step(global_step)
+    if resumed_from_checkpoint:
+        assert_live_rng_matches_synchronized(
+            pending_resume_rng_state,
+            model,
+            rank=rank,
+            world_size=world_size,
+            is_dist=is_dist,
+            context="formal boot assertion and dataset.set_start_step",
+        )
+
     t_iter = time.perf_counter()
     while global_step < max_steps:
         trace(global_step, "iter_begin", max_steps=max_steps)
@@ -849,16 +971,22 @@ def main():
         if ckpt_every > 0 and global_step % ckpt_every == 0:
             trace(global_step, "before_checkpoint")
             save_checkpoint(ckpt_path, model, optimizer, scheduler, global_step, is_dist, rank, config)
+            last_checkpoint_step = global_step
             log(f"[train] checkpoint saved at step {global_step} -> {ckpt_path}")
             trace(global_step, "after_checkpoint")
 
     # 收尾 checkpoint：默认存（正式训练需要）；调试/短跑用真 config 时可设
     # trainer.save_final=false，避免把 ~20GB（含 optimizer+EMA）误写到 /fsx。
     trace(global_step, "loop_exit")
-    if bool(config.trainer.get("save_final", True)):
+    if bool(config.trainer.get("save_final", True)) and should_write_final_checkpoint(
+        global_step, last_checkpoint_step
+    ):
         trace(global_step, "before_final_checkpoint")
         save_checkpoint(ckpt_path, model, optimizer, scheduler, global_step, is_dist, rank, config)
+        last_checkpoint_step = global_step
         trace(global_step, "after_final_checkpoint")
+    elif bool(config.trainer.get("save_final", True)):
+        log(f"[train] final checkpoint already durable at step {global_step}; skip duplicate save")
     elif is_main:
         log("[train] save_final=false → 跳过收尾 checkpoint")
     if mf is not None:

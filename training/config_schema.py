@@ -235,6 +235,7 @@ SCHEMA = {
         "resume": bool,
         "init_from": NO_TYPECHECK,             # str 或 null：跨分辨率阶段切换的上一阶段 final ckpt 路径；仅本地无 last.pt 时触发（resume 优先），载权重(+optimizer 动量)、重置 step、scheduler 全新 re-warmup
         "init_load_optimizer": bool,           # init_from 时是否继承 optimizer 动量（默认 true，设计 §6 要继承 Adam moment；只继承动量, 超参用本阶段 config）
+        "init_from_rng_policy": str,           # legacy_missing_rng：仅供经审计的旧A-final跨stage初始化；同stage resume 永不读取此例外
         "allow_unsafe_init_from_no_fp": bool,  # init_from 缺 ablation_fp 时是否放行（默认 false=硬报错；显式 true 跳过, 须自行确认 arch 一致）
         "save_final": bool,
         "skip_distributed_teardown": bool,

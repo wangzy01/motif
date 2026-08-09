@@ -157,6 +157,7 @@ def main() -> int:
         "image_exceptions_v1.py",
         "caption_exceptions_v1.py",
         "anime_native_upsample_exceptions_weighted_v1.py",
+        "anime_native_upsample_exceptions_control_rngfix_v1.py",
         "anime_native_upsample_exceptions_weighted_512b_v1.py",
     }
     pattern = re.compile(r"(exception|repair)", re.I)

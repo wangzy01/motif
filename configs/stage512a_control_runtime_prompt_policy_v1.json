@@ -1,0 +1,95 @@
+{
+  "schema": "stage512a_control_runtime_prompt_policy_v1",
+  "policy_id": "stage512a-continue-control-rngfix-v1-runtime-prompt-smoke-20260809",
+  "config": {
+    "path": "configs/stage512a_continue_control_rngfix_v1.yaml",
+    "sha256": "0c8d421a2e060fcb65b72eaf1974ca7c8b2975bfdddd7b7df55a4e16f5eb9364"
+  },
+  "execution": {
+    "rank": 0,
+    "world_size": 64,
+    "gpic_payload_backend": "source_files_v1",
+    "gpic_payload_in_memory": false,
+    "image_payload_reads": 0,
+    "fresh_dataset_constructions": 2
+  },
+  "assets": {
+    "plan_root": "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_plan_stage512a_continue_control_rngfix_v1_w64_256m_seed20260710_20260809",
+    "plan_hash": "fbb5fcbd91d80daff8dfe89693f38eb3fa6ddeb657d01198df7fcac9cdcd039c",
+    "plan_header_sha256": "5fbe7ca546d3e77ef37d95bf52c7ded2f9741d0b4377fbadb8b059e9b9a1dce0",
+    "plan_checksums_sha256": "aa8283436369f3ddc2f2c7648c28f56cb8b8619b2e87b660f7b2ca29847fc8f0",
+    "catalog_root": "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_catalog_stage512a_v1",
+    "catalog_hash": "370b1679e8c5670338a03ba4c6972cdbf69fa5068fc35108bf646b2d64642331",
+    "catalog_header_sha256": "51a5f0904987a751b54842633d2968ea7f6485307850858d9472319c15748d1d",
+    "sampling_config_path": "/fsx/evan/mot_code/data_analysis/configs/t5_sampling_redesign_v1.json",
+    "sampling_config_sha256": "07a0b46fa9ebb840ecf7f97cc7fccc0ec68e44c47368ae13c450bcfe81a4fd48",
+    "caption_sidecar_root": "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_caption_sidecar_stage512a_v1",
+    "caption_sidecar_header_sha256": "72fe0c4d5b5258a1a6320a6ab57f422cd815dd26a8a4a29594fefdd7abfa7224",
+    "anime_freq_root": "/fsx/evan/mot_code/data_analysis/outputs/mot_pilot_v1_cleanup_crop/offline_arb_animefreq_stage512a_v1",
+    "anime_freq_header_sha256": "4c2cc28f7b161b9f2a037d66c8f54405521f542ea81dfa1b0198e697cf7c15d4"
+  },
+  "runtime_files": {
+    "training/dataline/caption_build.py": "d7309a054ff817e9a91767aa6ee3015f180b41721fb855eabb53d9c6f0520049",
+    "training/dataline/complete_dataset.py": "f590cc54d767b22cdfcae63bdd469a3bd2e4e8393abec094caee5ade5a915ac3",
+    "training/dataline/config.py": "7541f803002d15566175b4958bae6ed09e437c9e030fed46aad9394a626fe5cb",
+    "training/dataline/manifest_index.py": "63a1a4c7bbb2baff4e6132d6c291d585e84428fd4f137be1c621bcb55858bb99",
+    "training/dataline_offline/anime_native_upsample_exceptions_control_rngfix_v1.py": "5965da3271b454baac78aef03707a167487946dad5fa2c58de2688cc47a42a5e",
+    "training/dataline_offline/anime_native_upsample_exceptions_weighted_v1.py": "5ec369edb6202d0bccbca0936b1b05d16928e2c63724a8dbf28c4e8fc08f97e9",
+    "training/dataline_offline/caption_exceptions_v1.py": "c5e1f06ef079c815054d30ef932e73ac731264f00446f2284284cedee6d9dbaf",
+    "training/dataline_offline/caption_sidecar.py": "4d02517f924f033ae509a5e25a8c004959d3ea3141cbae231cb45da46e0c532a",
+    "training/dataline_offline/image_exceptions_v1.py": "42af64566468bb64bad5499713374f21addf9050e5d3b2bf22397131b7d8aa8e",
+    "training/dataline_offline/offline_dataset.py": "8a6e9f4fe40ebe6bdef2d8e09866acfe90985e8e4786bf57e160e6ba357a6e83",
+    "training/dataline_offline/stage512a_control_registry_closure_v1.py": "8c3a66b5d0753233d97f7e63ff0297db8b01ed68b3a63f890fd92b6d07668545",
+    "training/dataline_offline/weighted_plan_reader_v1.py": "6dc2374948721670aa5023dd2f505ffe38b6a022c2175bab186546daba056345"
+  },
+  "cases": [
+    {
+      "case_id": "anime-step0-rank0-slot0",
+      "step": 0,
+      "rank": 0,
+      "slot": 0,
+      "row_id": 11547010,
+      "uid": "anime:cGl4aXZfY2h1bmtfMDU2MjEkMzAyNDM2NjU5MiQ1OTE2ODg",
+      "domain": "anime",
+      "bucket_idx": 182,
+      "bucket_hw": [512, 512],
+      "planned_caption_band": -1,
+      "realized_caption_band": -1,
+      "cfg_protected": true,
+      "prompt_utf8_length": 512,
+      "prompt_sha256": "41a87f02e2989d678f178556d9306bcfafb59e12adb03117870b17a39981802f"
+    },
+    {
+      "case_id": "gpic-step0-rank0-slot12",
+      "step": 0,
+      "rank": 0,
+      "slot": 12,
+      "row_id": 50500879,
+      "uid": "gpic:bd8e5e23f4ac5277d415050698d46b6d008544738e9db6ccd1ffa6891377d1cb",
+      "domain": "gpic",
+      "bucket_idx": 182,
+      "bucket_hw": [512, 512],
+      "planned_caption_band": 3,
+      "realized_caption_band": 3,
+      "cfg_protected": false,
+      "prompt_utf8_length": 722,
+      "prompt_sha256": "807f63bd4e61e82901d0486e42ab26e031bbc34f432c77ab78378b4abbc8456e"
+    },
+    {
+      "case_id": "textatlas-step0-rank0-slot25",
+      "step": 0,
+      "rank": 0,
+      "slot": 25,
+      "row_id": 69666878,
+      "uid": "StyledTextSynth:bf44d998-f55e-4f9a-a5c4-b9e88da00ad2.png",
+      "domain": "textatlas",
+      "bucket_idx": 182,
+      "bucket_hw": [512, 512],
+      "planned_caption_band": -1,
+      "realized_caption_band": -1,
+      "cfg_protected": false,
+      "prompt_utf8_length": 850,
+      "prompt_sha256": "a537343498dbb0b685279c8336c183511706527f1f5a96a2c6b66d5e703b8996"
+    }
+  ]
+}

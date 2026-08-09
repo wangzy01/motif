@@ -68,10 +68,11 @@ class MoTT2IModel(nn.Module):
         # rank_independent_seed=true：强制各 rank 同 seed（同噪声/同 dropout）。仅用于
         # FSDP2 多卡 vs 单卡的严格数值一致性验证（2卡平均梯度=1卡 → loss 轨迹应吻合）；
         # 真实 DP 训练保持 false（各 rank 不同噪声 = 梯度更多样）。
-        rank = 0 if bool(mcfg.get("rank_independent_seed", False)) else \
-            (dist.get_rank() if dist.is_initialized() else 0)
-        self.dropout_generator = torch.Generator().manual_seed(seed + rank * 1_000_003 + 11)
-        self.diffusion_generator = torch.Generator().manual_seed(seed + rank * 1_000_003 + 23)
+        self._rng_base_seed = seed
+        self._rng_global_rank = dist.get_rank() if dist.is_initialized() else 0
+        self._rng_rank_independent = bool(mcfg.get("rank_independent_seed", False))
+        self._rng_rank_stride = 1_000_003
+        self._rng_stream_offsets = {"dropout": 11, "diffusion": 23, "vae": 37}
 
         # ----- tokenizer ----- #
         tok_path = mcfg.get("tokenizer_path") or mcfg.get("pretrained_path")
@@ -83,6 +84,10 @@ class MoTT2IModel(nn.Module):
         # ----- VAE ----- #
         self.vae = build_vae(config.get("vae"))
         self.latent_channels = int(self.vae.latent_channels)
+        # Constructor-time default is CPU.  train.py calls this again *after*
+        # model.to(device), which is required because torch.Generator is not a
+        # Module buffer and does not migrate with .to().
+        self.configure_training_rng(global_rank=self._rng_global_rank, device=torch.device("cpu"))
         patch_dim = self.latent_channels * self.patch_size**2
 
         # ----- backbone ----- #
@@ -126,6 +131,64 @@ class MoTT2IModel(nn.Module):
     # ------------------------------------------------------------------ #
     # 构建 / 加载
     # ------------------------------------------------------------------ #
+    def configure_training_rng(self, *, global_rank: int, device: torch.device | str) -> None:
+        """Create explicit streams without touching PyTorch's global RNG.
+
+        Dropout/diffusion deliberately retain their historical CPU streams so
+        this control run changes only the broken VAE posterior stream.  The VAE
+        stream is created on the exact live posterior device.
+        """
+        global_rank = int(global_rank)
+        if global_rank < 0:
+            raise ValueError(f"global_rank must be non-negative, got {global_rank}")
+        if dist.is_initialized() and global_rank != dist.get_rank():
+            raise RuntimeError(
+                f"training RNG global_rank={global_rank} differs from process-group rank={dist.get_rank()}"
+            )
+        device = torch.device(device)
+        if device.type == "cuda" and device.index is None:
+            device = torch.device("cuda", torch.cuda.current_device())
+        if device.type not in ("cpu", "cuda"):
+            raise ValueError(f"unsupported VAE RNG device: {device}")
+        vae_ref = next(self.vae.parameters(), None)
+        if vae_ref is not None and vae_ref.device != device:
+            raise RuntimeError(
+                f"configure_training_rng must run after model.to(device): "
+                f"VAE={vae_ref.device}, requested={device}"
+            )
+
+        effective_rank = 0 if self._rng_rank_independent else global_rank
+        seed_base = self._rng_base_seed + effective_rank * self._rng_rank_stride
+        self.dropout_generator = torch.Generator(device="cpu").manual_seed(
+            seed_base + self._rng_stream_offsets["dropout"]
+        )
+        self.diffusion_generator = torch.Generator(device="cpu").manual_seed(
+            seed_base + self._rng_stream_offsets["diffusion"]
+        )
+        self.vae_generator = torch.Generator(device=device).manual_seed(
+            seed_base + self._rng_stream_offsets["vae"]
+        )
+        self._rng_global_rank = global_rank
+        self._training_rng_device = device
+
+    def training_rng_generators(self) -> dict[str, torch.Generator]:
+        return {
+            "dropout": self.dropout_generator,
+            "diffusion": self.diffusion_generator,
+            "vae": self.vae_generator,
+        }
+
+    def training_rng_contract(self) -> dict:
+        return {
+            "base_seed": self._rng_base_seed,
+            "rank_independent_seed": self._rng_rank_independent,
+            "rank_stride": self._rng_rank_stride,
+            "stream_offsets": dict(self._rng_stream_offsets),
+        }
+
+    def training_rng_device(self) -> torch.device:
+        return self._training_rng_device
+
     @staticmethod
     def _build_text_config(mcfg) -> Qwen3VLTextConfig:
         pretrained_path = mcfg.get("pretrained_path")
@@ -236,12 +299,15 @@ class MoTT2IModel(nn.Module):
             if isinstance(moments, list):
                 moments = torch.stack(moments, dim=0)
             moments = moments.to(next(self.model.parameters()).device)
-            return self.vae.moments_to_model_space(moments)
+            return self.vae.moments_to_model_space(
+                moments,
+                generator=self.vae_generator,
+            )
         pixels = batch["pixels"]
         if isinstance(pixels, list):
             pixels = torch.stack(pixels, dim=0)
         pixels = pixels.to(next(self.model.parameters()).device)
-        return self.vae.encode(pixels.float())
+        return self.vae.encode(pixels.float(), generator=self.vae_generator)
 
     # ----- patchify（Qwen-Image/FLUX 同款 2x2 pack，复制自 naifu）----- #
     @staticmethod
